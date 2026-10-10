@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="YouTube AI Analyzer 개인용 분석 라이브러리">
+  <meta name="theme-color" content="#101d2b">
+  <title>YouTube AI Analyzer | Insight Library</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <a class="brand" href="#analyze"><div class="brand-mark">▶</div><div><strong>YOUTUBE <span>AI</span></strong><small>ANALYZER</small></div></a>
+      <div class="side-label">WORKSPACE</div>
+      <nav class="sidenav" aria-label="기본 메뉴">
+        <a href="#analyze" class="navlink active" data-view-link="analyze"><span class="navicon">◈</span>새 영상 분석</a>
+        <a href="#library" class="navlink" data-view-link="library"><span class="navicon">▤</span>분석 라이브러리</a>
+        <a href="#usage" class="navlink" data-view-link="usage"><span class="navicon">◴</span>리소스 사용량</a>
+        <a href="#settings" class="navlink" data-view-link="settings"><span class="navicon">⚙</span>API 보안 설정</a>
+      </nav>
+      <div class="sidebar-bottom"><div class="lock-icon">⌑</div><div><strong>Private Workspace</strong><small>Cloudflare Access · 본인 전용</small></div></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><span id="crumb">분석 / 새 영상</span><div class="topright"><span class="cost-chip">유료 예산 <strong>$0.00</strong></span><span class="avatar">P</span></div></header>
+      <div class="content">
+        <section id="view-analyze" class="page active" aria-labelledby="analyze-title">
+          <div class="eyebrow"><span class="eyebrow-dot"></span> TRANSCRIPT-FIRST WORKFLOW</div>
+          <h1 id="analyze-title">영상의 모든 맥락을,<br><em>근거와 함께.</em></h1>
+          <p class="lead">YouTube 링크 또는 직접 확보한 자막을 입력하세요. 전체 전사 여부를 검증하고, 확인된 내용만 리포트에 남깁니다.</p>
+          <div class="notice"><span class="notice-dot"></span><div><strong>현재 빌드: API 미연동 · 실제 AI 분석 전</strong><p>URL은 형식만 확인합니다. 자막 파일은 서버에서 원문 문장을 추출하며, 영어 자동 번역은 API 연결 뒤 활성화됩니다.</p></div></div>
+          <div class="panel work-panel">
+            <div class="panel-heading"><span class="num">01</span><div><h2>분석 소스 입력</h2><p>입력 내용의 출처와 범위를 먼저 확인합니다.</p></div></div>
+            <div class="tabs" role="tablist" aria-label="입력 형태"><button class="tab active" data-input-mode="url" role="tab" aria-selected="true">YouTube URL</button><button class="tab" data-input-mode="text" role="tab" aria-selected="false">자막 파일 SRT · VTT · TXT</button></div>
+            <form id="analyze-form" class="fields">
+              <div id="url-fields"><label for="youtube-url">YouTube 영상 주소</label><input id="youtube-url" type="url" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" spellcheck="false"><div class="fieldhint">HTTPS 주소만 허용 · URL 단독 분석은 자막이 연결되기 전 NEED_UPLOAD</div></div>
+              <div id="file-fields" hidden><label for="caption-file">자막 파일 업로드</label><input id="caption-file" type="file" accept=".srt,.vtt,.txt,text/plain" aria-describedby="file-hint"><div id="file-hint" class="fieldhint">최대 2MB · 업로드한 원문은 기본적으로 DB에 저장하지 않습니다</div></div>
+              <div class="two-fields"><div><label for="duration-min">영상 길이 (분)</label><input id="duration-min" type="number" min="1" max="120" step="1" value="30" required></div><div><label for="video-title">영상 제목 (선택)</label><input id="video-title" type="text" maxlength="160" placeholder="기록할 제목"></div></div>
+              <div class="action-row"><button id="run-button" type="submit" class="btn primary">분석 시작 <span>↗</span></button><span class="action-info">입력 전사 검증 · 무단 유료 호출 없음</span></div>
+            </form>
+          </div>
+          <div class="result" id="result-panel" hidden><div class="panel-heading"><span class="num">02</span><div><h2>분석 결과</h2><p>원문과 검증 결과 기반</p></div></div><div id="result-content"></div></div>
+          <div class="mini-cards"><div><span>01 / SOURCE</span><strong>자막·파일 우선</strong><p>없는 자막을 임의로 생성하지 않습니다.</p></div><div><span>02 / VERIFICATION</span><strong>완결성 확인</strong><p>시간축이 끝까지 있다고 전체 전사로 단정하지 않습니다.</p></div><div><span>03 / CONTROL</span><strong>월 비용 $0</strong><p>예산을 초과하는 호출을 자동 허용하지 않습니다.</p></div></div>
+        </section>
+        <section id="view-library" class="page" aria-labelledby="library-title"><div class="eyebrow">PERSONAL KNOWLEDGE BASE</div><h1 id="library-title">분석 <em>라이브러리.</em></h1><p class="lead">분석 이력을 클라우드 DB에 저장해 다른 기기에서도 검색하고 다시 열람할 수 있습니다.</p><div class="toolbar"><label class="sr-only" for="library-search">분석 기록 검색</label><input id="library-search" type="search" placeholder="영상 제목 또는 ID로 검색"><button class="btn secondary" id="reload-library">새로고침</button></div><div id="library-list" class="library-list"></div><div class="pager"><button class="btn secondary small" id="library-prev">이전</button><span id="library-page">1 페이지</span><button class="btn secondary small" id="library-next">다음</button></div><div id="library-detail" class="result" hidden></div></section>
+        <section id="view-usage" class="page" aria-labelledby="usage-title"><div class="eyebrow">RESOURCE TRANSPARENCY</div><h1 id="usage-title">무료 리소스를 <em>한눈에.</em></h1><p class="lead">공개 무료 한도와 실제 계정의 잔여량은 다릅니다. 정확히 확인되지 않은 값은 UNKNOWN으로 표시합니다.</p><div class="stats"><div class="stat"><span>월 허용 유료 비용</span><strong>$0.00</strong><small>유료 호출 차단</small></div><div class="stat"><span>실제 API 호출</span><strong>0</strong><small>실 API 미연결</small></div><div class="stat"><span>소진 예측</span><strong>—</strong><small>사용량 데이터 확보 후 제공</small></div></div><div id="usage-list" class="provider-list"></div><div class="tip">참고: 공급자 콘솔에서 사용된 계정 전체 사용량은 별도 동기화 없이는 확인할 수 없습니다. 앱의 집계와 공급자 계정 잔여량을 구분합니다.</div></section>
+        <section id="view-settings" class="page" aria-labelledby="settings-title"><div class="eyebrow">OWNER-ONLY SECURITY</div><h1 id="settings-title">연동을 위한 <em>보안 설정.</em></h1><p class="lead">키는 서버에서 암호화되어 저장되고 화면·브라우저 저장소·서버 응답에 다시 노출되지 않습니다.</p><div class="notice secure"><span class="notice-dot"></span><div><strong>본인 인증 필수</strong><p>Cloudflare Access 로그인 + JWT 서명 검증 이후에만 API 키 등록이 허용됩니다. 암호화 마스터 키는 Worker Secret에만 저장됩니다.</p></div></div><div class="panel"><div class="panel-heading"><span class="num">01</span><div><h2>AI 제공자 연결</h2><p>공식 웹사이트에서 발급한 API 키를 한 번만 등록하세요.</p></div></div><div id="provider-settings" class="connection-list"></div><form id="key-form" class="key-form" hidden autocomplete="off"><label for="provider-key">새 API 키</label><input type="password" id="provider-key" name="api-secret-not-saved" autocomplete="new-password" placeholder="서버에서만 암호화하여 저장" minlength="8" required><div class="action-row"><button id="save-key" class="btn primary" type="submit">암호화 저장</button><button id="cancel-key" type="button" class="btn secondary">취소</button></div></form></div><div class="panel budget-panel"><div class="panel-heading"><span class="num">02</span><div><h2>지출 정책</h2><p>사전 승인 없는 유료 실행 금지</p></div></div><div class="budget-row"><span>허용 월 결제</span><strong>$0.00 / 월</strong></div><div class="budget-row"><span>API 자동 충전</span><strong>비활성</strong></div><div class="budget-row"><span>월·연 정액 구독</span><strong>없음</strong></div></div></section>
+      </div>
+    </main>
+    <nav class="mobile-nav" aria-label="모바일 메뉴"><a href="#analyze" data-view-link="analyze">분석</a><a href="#library" data-view-link="library">라이브러리</a><a href="#usage" data-view-link="usage">사용량</a><a href="#settings" data-view-link="settings">설정</a></nav>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </div>
+</body>
+</html>

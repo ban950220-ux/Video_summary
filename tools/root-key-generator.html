@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="ko"><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'"><title>암호화 루트 생성</title>
+<style>body{font:18px system-ui;max-width:780px;margin:50px auto;padding:24px}button,input{font:inherit;padding:12px;margin:12px 0}input{width:95%}p{line-height:1.7}</style>
+<h1>Cloudflare Secret용 루트 생성</h1><p>사용자 브라우저 메모리에서만 생성합니다. 외부 요청이나 저장소 기록은 없습니다. 생성값은 채팅·스크린샷에 공유하지 마세요.</p>
+<button id="generate">32바이트 난수 생성</button>
+<input id="value" readonly aria-label="생성된 루트 키" autocomplete="off">
+<button id="clear">화면에서 지우기</button>
+<p>생성값 전체를 KEY_ENCRYPTION_KEY_B64 유형 Secret에 등록하고, 본인 비밀번호 관리자에도 보관하세요. 분실하면 기존 제공자 키를 복호화할 수 없습니다.</p>
+<script>
+const value=document.querySelector('#value');
+document.querySelector('#generate').onclick=()=>{value.value=btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));};
+document.querySelector('#clear').onclick=()=>{value.value='';};
+window.addEventListener('pagehide',()=>value.value='');
+</script></html>

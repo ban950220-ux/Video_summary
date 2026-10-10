@@ -1,0 +1,9 @@
+# Development only. Never commit real secrets or include this file in static assets.
+ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
+ACCESS_AUD=REPLACE_WITH_REAL_CLOUDFLARE_ACCESS_APP_AUD
+ACCESS_OWNER_EMAIL=your-email@example.com
+KEY_ENCRYPTION_KEY_B64=REPLACE_WITH_BASE64_32_BYTE_RANDOM_ROOT_KEY
+ENABLE_LIVE_FREE=false
+ALLOW_PAID_API=false
+# API keys are entered through server-side encrypted admin vault AFTER Access is working.
+# No plaintext tokens in source/browser/localStorage.

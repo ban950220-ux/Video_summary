@@ -1,0 +1,23 @@
+# Deployment requires explicit approval, Cloudflare Access owner login and actual D1 provision.
+# Do NOT run wrangler deploy from this unconfigured template.
+name = "youtube-ai-analyzer-private"
+main = "src/site-worker.mjs"
+compatibility_date = "2026-10-10"
+workers_dev = false
+
+[assets]
+directory = "./web/site"
+binding = "ASSETS"
+run_worker_first = true
+
+[vars]
+ENABLE_LIVE_FREE = "false"
+ALLOW_PAID_API = "false"
+SITE_DEPLOYED = "false"
+# Production setup must supply ACCESS_TEAM_DOMAIN, ACCESS_AUD, ACCESS_OWNER_EMAIL
+# and D1 binding DB. Keep every API key and KEY_ENCRYPTION_KEY_B64 in secrets.
+# Actual D1 binding example (add only after account setup):
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "youtube-ai-analyzer-private"
+# database_id = "<REAL_D1_ID>"
