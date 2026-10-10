@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS yta_sources(job_id TEXT PRIMARY KEY, raw TEXT NOT NULL, segments_json TEXT NOT NULL, provenance TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS yta_quota(provider TEXT PRIMARY KEY, allowance REAL NOT NULL, consumed REAL NOT NULL DEFAULT 0, request_limit INTEGER NOT NULL, request_count INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, confirmed_at INTEGER NOT NULL, billing_disabled INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS yta_operations(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, provider TEXT NOT NULL, units REAL NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, error_code TEXT, result_json TEXT);
+CREATE TABLE IF NOT EXISTS yta_audio(job_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, start_sec REAL NOT NULL, end_sec REAL NOT NULL, state TEXT NOT NULL, result_json TEXT, PRIMARY KEY(job_id,chunk_index));

@@ -1,7 +1,7 @@
 // Server-only credential bridge. NEVER import from browser assets.
 // No credential is included in HTTP responses, logs, D1 plaintext or usage events.
 import {configuredMasterKey,decryptProviderKey,providerAllowed} from './vault.mjs';
-import {ProviderError,assertLive,fetchSupadataCaption,transcribeOwnedAudio,summarizeTranscriptWithGemini} from './adapters.mjs';
+import {ProviderError,assertLive,pollSupadataCaption,fetchSupadataCaption,transcribeOwnedAudio,summarizeTranscriptWithGemini} from './adapters.mjs';
 
 const CONFIG={supadata:'SUPADATA',groq:'GROQ',gemini:'GEMINI',assemblyai:'ASSEMBLYAI'};
 
@@ -33,7 +33,7 @@ async function ephemeralEnv(env,provider){
   return {...env,[`${scope}_API_KEY`]:value};
 }
 
-/** One native-caption request. Requires an independently verified free plan and explicit live gate.
+/** One native-caption request. Requires an owner-attested billing-disabled free plan and explicit live gate.
  * Even no-captions (206) can cost one provider credit. Caller must reserve/settle quota BEFORE/AFTER this function. */
 export async function runNativeCaption({env,url,fetchFn=fetch}){
   return fetchSupadataCaption(url,await ephemeralEnv(env,'supadata'),fetchFn);
@@ -42,7 +42,9 @@ export async function runNativeCaption({env,url,fetchFn=fetch}){
 export async function runTranscriptSummary({env,text,fetchFn=fetch}){
   return summarizeTranscriptWithGemini(text,await ephemeralEnv(env,'gemini'),fetchFn);
 }
-/** Only lawful owner-uploaded audio, <=24MB per call. 120 minute chunking is NOT implemented. */
+/** Only lawful owner-uploaded audio, <=24MB per call. The live route chunks MP3 files before invoking this adapter. */
 export async function runOwnedAudioTranscription({env,bytes,name,mime,durationSeconds,fetchFn=fetch}){
   return transcribeOwnedAudio({env:await ephemeralEnv(env,'groq'),bytes,name,mime,durationSeconds,fetchFn});
 }
+
+export async function runNativePoll({env,jobId,fetchFn=fetch}){return pollSupadataCaption(jobId,await ephemeralEnv(env,'supadata'),fetchFn);}

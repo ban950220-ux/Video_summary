@@ -1,5 +1,6 @@
 import {InputError,videoIdOf,durationSec,parseCaptions,transcriptAudit,extractiveReport,estimateSource,PROVIDERS,DEFAULT_POLICY,usableFreeUnits} from './core.mjs';
 import {configuredMasterKey,encryptProviderKey,providerAllowed} from './vault.mjs';
+import {routeLive,saveSource} from './live.mjs';
 
 const JSON_HEADERS={'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer'};
 const json=(obj,status=200)=>new Response(JSON.stringify(obj),{status,headers:JSON_HEADERS});
@@ -41,7 +42,7 @@ async function handleJob(env,payload){
     return json({job:row,persisted:await saveJob(env,row),preflight:quote},202);
   }
   if(quote.sourceType==='audio'){
-    const row={...job,status:'NEED_AUDIO_ADAPTER_APPROVAL',audit:{status:'NOT_RUN',reason:'오디오 실 전사·대용량 청크 분할은 별도 무료 키 연동 QA 전까지 비활성화'},report:null};
+    const row={...job,status:'NEED_AUDIO_UPLOAD',audit:{status:'NOT_RUN',reason:'보유 MP3 조각 계획과 무료 계정 할당 후 전사할 수 있습니다. 실환경 검증은 별도 필요합니다.'},report:null};
     return json({job:row,persisted:await saveJob(env,row),preflight:quote},202);
   }
   if(typeof payload.transcript!=='string'||!payload.transcript.trim()) throw new InputError('전사 텍스트가 필요합니다.');
@@ -49,8 +50,10 @@ async function handleJob(env,payload){
   const audit=transcriptAudit(parsed.segments,quote.durationSeconds,false);
   const report=extractiveReport(parsed);
   const row={...job,status:audit.status,report,audit,segments:parsed.segments};
-  const persistRow={...row,segments:undefined}; // no raw transcript persisted by default
-  return json({job:row,persisted:await saveJob(env,persistRow),preflight:quote},201);
+  const persistRow={...row,segments:undefined};
+  const persisted=await saveJob(env,persistRow);
+  if(persisted&&payload.persistTranscript===true)await saveSource(env,row.id,payload.transcript,parsed.segments,parsed.origin);
+  return json({job:row,persisted,preflight:quote},201);
 }
 async function handleUsage(env){
   const usage=PROVIDERS.map(p=>({id:p.id,role:p.role,period:p.period,publishedFreeLimit:p.publishedFreeLimit,accountQuota:usableFreeUnits({limit:p.publishedFreeLimit,appUsed:0,otherUsageKnown:false}),providerConnected:false}));
@@ -81,7 +84,7 @@ async function listCredentialStatus(env){
   if(!env?.DB)return dbUnavailable();
   const result=await env.DB.prepare('SELECT provider,updated_at FROM provider_credentials WHERE owner_id = ?').bind('owner').all();
   const mapped=new Map((result.results??[]).map(x=>[x.provider,x.updated_at]));
-  return json({providers:['supadata','gemini','groq','assemblyai'].map(provider=>({provider,configured:mapped.has(provider),updatedAt:mapped.get(provider)??null,verification:'NOT_RUN',keyNeverReturned:true})),vaultRootConfigured:!!configuredMasterKey(env),apiCallsEnabled:false});
+  return json({providers:['supadata','gemini','groq','assemblyai'].map(provider=>({provider,configured:mapped.has(provider),updatedAt:mapped.get(provider)??null,verification:'NOT_RUN',keyNeverReturned:true})),vaultRootConfigured:!!configuredMasterKey(env),apiCallsEnabled:env.ENABLE_LIVE_FREE==='true'});
 }
 async function saveCredential(env,provider,req){
   if(!env?.DB)return dbUnavailable();
@@ -104,8 +107,9 @@ async function deleteCredential(env,provider){
 }
 export async function routeApi(request,env){
     const url=new URL(request.url);
-    if(url.pathname==='/api/health'&&request.method==='GET')return json({service:'youtube-ai-analyzer-mvp',mode:'MOCK_ONLY',deployed:env?.SITE_DEPLOYED==='true',productionReady:false,realCalls:false,storageConfigured:!!env?.DB});
+    if(url.pathname==='/api/health'&&request.method==='GET')return json({service:'youtube-ai-analyzer-mvp',version:'0.7.0',mode:env?.ENABLE_LIVE_FREE==='true'?'LIVE_FREE_GATED':'MOCK_ONLY',deployed:env?.SITE_DEPLOYED==='true',productionReady:false,realCalls:env?.ENABLE_LIVE_FREE==='true'?null:false,storageConfigured:!!env?.DB});
     try{
+      const live=await routeLive(request,env);if(live)return live;
       if(url.pathname==='/api/preflight'&&request.method==='POST')return json(preflight(await bodyJson(request)));
       if(url.pathname==='/api/jobs'&&request.method==='POST')return await handleJob(env,await bodyJson(request));
       if(url.pathname==='/api/jobs'&&request.method==='GET')return await listJobs(env,url);

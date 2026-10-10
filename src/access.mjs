@@ -67,6 +67,7 @@ export function sameOriginMutation(request){
   const requestOrigin=new URL(request.url).origin;
   const origin=request.headers.get('Origin');
   if(origin!==requestOrigin)return false;
+  if(request.method==='POST'&&/^\/api\/jobs\/[0-9a-f-]{36}\/audio-chunk$/i.test(new URL(request.url).pathname))return /^application\/octet-stream(?:\s*;|$)/i.test(request.headers.get('content-type')??'');
   if(['POST','PUT','PATCH'].includes(request.method))return /^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type')??'');
   return true;
 }

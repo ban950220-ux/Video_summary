@@ -7,7 +7,7 @@ export function assertLive(env,provider){
   if(env?.ALLOW_PAID_API==='true') throw new ProviderError('BUDGET_BLOCKED','MVP에서 유료 호출은 활성화할 수 없습니다.');
 }
 async function requestJson(url,options,fetchFn=fetch){
-  const r=await fetchFn(url,options);
+  const r=await fetchFn(url,{...options,signal:AbortSignal.timeout(120000)});
   if(!r.ok) throw new ProviderError(String(r.status),`${new URL(url).hostname} HTTP ${r.status}`);
   return await r.json();
 }
@@ -21,8 +21,8 @@ export async function fetchSupadataCaption(url,env,fetchFn=fetch){
   endpoint.searchParams.set('url',`https://www.youtube.com/watch?v=${id}`);
   endpoint.searchParams.set('mode','native');
   endpoint.searchParams.set('text','false');
-  const res=await fetchFn(endpoint.toString(),{headers:{'x-api-key':env.SUPADATA_API_KEY}});
-  const billed=Number(res.headers.get('x-billable-requests'));
+  const res=await fetchFn(endpoint.toString(),{headers:{'x-api-key':env.SUPADATA_API_KEY},signal:AbortSignal.timeout(60000)});
+  const billed=res.headers.has('x-billable-requests')?Number(res.headers.get('x-billable-requests')):NaN;
   const billedCredits=Number.isFinite(billed)&&billed>=0?billed:null;
   if(res.status===206) return {status:'NO_CAPTIONS',provider:'supadata',billedCredits,segments:[],usageProvenance:billedCredits===null?'UNKNOWN':'EXACT_APP'};
   if(!res.ok) throw new ProviderError(String(res.status),`Supadata HTTP ${res.status}`);
@@ -39,16 +39,26 @@ export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,
   if(!/\.(mp3|mp4|m4a|ogg|wav|webm|flac)$/i.test(name)) throw new InputError('지원하지 않는 음성 확장자','AUDIO_FORMAT');
   // This upload path is intentionally only a building block; the route must reserve quota BEFORE invoking it.
   const data=new FormData();data.append('file',new Blob([bytes],{type:mime||'application/octet-stream'}),name);
-  data.append('model','whisper-large-v3-turbo');data.append('response_format','verbose_json');
+  data.append('model','whisper-large-v3-turbo');data.append('response_format','verbose_json');data.append('temperature','0');data.append('timestamp_granularities[]','segment');
   const result=await requestJson('https://api.groq.com/openai/v1/audio/transcriptions',{method:'POST',headers:{Authorization:`Bearer ${env.GROQ_API_KEY}`},body:data},fetchFn);
   return {provider:'groq',text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION'};
 }
 export async function summarizeTranscriptWithGemini(text,env,fetchFn=fetch){
   assertLive(env,'GEMINI');
   if(!env.GEMINI_API_KEY) throw new ProviderError('KEY_MISSING','Gemini API 키 미설정');
-  if(typeof text!=='string'||text.length>100_000) throw new InputError('텍스트 길이 제한(10만자)을 초과했습니다.');
-  const model='gemini-3.5-flash-lite';
-  const body={contents:[{role:'user',parts:[{text:`아래 전사문에서만 근거를 찾아 한국어로 정확히 요약하라. 불확실한 숫자/발언은 명시하라. 입력에 없는 인용구를 생성하지 말라. 영어인 경우 한국어로 번역하라.\n\n${text}`}]}]};
+  if(typeof text!=='string'||text.length>190_000) throw new InputError('텍스트 길이 제한을 초과했습니다.');
+  const model='gemini-2.5-flash';
+  const instruction=env.SUMMARY_JSON==='true'?text:`아래 전사문에서만 근거를 찾아 한국어로 정확히 요약하라. 불확실한 숫자/발언은 명시하라. 입력에 없는 인용구를 생성하지 말라. 영어인 경우 한국어로 번역하라.\n\n${text}`;
+  const body={contents:[{role:'user',parts:[{text:instruction}]}],generationConfig:{temperature:0.2,maxOutputTokens:8192,thinkingConfig:{thinkingBudget:0},...(env.SUMMARY_JSON==='true'?{responseMimeType:'application/json'}:{})}};
   const result=await requestJson(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:'POST',headers:{'x-goog-api-key':env.GEMINI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)},fetchFn);
   return {provider:'gemini',text:result.candidates?.[0]?.content?.parts?.map(x=>x.text||'').join('')||'',usage:result.usageMetadata??null};
+}
+
+export async function pollSupadataCaption(jobId,env,fetchFn=fetch){
+ assertLive(env,'SUPADATA');if(typeof jobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(jobId))throw new InputError('제공자 작업 ID 오류');
+ const data=await requestJson('https://api.supadata.ai/v1/transcript/'+encodeURIComponent(jobId),{headers:{'x-api-key':env.SUPADATA_API_KEY}},fetchFn);
+ if(data.status==='failed')return {status:'NO_CAPTIONS',segments:[]};
+ if(data.status!=='completed')return {status:'PENDING',jobId,segments:[]};
+ const result=data.result||data;const segments=(Array.isArray(result.content)?result.content:[]).map(s=>({text:String(s.text||''),startMs:Number(s.offset),endMs:Number(s.offset)+Number(s.duration)})).filter(s=>s.text&&Number.isFinite(s.startMs)&&s.endMs>s.startMs);
+ return {status:segments.length?'TRANSCRIPT_AVAILABLE':'NO_CAPTIONS',segments,provider:'supadata'};
 }

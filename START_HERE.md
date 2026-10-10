@@ -1,17 +1,11 @@
-# YouTube AI Analyzer v0.6.1 — 일반 웹 배포 패키지
+# v0.7 배포 후보
 
-먼저 docs/manual-cloudflare-v0.6.1.md를 읽으세요.
+현재 기능·검증·제한은 IMPLEMENTATION-v0.7.md를 확인하세요.
 
-1. 새 D1: youtube-ai-analyzer-private-db → schema.sql 실행.
-2. 새 Worker: youtube-ai-analyzer-private → dist/dashboard-worker.txt 전체 코드 복사·배포.
-3. DB 바인딩 → 새 Worker에만 Access All traffic / 본인 이메일만 허용.
-4. 문서의 변수/Secret 등록 → 원격 저장 및 키 관리 인수 테스트.
+1. 기존 holy-rice-b914 Worker의 코드만 deploy/dashboard-worker.mjs로 갱신합니다. DB 바인딩, Access와 Secret은 유지합니다.
+2. 유료 API 및 자동 충전을 끈 무료 계정을 확인합니다. ALLOW_PAID_API=false, ENABLE_LIVE_FREE=true를 설정합니다.
+3. 사이트 설정에서 공급자 콘솔에서 확인한 잔여량 이하의 무료 할당을 저장합니다. 계정 전체 잔여량은 자동 검증하지 않습니다.
+4. 적법하게 보유한 MP3를 선택해 전사하고 근거 연결 요약을 생성합니다. 부분 전사·미검증 상태를 숨기지 않습니다.
+5. 실제 요약의 원문 근거, 다운로드, 새로고침 후 D1 유지까지 확인하기 전에는 원격 PASS나 완료를 선언하지 않습니다.
 
-키는 채팅에 보내지 마세요. 라이브 AI 호출은 비활성 상태를 유지하세요.
-로컬 자동 테스트 41 PASS. 실제 Cloudflare 배포/원격 D1/제공자 호출 NOT RUN.
-
-Cloudflare 웹 편집기에 붙여 넣는 단일 파일에는 화면 자산이 포함되어 별도 정적 파일 업로드가 필요 없습니다.
-운영은 클라우드이며 PC 상시 실행이 필요 없습니다.
-
-개발자가 테스트를 재실행하려면 Node 24에서 npm run check 및 npm test를 실행합니다.
-npm test가 단일 Worker를 먼저 재생성합니다. 이 Node 요구는 사용자 웹 배포에는 필요 없습니다.
+현재 로컬 50개 테스트만 통과했습니다. 실제 v0.7 배포/API/예시 요약 검증은 NOT_RUN입니다.

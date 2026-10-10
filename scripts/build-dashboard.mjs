@@ -1,8 +1,8 @@
 // Dependency-free bundler for this fixed, reviewed module graph.
 // Produces a single Cloudflare Dashboard ESM Worker including protected assets.
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
-const names=['core','vault','access','worker','site-worker'];
-let output='// Generated from v0.6 source. No secrets. Live AI calls disabled.\n';
+const names=['core','vault','access','adapters','provider-keys','audio','report','live','worker','site-worker'];
+let output='// Generated from v0.7 source. No secrets. Live calls require owner free-account grants.\n';
 for(const name of names){
   let source=readFileSync(new URL('../src/'+name+'.mjs',import.meta.url),'utf8');
   const exports=[...source.matchAll(/export\s+(?:async\s+)?(?:function|class|const)\s+(\w+)/g)].map(m=>m[1]);
@@ -13,7 +13,7 @@ for(const name of names){
 }
 output='const modules={};\n'+output;
 const assets={};
-for(const [path,file,type] of [['/','index.html','text/html'],['/index.html','index.html','text/html'],['/app.js','app.js','application/javascript'],['/style.css','style.css','text/css']]){
+for(const [path,file,type] of [['/','index.html','text/html'],['/index.html','index.html','text/html'],['/app.js','app.js','application/javascript'],['/style.css','style.css','text/css'],['/audio.mjs','audio.mjs','application/javascript']]){
   assets[path]={body:readFileSync(new URL('../web/site/'+file,import.meta.url),'utf8'),type};
 }
 output+='const assets='+JSON.stringify(assets)+';\n';

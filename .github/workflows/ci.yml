@@ -32,3 +32,9 @@ jobs:
             exit 1
           fi
           echo "Offline tests passed. Cloudflare deployment is still BLOCKED."
+      - name: Upload tested dashboard Worker
+        uses: actions/upload-artifact@v4
+        with:
+          name: analyzer-dashboard-v0.7
+          path: dist/dashboard-worker.mjs
+          retention-days: 7
