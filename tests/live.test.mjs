@@ -292,16 +292,64 @@ test('audio merge accepts millisecond provider timestamp rounding at chunk end',
  assert.deepEqual(merged.rejectedSegments,[]);
  assert.equal(merged.segments[0].endMs,299982);
 });
-test('audio merge reports a chunk whose segments are all discarded and unexplained overlap',()=>{
+test('audio merge preserves distinct boundary speech and rejects invalid or identical duplicate segments',()=>{
  const invalid=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:100,end:101,text:'범위 밖'}]},{index:1,start:60,end:120,segments:[{start:1,end:2,text:'유효'}]}]);
  assert.deepEqual(invalid.missingChunks,[0]);assert.deepEqual(invalid.rejectedSegments.map(x=>x.reason),['INVALID_SEGMENT']);
  const overlap=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:58,end:60,text:'첫 말'}]},{index:1,start:58,end:120,segments:[{start:0,end:1,text:'다른 말'},{start:5,end:6,text:'나중 말'}]}]);
- assert.deepEqual(overlap.rejectedSegments.map(x=>x.reason),['OVERLAP_UNMATCHED']);
+ assert.deepEqual(overlap.rejectedSegments,[]);
+ assert.deepEqual(overlap.segments.map(x=>x.text),['다른 말','첫 말','나중 말']);
+ assert.deepEqual(overlap.boundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:58000,endMs:59000,previousChunkEndMs:60000}]);
  const distinctSpeech=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:54,end:55,text:'네'}]},{index:1,start:58,end:120,segments:[{start:.5,end:1.5,text:'네'},{start:7,end:8,text:'다음'}]}]);
- assert.deepEqual(distinctSpeech.rejectedSegments.map(x=>x.reason),['OVERLAP_UNMATCHED']);
+ assert.deepEqual(distinctSpeech.rejectedSegments,[]);
+ assert.equal(distinctSpeech.boundaryAmbiguities.length,1);
+ assert.deepEqual(distinctSpeech.segments.map(x=>x.text),['네','네','다음']);
  const sameSpeech=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:58.5,end:59.5,text:'네'}]},{index:1,start:58,end:120,segments:[{start:.5,end:1.5,text:'네'},{start:7,end:8,text:'다음'}]}]);
  assert.deepEqual(sameSpeech.rejectedSegments.map(x=>x.reason),['OVERLAP_DUPLICATE']);
  assert.deepEqual(sameSpeech.segments.map(x=>x.text),['네','다음']);
+});
+test('audio merge retains all distinct speech at the 14 observed boundary indices',()=>{
+ const ambiguous=new Set([1,2,3,4,6,8,9,12,13,15,16,17,18,19]);
+ const chunks=Array.from({length:20},(_,index)=>({index,start:index*297,end:index*297+300,segments:[...(ambiguous.has(index)?[{start:.5,end:1.5,text:'경계 발언 '+index}]:[]),{start:5,end:6,text:'본문 '+index}]}));
+ const merged=mergeAudioSegments(chunks);
+ assert.deepEqual(merged.missingChunks,[]);
+ assert.deepEqual(merged.rejectedSegments,[]);
+ assert.deepEqual(merged.boundaryAmbiguities.map(x=>x.chunkIndex),[...ambiguous]);
+ assert.equal(merged.segments.length,34);
+ for(const chunk of chunks)for(const segment of chunk.segments)assert.equal(merged.segments.filter(x=>x.text===segment.text).length,1);
+ assert.ok(merged.segments.every((segment,index)=>index===0||segment.startMs>=merged.segments[index-1].startMs));
+});
+test('audio finish stores ambiguous boundary text, review markers and TXT without provider calls',async()=>{
+ const {db,env}=setup();
+ try{
+  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:597}),env)).json(),id=created.job.id,path='/api/jobs/'+id,sha='a'.repeat(64);
+  assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:sha,chunks:[{index:0,start:0,end:300},{index:1,start:297,end:597}]}),env)).status,200);
+  for(const [index,segments] of [[0,[{start:298,end:299,text:'앞 조각 끝'}]],[1,[{start:.5,end:1.5,text:'겹친 다른 발언'},{start:5,end:6,text:'뒤 조각 본문'}]]])db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=?").run(JSON.stringify({fileSha256:sha,provider:'groq',segments}),id,index);
+  const response=await routeApi(request(path+'/audio-finish','POST',{}),env),finished=await response.json();
+  assert.equal(response.status,200);
+  assert.equal(finished.persisted,true);
+  assert.equal(finished.job.audit.audioBoundaryReview,'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED');
+  assert.deepEqual(finished.job.audit.audioBoundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:297500,endMs:298500,previousChunkEndMs:300000}]);
+  assert.deepEqual(finished.source.segments.map(x=>x.text),['겹친 다른 발언','앞 조각 끝','뒤 조각 본문']);
+  const exported=await(await routeApi(request(path+'/export?format=txt'),env)).text();
+  for(const text of finished.source.segments.map(x=>x.text))assert.ok(exported.includes(text));
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_audio WHERE job_id=?').get(id).n,2);
+ }finally{db.close();}
+});
+test('audio finish still rejects a real plan gap, out-of-range segment and missing chunk',async()=>{
+ const {db,env}=setup();
+ try{
+  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600}),env)).json(),id=created.job.id,path='/api/jobs/'+id,sha='b'.repeat(64);
+  assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:sha,chunks:[{index:0,start:0,end:300},{index:1,start:297,end:600}]}),env)).status,200);
+  for(const index of [0,1])db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=?").run(JSON.stringify({fileSha256:sha,provider:'groq',segments:[{start:5,end:6,text:'본문 '+index}]}),id,index);
+  const finish=async()=>{const response=await routeApi(request(path+'/audio-finish','POST',{}),env);assert.equal(response.status,409);return (await response.json()).error.code;};
+  db.prepare('UPDATE yta_audio SET start_sec=301 WHERE job_id=? AND chunk_index=1').run(id);
+  assert.equal(await finish(),'AUDIO_COVERAGE_INVALID');
+  db.prepare('UPDATE yta_audio SET start_sec=297,result_json=? WHERE job_id=? AND chunk_index=1').run(JSON.stringify({fileSha256:sha,provider:'groq',segments:[{start:5,end:400,text:'범위 밖'}]}),id);
+  assert.equal(await finish(),'AUDIO_INCOMPLETE');
+  db.prepare("UPDATE yta_audio SET state='PLANNED' WHERE job_id=? AND chunk_index=1").run(id);
+  assert.equal(await finish(),'AUDIO_INCOMPLETE');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_sources WHERE job_id=?').get(id).n,0);
+ }finally{db.close();}
 });
 test('audio resume skips completed chunks and rejects a different file or plan',async()=>{const {db,env}=setup();try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600}),env)).json();const path='/api/jobs/'+created.job.id,fileSha256='a'.repeat(64),chunks=[{index:0,start:0,end:300},{index:1,start:297,end:600}];assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256,chunks}),env)).status,200);const progress=await(await routeApi(request(path+'/audio-progress'),env)).json();assert.deepEqual(progress.chunks.map(c=>c.state),['PLANNED','PLANNED']);assert.equal(progress.complete,false);db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=0").run(JSON.stringify({fileSha256,segments:[{start:0,end:1,text:'done'}]}),created.job.id);assert.equal((await(await routeApi(request(path+'/audio-chunk?index=0','POST',{}),env)).json()).cached,true);assert.equal((await routeApi(request(path+'/audio-finish','POST',{}),env)).status,409);assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'b'.repeat(64),chunks}),env)).status,400);assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256,chunks:[{index:0,start:0,end:600}]}),env)).status,400);}finally{db.close();}});
 test('corrected MP3 metadata is required for upload without shifting segment times or file identity',async()=>{
