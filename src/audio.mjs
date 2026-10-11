@@ -67,8 +67,8 @@ export function prepareMp3Chunk(bytes){
  return {bytes:prepared,metadataCorrected:true};
 }
 export function mergeAudioSegments(chunks){
- const segments=[];let previousEnd=0;const missingChunks=[],rejectedSegments=[],retainedByChunk={};
- for(const chunk of [...chunks].sort((a,b)=>a.start-b.start)){
+ const segments=[];let previousEnd=0;const missingChunks=[],rejectedSegments=[],retainedByChunk={},orderedChunks=[...chunks].sort((a,b)=>a.start-b.start);
+ for(const chunk of orderedChunks){
   const items=chunk.segments||[];
   for(const s of items){
    const start=chunk.start+Number(s.start),end=chunk.start+Number(s.end),text=String(s.text||'').trim();
@@ -91,6 +91,22 @@ export function mergeAudioSegments(chunks){
  // Provider chunks arrive in source order; overlaps can put a later chunk's
  // first segment before the prior chunk's last segment on the source timeline.
  segments.sort((a,b)=>a.startMs-b.startMs||a.endMs-b.endMs||a.chunk-b.chunk);
- const boundaryAmbiguities=segments.flatMap((segment,index)=>segment.boundaryPreviousEndMs===undefined?[]:[{segmentId:index+1,chunkIndex:segment.chunk,startMs:segment.startMs,endMs:segment.endMs,previousChunkEndMs:segment.boundaryPreviousEndMs}]);
+ const byChunk=new Map(orderedChunks.map(chunk=>[chunk.index,[]]));
+ segments.forEach((segment,index)=>byChunk.get(segment.chunk)?.push({segment,id:index+1}));
+ const markers=new Map();
+ const mark=(item,chunkIndex,previousChunkEndMs)=>markers.set(item.id,{segmentId:item.id,chunkIndex,startMs:item.segment.startMs,endMs:item.segment.endMs,previousChunkEndMs});
+ for(const [index,segment] of segments.entries())if(segment.boundaryPreviousEndMs!==undefined)mark({segment,id:index+1},segment.chunk,segment.boundaryPreviousEndMs);
+ // A later chunk's segment can overlap earlier speech even when its midpoint
+ // lies past the chunk boundary. Keep both expressions and flag both IDs.
+ for(let index=1;index<orderedChunks.length;index++){
+  const prior=orderedChunks[index-1],current=orderedChunks[index],previousChunkEndMs=Math.round(prior.end*1000);
+  for(const outgoing of byChunk.get(prior.index)||[])for(const incoming of byChunk.get(current.index)||[]){
+   const left=outgoing.segment,right=incoming.segment;
+   if(left.startMs>=right.endMs||right.startMs>=left.endMs||left.text===right.text)continue;
+   mark(outgoing,current.index,previousChunkEndMs);
+   mark(incoming,current.index,previousChunkEndMs);
+  }
+ }
+ const boundaryAmbiguities=[...markers.values()].sort((a,b)=>a.segmentId-b.segmentId);
  return {segments:segments.map(({boundaryPreviousEndMs,...segment})=>segment),missingChunks,rejectedSegments,retainedByChunk,boundaryAmbiguities};
 }

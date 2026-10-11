@@ -7,6 +7,7 @@ import {partitionGroqTranscript,groqInputUpperBound,groqSummaryMessages,groqRawP
 import {reportPrompt} from '../src/report.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 import {capacityIdentity} from '../src/observed-capacity.mjs';
+import {mergeAudioSegments} from '../src/audio.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 async function fixture({complete=true,large=false,sourceText=null,longSource=false}={}){
@@ -114,6 +115,16 @@ test('Gemini and Groq summary payloads disclose retained boundary uncertainty wi
  const gemini=reportPrompt(segments,job.audit);
  assert.match(gemini,/"segmentId":2/);
  assert.match(gemini,/같은 발언을 두 번 집계하거나 어느 표현이 맞는지 단정하지 말고/);
+});
+test('both sides of a late boundary overlap reach Groq summary evidence warnings',()=>{
+ const merged=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:59.4,end:60,text:'앞 발언'}]},{index:1,start:58,end:120,segments:[{start:1.7,end:3.3,text:'뒤 발언'}]}]);
+ const audit=promptAudit({duration_seconds:120,audit:{audioProcessingCoverage:1,audioBoundaryAmbiguities:merged.boundaryAmbiguities}});
+ assert.deepEqual(audit.audioBoundarySegmentIds,[1,2]);
+ const segments=merged.segments.map((segment,index)=>({...segment,id:index+1}));
+ const raw=groqRawPrompt(segments,audit);
+ assert.match(raw,/"audioBoundarySegmentIds":\[1,2\]/);
+ const mergedPrompt=groqMergePrompt([{ids:[1,2],startMs:59400,endMs:61300,report:valid(1)}],audit,{final:true});
+ assert.match(mergedPrompt,/"audioBoundaryAmbiguityCount":2/);
 });
 test('Groq summary requires complete stored transcript and exact one-time approval without provider call',async()=>{
  const incomplete=await fixture({complete:false});try{assert.equal((await incomplete.db.prepare('SELECT COUNT(*) n FROM yta_operations').get()).n,0);assert.equal((await routeApi(request(incomplete.path+'/groq-summary-plan'),incomplete.env)).status,409);}finally{incomplete.db.close();}

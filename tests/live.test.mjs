@@ -298,7 +298,7 @@ test('audio merge preserves distinct boundary speech and rejects invalid or iden
  const overlap=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:58,end:60,text:'첫 말'}]},{index:1,start:58,end:120,segments:[{start:0,end:1,text:'다른 말'},{start:5,end:6,text:'나중 말'}]}]);
  assert.deepEqual(overlap.rejectedSegments,[]);
  assert.deepEqual(overlap.segments.map(x=>x.text),['다른 말','첫 말','나중 말']);
- assert.deepEqual(overlap.boundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:58000,endMs:59000,previousChunkEndMs:60000}]);
+ assert.deepEqual(overlap.boundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:58000,endMs:59000,previousChunkEndMs:60000},{segmentId:2,chunkIndex:1,startMs:58000,endMs:60000,previousChunkEndMs:60000}]);
  const distinctSpeech=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:54,end:55,text:'네'}]},{index:1,start:58,end:120,segments:[{start:.5,end:1.5,text:'네'},{start:7,end:8,text:'다음'}]}]);
  assert.deepEqual(distinctSpeech.rejectedSegments,[]);
  assert.equal(distinctSpeech.boundaryAmbiguities.length,1);
@@ -306,6 +306,25 @@ test('audio merge preserves distinct boundary speech and rejects invalid or iden
  const sameSpeech=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:58.5,end:59.5,text:'네'}]},{index:1,start:58,end:120,segments:[{start:.5,end:1.5,text:'네'},{start:7,end:8,text:'다음'}]}]);
  assert.deepEqual(sameSpeech.rejectedSegments.map(x=>x.reason),['OVERLAP_DUPLICATE']);
  assert.deepEqual(sameSpeech.segments.map(x=>x.text),['네','다음']);
+});
+test('cross-chunk speech overlap flags both expressions even when the new midpoint is outside the overlap',()=>{
+ const merged=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:59.4,end:60,text:'앞의 짧은 반복'}]},{index:1,start:58,end:120,segments:[{start:1.7,end:3.3,text:'뒤의 긴 문장'}]}]);
+ assert.deepEqual(merged.segments.map(item=>item.text),['앞의 짧은 반복','뒤의 긴 문장']);
+ assert.deepEqual(merged.boundaryAmbiguities.map(item=>item.segmentId),[1,2]);
+ assert.deepEqual(merged.rejectedSegments,[]);
+});
+test('one incoming sentence marks every overlapping outgoing expression',()=>{
+ const merged=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:58,end:58.8,text:'짧은 말 하나'},{start:59,end:59.6,text:'짧은 말 둘'}]},{index:1,start:58,end:120,segments:[{start:.5,end:2,text:'길게 이어지는 말'}]}]);
+ assert.deepEqual(merged.boundaryAmbiguities.map(item=>item.segmentId),[1,2,3]);
+ assert.equal(merged.segments.length,3);
+});
+test('all nineteen adjacent chunk boundaries are reviewed when later midpoints still overlap earlier speech',()=>{
+ const chunks=Array.from({length:20},(_,index)=>({index,start:index*297,end:index*297+300,segments:[...(index?[{start:2.8,end:4.2,text:'들어오는 문장 '+index}]:[]),...(index<19?[{start:299.6,end:300,text:'나가는 문장 '+index}]:[])]}));
+ const merged=mergeAudioSegments(chunks);
+ assert.equal(merged.segments.length,38);
+ assert.deepEqual([...new Set(merged.boundaryAmbiguities.map(marker=>marker.chunkIndex))],Array.from({length:19},(_,index)=>index+1));
+ assert.equal(new Set(merged.boundaryAmbiguities.map(marker=>marker.segmentId)).size,38);
+ assert.deepEqual(merged.rejectedSegments,[]);
 });
 test('audio merge retains all distinct speech at the 14 observed boundary indices',()=>{
  const ambiguous=new Set([1,2,3,4,6,8,9,12,13,15,16,17,18,19]);
@@ -328,17 +347,18 @@ test('audio finish stores ambiguous boundary text, review markers and TXT withou
   assert.equal(response.status,200);
   assert.equal(finished.persisted,true);
   assert.equal(finished.job.audit.audioBoundaryReview,'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED');
-  assert.deepEqual(finished.job.audit.audioBoundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:297500,endMs:298500,previousChunkEndMs:300000}]);
+  assert.deepEqual(finished.job.audit.audioBoundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:297500,endMs:298500,previousChunkEndMs:300000},{segmentId:2,chunkIndex:1,startMs:298000,endMs:299000,previousChunkEndMs:300000}]);
   assert.deepEqual(finished.source.segments.map(x=>x.text),['겹친 다른 발언','앞 조각 끝','뒤 조각 본문']);
   const retrieved=await(await routeApi(request(path+'/source'),env)).json();
   assert.equal(retrieved.audioBoundaryReview,'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED');
-  assert.equal(retrieved.audioBoundaryAmbiguityCount,1);
-  assert.deepEqual(retrieved.audioBoundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:297500,endMs:298500}]);
+  assert.equal(retrieved.audioBoundaryAmbiguityCount,2);
+  assert.deepEqual(retrieved.audioBoundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:297500,endMs:298500},{segmentId:2,chunkIndex:1,startMs:298000,endMs:299000}]);
   assert.deepEqual(retrieved.source.segments,finished.source.segments);
   const exported=await(await routeApi(request(path+'/export?format=txt'),env)).text();
   for(const text of finished.source.segments.map(x=>x.text))assert.ok(exported.includes(text));
-  assert.match(exported,/겹침 경계 검토 필요: 서로 다른 전사 표현 1개/);
+  assert.match(exported,/겹침 경계 검토 필요: 서로 다른 전사 표현 2개/);
   assert.match(exported,/#1 \[겹침 경계·발언 확인 필요\] 겹친 다른 발언/);
+  assert.match(exported,/#2 \[겹침 경계·발언 확인 필요\] 앞 조각 끝/);
   assert.match(exported,/## 원본 스크립트\n\n겹친 다른 발언\n앞 조각 끝/);
   const audit=JSON.parse(db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(id).audit_json);
   audit.audioBoundaryAmbiguities=Array.from({length:70},(_,i)=>({segmentId:i+1,chunkIndex:1,startMs:i,endMs:i+1}));
