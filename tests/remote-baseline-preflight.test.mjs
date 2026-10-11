@@ -56,6 +56,7 @@ test('diagnostic ignores object key order and reports complete, unique bindings 
  state.scriptSettings={logpush:false,tail_consumers:null,observability:reorder(approvedRemoteBaseline.scriptSettings.observability)};
  state.bindings.find(item=>item.name==='ACCESS_AUD').text='TEST_AUDIENCE_LONG_ENOUGH';
  state.bindings.find(item=>item.name==='ACCESS_TEAM_DOMAIN').text='https://test.cloudflareaccess.com';
+ state.deploymentMessage='source-commit:'+approvedRemoteBaseline.sourceCommit;
  state.bindings.push({name:'ASSETS',type:'assets'});
  const report=safeRemoteBaselineReport(state,{WRANGLER_CI_MATCH_TAG:secret});
  assert.deepEqual(report.bindings,{available:true,unique:true,complete:true});

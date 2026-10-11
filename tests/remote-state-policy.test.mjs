@@ -6,7 +6,7 @@ const observability=approvedRemoteBaseline.observability;
 const version='a'.repeat(8)+'-1111-4111-8111-'+'b'.repeat(12);
 const optionalScriptFields=approvedRemoteBaseline.optionalScriptFields;
 const baseline={...approvedRemoteBaseline,activeVersionId:version,remoteSettingsReviewed:true};
-const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVersions:[{id:version,percentage:100}],workersDev:true,previewUrls:false,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,observability:structuredClone(observability),optionalScriptFields:structuredClone(optionalScriptFields),scriptSettings:{logpush:false,tail_consumers:null,observability:structuredClone(observability)},bindings:[
+const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVersions:[{id:version,percentage:100}],deploymentMessage:`source-commit:${baseline.sourceCommit}`,workersDev:true,previewUrls:false,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,observability:structuredClone(observability),optionalScriptFields:structuredClone(optionalScriptFields),scriptSettings:{logpush:false,tail_consumers:null,observability:structuredClone(observability)},bindings:[
   {name:'DB',type:'d1',id:baseline.databaseId},
   {name:'ACCESS_AUD',type:'plain_text',text:'test-audience-value'},
   {name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:'https://test.cloudflareaccess.com'},
@@ -40,6 +40,7 @@ test('offline remote policy requires exactly one ASSETS before and after later d
 test('offline remote policy fails closed on active version, DB, Access, preview and observability drift',()=>{
   for(const mutate of [
     state=>{state.activeVersions[0].id='different';},
+    state=>{state.deploymentMessage='source-commit:'+('a'.repeat(40));},
     state=>{state.bindings[0].id='different';},
     state=>{state.bindings.splice(1,1);},
     state=>{state.bindings[1].text='';},

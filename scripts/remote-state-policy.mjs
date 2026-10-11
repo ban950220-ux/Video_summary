@@ -37,7 +37,8 @@ const baselineObservability={
 };
 
 export const approvedRemoteBaseline={
-  activeVersionId:'8c6eb60f-e130-4bbb-ad3c-ab1adcb5517f',
+  activeVersionId:'88fd5893-d81a-4e52-950a-4155c85ed30f',
+  sourceCommit:'d94e277b3e278d6a490ada5ab7a6b4a2a2f287e5',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:true,
@@ -77,5 +78,6 @@ export function assertRemoteState(remote,baseline,{postDeploy=false}={}){
     if(bindings.get(name)?.text!==value)fail('RUNTIME_FLAGS_MISMATCH');
   }
   if(typeof bindings.get('ACCESS_AUD')?.text!=='string'||bindings.get('ACCESS_AUD').text.length<12||!/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(bindings.get('ACCESS_TEAM_DOMAIN')?.text??''))fail('ACCESS_VARS_MISSING');
+  if(!postDeploy&&(typeof baseline.sourceCommit!=='string'||!/^[0-9a-f]{40}$/.test(baseline.sourceCommit)||remote.deploymentMessage!==`source-commit:${baseline.sourceCommit}`))fail('SOURCE_COMMIT_MISMATCH');
   return true;
 }
