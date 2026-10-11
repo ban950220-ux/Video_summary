@@ -24,7 +24,8 @@ async function grantEnv(env,provider){
  if(credential&&Date.parse(credential.updated_at)>quota.confirmed_at)throw new ProviderError('KEY_CHANGED','키 변경 뒤 무료 계정 확인을 다시 해야 합니다.');
  return {...env,[provider.toUpperCase()+'_FREE_PLAN_CONFIRMED']:'true'};
 }
-const GEMINI_SPACING_MS=13_000; // At most five starts in any rolling minute, with margin.
+const GEMINI_SPACING_MS=13_000; // Conservatively space starts from the previous settled request.
+const GEMINI_STALE_CLAIM_MS=300_000;
 async function execute(env,{id,job,provider,units},fn,onNewCall){
  const prior=await env.DB.prepare('SELECT * FROM yta_operations WHERE id=?').bind(id).first();
  if(prior?.state==='DONE')return JSON.parse(prior.result_json);
@@ -32,7 +33,9 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
  const active=await grantEnv(env,provider);
  // Atomic unique claim and atomic quota decrement: concurrent calls cannot overspend this app's grant.
  const now=new Date().toISOString(),cutoff=new Date(Date.now()-GEMINI_SPACING_MS).toISOString();
- const recent="SELECT 1 FROM yta_operations WHERE provider='gemini' AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>? LIMIT 1";
+ // CLAIMED remains blocking regardless of age: key resolution and network dispatch can be delayed.
+ // Settled operations use created_at as their last state-transition timestamp for conservative pacing.
+ const recent="SELECT state,created_at FROM yta_operations WHERE provider='gemini' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?)) ORDER BY CASE WHEN state='CLAIMED' THEN 0 ELSE 1 END LIMIT 1";
  const claim=prior
   ?provider==='gemini'
    ?await env.DB.prepare(`UPDATE yta_operations SET state=?,error_code=NULL,created_at=? WHERE id=? AND state=? AND error_code=? AND NOT EXISTS (${recent})`).bind('CLAIMED',now,id,'BLOCKED','QUOTA_EXHAUSTED',cutoff).run()
@@ -41,7 +44,12 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
    ?await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (${recent})`).bind(id,job,provider,units,'CLAIMED',now,cutoff).run()
    :await env.DB.prepare('INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').bind(id,job,provider,units,'CLAIMED',now).run();
  if(claim.meta?.changes!==1){
-  if(provider==='gemini'&&(await env.DB.prepare(recent).bind(cutoff).first()))throw new ProviderError('RATE_LIMIT_PENDING','무료 요약 호출 간격을 지키기 위해 잠시 대기 중입니다. 약 13초 뒤 이력에서 요약 생성을 다시 누르세요.');
+  const blocking=provider==='gemini'?await env.DB.prepare(recent).bind(cutoff).first():null;
+  if(blocking?.state==='CLAIMED'){
+   if(!Number.isFinite(Date.parse(blocking.created_at))||Date.now()-Date.parse(blocking.created_at)>GEMINI_STALE_CLAIM_MS)throw new ProviderError('OPERATION_REVIEW_REQUIRED','이전 요약 호출의 완료 여부가 불명확합니다. 사용량과 작업 기록을 확인한 뒤 진행하세요.');
+   throw new ProviderError('OPERATION_IN_FLIGHT','다른 요약 호출이 아직 진행 중입니다. 완료 상태를 확인한 뒤 다시 진행하세요.');
+  }
+  if(blocking)throw new ProviderError('RATE_LIMIT_PENDING','무료 요약 호출 간격을 지키기 위해 잠시 대기 중입니다. 약 13초 뒤 이력에서 요약 생성을 다시 누르세요.');
   throw new ProviderError('OPERATION_BUSY','중복 요청 차단');
  }
  const reserve=await env.DB.prepare('UPDATE yta_quota SET consumed=consumed+?,request_count=request_count+1 WHERE provider=? AND consumed+?<=allowance AND request_count<request_limit AND expires_at>? AND billing_disabled=1').bind(units,provider,units,Date.now()).run();
@@ -51,9 +59,9 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
   const result=await fn(active);
   // Conservative accounting: reserved upper bound stays consumed even on provider timeout or mismatch.
   await env.DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),job,'owner',provider,'LIVE_FREE',provider==='groq'?'audio_seconds':provider==='supadata'?'credits':'conservative_token_units',units,0,null,'APP_RESERVED_UPPER_BOUND',new Date().toISOString()).run();
-  await env.DB.prepare('UPDATE yta_operations SET state=?,result_json=? WHERE id=?').bind('DONE',JSON.stringify(result),id).run();return result;
+  await env.DB.prepare('UPDATE yta_operations SET state=?,result_json=?,created_at=? WHERE id=?').bind('DONE',JSON.stringify(result),new Date().toISOString(),id).run();return result;
  }catch(error){
-  await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=? WHERE id=?').bind('FAILED_UNCERTAIN',String(error.code||'PROCESSING_FAILED'),id).run();
+  await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=?,created_at=? WHERE id=?').bind('FAILED_UNCERTAIN',String(error.code||'PROCESSING_FAILED'),new Date().toISOString(),id).run();
   if(['402','429','403'].includes(String(error.code)))await env.DB.prepare('UPDATE yta_quota SET expires_at=0 WHERE provider=?').bind(provider).run();
   throw error;
  }
