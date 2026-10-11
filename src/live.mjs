@@ -642,7 +642,7 @@ export async function routeLive(request,env){
  }catch(error){
   if(error instanceof InputError)return json({error:{code:error.code,message:error.message}},400);
   if(error instanceof ProviderError)return json({error:{code:error.code,message:error.message}},error.code==='NOT_FOUND'?404:409);
-  if(/^SUMMARY_REVIEW_(SOURCE|PARTITION|OPERATIONS|APPROVAL|CHECKPOINT|CREDENTIAL)_INTERNAL$/.test(error?.safeReviewCode??''))return json({error:{code:error.safeReviewCode,message:error.message}},500);
+  if(/^SUMMARY_REVIEW_(SOURCE|PARTITION|OPERATIONS|APPROVAL|CHECKPOINT|CREDENTIAL)_INTERNAL$|^SUMMARY_REVIEW_APPROVAL_(PREPARE|BIND|FIRST)_(D1|TYPE|OTHER)_INTERNAL$/.test(error?.safeReviewCode??''))return json({error:{code:error.safeReviewCode,message:error.message}},500);
   return json({error:{code:'LIVE_INTERNAL_ERROR',message:'실제 처리 단계 오류. 원문과 사용량을 확인하고 자동 재시도하지 마세요.'}},500);
  }
 }

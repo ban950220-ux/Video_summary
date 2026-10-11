@@ -86,7 +86,19 @@ function validApproval(scope,jobId,hash,keyIdentity){
 }
 const approvalId=(id,sequence)=>id+':groq-summary:approval:'+sequence;
 const stageId=(id,hash,key)=>id+':groq-summary:'+hash+':'+key;
-async function readApproval(env,id){const row=await env.DB.prepare("SELECT state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? ORDER BY CAST(substr(id,length(?)+1) AS INTEGER) DESC LIMIT 1").bind(id+':groq-summary:approval:%',id,'groq-summary',id+':groq-summary:approval:').first();if(!row)return null;let scope;try{scope=JSON.parse(row.result_json);}catch{stop('SUMMARY_APPROVAL_INVALID','저장된 요약 승인을 검토하세요.');}return {...scope,state:row.state};}
+async function readApproval(env,id,{reviewing=false}={}){
+ const step=async(phase,fn)=>{try{return await fn();}catch(error){
+  if(!reviewing||error instanceof InputError||error instanceof ProviderError)throw error;
+  const kind=error?.name==='D1_ERROR'||/^D1_ERROR\b/.test(error?.message??'')?'D1':error instanceof TypeError?'TYPE':'OTHER';
+  throw Object.assign(new Error('요약 승인 조회 오류 ('+phase+'/'+kind+'). 저장된 원문은 보존됩니다.'),{safeReviewCode:'SUMMARY_REVIEW_APPROVAL_'+phase+'_'+kind+'_INTERNAL'});
+ }};
+ const statement=await step('PREPARE',()=>env.DB.prepare("SELECT state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? ORDER BY CAST(substr(id,length(?)+1) AS INTEGER) DESC LIMIT 1"));
+ const bound=await step('BIND',()=>statement.bind(id+':groq-summary:approval:%',id,'groq-summary',id+':groq-summary:approval:'));
+ const row=await step('FIRST',()=>bound.first());
+ if(!row)return null;
+ let scope;try{scope=JSON.parse(row.result_json);}catch{stop('SUMMARY_APPROVAL_INVALID','저장된 요약 승인을 검토하세요.');}
+ return {...scope,state:row.state};
+}
 async function guard(env,{id,hash,scope,operationId,sourceOf,ownedJob}){
  const block=()=>{const error=new ProviderError('SUMMARY_APPROVAL_CHANGED','Groq Free 요약 승인·원본·키·만료 상태가 바뀌었습니다.');error.preDispatchBlocked=true;throw error;};
  if(env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')block();
@@ -175,13 +187,13 @@ async function stage(env,{id,hash,scope,key,prompt,allowed,groups,partIds,startM
 }
 export async function handleGroqSummaryAction(request,env,{id,action,job,sourceOf,ownedJob}){
  const reviewing=request.method==='GET'&&['groq-summary-plan','groq-summary-approval'].includes(action);
- const read=async(stage,fn)=>{try{return await fn();}catch(error){if(!reviewing||error instanceof InputError||error instanceof ProviderError)throw error;throw Object.assign(new Error('요약 범위 읽기 오류 ('+stage+'). 저장된 원문은 보존됩니다.'),{safeReviewCode:'SUMMARY_REVIEW_'+stage+'_INTERNAL'});}};
+ const read=async(stage,fn)=>{try{return await fn();}catch(error){if(!reviewing||error instanceof InputError||error instanceof ProviderError||/^SUMMARY_REVIEW_APPROVAL_(PREPARE|BIND|FIRST)_(D1|TYPE|OTHER)_INTERNAL$/.test(error?.safeReviewCode??''))throw error;throw Object.assign(new Error('요약 범위 읽기 오류 ('+stage+'). 저장된 원문은 보존됩니다.'),{safeReviewCode:'SUMMARY_REVIEW_'+stage+'_INTERNAL'});}};
  const {source,transcriptHash}=await read('SOURCE',()=>completeSource(env,job,sourceOf));
  const audit=promptAudit(job),groups=await read('PARTITION',()=>partitionGroqTranscript(source.segments,audit)),totalRequests=groups.length*2-1;
  const rows=(await read('OPERATIONS',()=>env.DB.prepare("SELECT id,state,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND id LIKE ?").bind(id,id+':groq-summary:'+transcriptHash+':%').all())).results||[];
  if(rows.some(row=>row.state!=='DONE'))stop('SUMMARY_OPERATION_REVIEW_REQUIRED','이전 단계의 불명확한 호출을 검토하세요.');
  const completed=rows.length;if(completed>totalRequests)stop('SUMMARY_OPERATION_REVIEW_REQUIRED','저장된 요약 단계 수를 검토하세요.');
- const previous=await read('APPROVAL',()=>readApproval(env,id)),windowStart=completed,maxRequests=Math.min(totalRequests-completed,Math.floor(DAY_CAP/(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP))),totalTokenUpperBound=maxRequests*(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP);
+ const previous=await read('APPROVAL',()=>readApproval(env,id,{reviewing})),windowStart=completed,maxRequests=Math.min(totalRequests-completed,Math.floor(DAY_CAP/(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP))),totalTokenUpperBound=maxRequests*(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP);
  const proposed={jobId:id,transcriptHash,model:GROQ_SUMMARY_MODEL,windowStart,totalRequests,maxRequests,maxInputTokensPerRequest:GROQ_SUMMARY_INPUT_BOUND,maxCompletionTokensPerRequest:GROQ_SUMMARY_COMPLETION_CAP,totalTokenUpperBound,remainingAccountTokens:'UNKNOWN',summaryOnly:true};
  const scopeTag=JSON.stringify([windowStart,totalRequests,maxRequests,totalTokenUpperBound]);
  if(action==='groq-summary-plan'&&request.method==='GET')return json({approved:false,...proposed,rawStages:groups.length});
