@@ -8,7 +8,7 @@ const schema=read('schema.sql');
 const checks=[
   ['secure-worker-entry',/^main\s*=\s*"src\/site-worker\.mjs"/m.test(config)],
   ['static-assets-through-auth',/run_worker_first\s*=\s*true/m.test(config)],
-  ['live-api-default-off',/^ENABLE_LIVE_FREE\s*=\s*"false"/m.test(config)],
+  ['free-api-explicitly-enabled',/^ENABLE_LIVE_FREE\s*=\s*"true"/m.test(config)],
   ['paid-api-default-off',/^ALLOW_PAID_API\s*=\s*"false"/m.test(config)],
   ['D1-schema-jobs',/CREATE TABLE IF NOT EXISTS jobs\s*\(/m.test(schema)],
   ['D1-schema-encrypted-credentials',/CREATE TABLE IF NOT EXISTS provider_credentials\s*\(/m.test(schema)],

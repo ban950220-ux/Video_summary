@@ -40,7 +40,7 @@ export function safeRemoteBaselineReport(remote,env={}){
   const bindings=Array.isArray(remote?.bindings)?remote.bindings:[];
   const binding=name=>bindings.find(item=>item?.name===name);
   const expected=approvedRemoteBaseline;
-  const flags={ENABLE_LIVE_FREE:'false',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'};
+  const flags=expected.runtimeFlags;
   const report={
     kind:'REMOTE_BASELINE_PREFLIGHT',readOnly:true,diagnosticReadSucceeded:true,
     bindings:inspectBindingSet(remote?.bindings,{expectAssets:expected.assetsPresent}),

@@ -17,14 +17,17 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
   {name:'SITE_DEPLOYED',type:'plain_text',text:'true'},
 ]});
 
-test('offline remote policy requires exactly one ASSETS after upload and on later deploys',()=>{
-  assert.equal(assertRemoteState(remote(),baseline),true);
+test('offline remote policy requires exactly one ASSETS before and after later deploys',()=>{
   const after=remote();after.bindings.push({name:'ASSETS',type:'assets'});
-  assert.throws(()=>assertRemoteState(after,baseline),/BINDINGS_UNEXPECTED/);
-  assert.throws(()=>assertRemoteState(remote(),baseline,{postDeploy:true}),/BINDINGS_UNEXPECTED/);
+  assert.equal(assertRemoteState(after,baseline),true);
+  assert.throws(()=>assertRemoteState(remote(),baseline),/BINDINGS_UNEXPECTED/);
+  assert.throws(()=>assertRemoteState(after,baseline,{postDeploy:true}),/RUNTIME_FLAGS_MISMATCH/);
+  after.bindings.find(item=>item.name==='ENABLE_LIVE_FREE').text='true';
   assert.equal(assertRemoteState(after,baseline,{postDeploy:true}),true);
-  assert.equal(assertRemoteState(after,{...baseline,assetsPresent:true}),true);
-  assert.throws(()=>assertRemoteState(remote(),{...baseline,assetsPresent:true}),/BINDINGS_UNEXPECTED/);
+  assert.throws(()=>assertRemoteState(after,baseline),/RUNTIME_FLAGS_MISMATCH/);
+  after.bindings.find(item=>item.name==='ALLOW_PAID_API').text='true';
+  assert.throws(()=>assertRemoteState(after,baseline,{postDeploy:true}),/RUNTIME_FLAGS_MISMATCH/);
+  assert.equal(assertRemoteState(remote(),{...baseline,assetsPresent:false}),true);
   for(const mutate of [
     state=>{state.bindings.push({...state.bindings.at(-1)});},
     state=>{state.bindings.at(-1).type='plain_text';},
@@ -52,7 +55,7 @@ test('offline remote policy fails closed on active version, DB, Access, preview 
     state=>{state.observability.logs.destinations=[];},
     state=>{state.observability.issues={enabled:false};},
     state=>{state.scriptSettings.observability.logs.persist=false;},
-  ]){const state=remote();mutate(state);assert.throws(()=>assertRemoteState(state,baseline),/Remote deployment guard/);}
-  const incomplete=remote();delete incomplete.observability.logs.invocation_logs;
+  ]){const state=remote();state.bindings.push({name:'ASSETS',type:'assets'});mutate(state);assert.throws(()=>assertRemoteState(state,baseline),/Remote deployment guard/);}
+  const incomplete=remote();incomplete.bindings.push({name:'ASSETS',type:'assets'});delete incomplete.observability.logs.invocation_logs;
   assert.throws(()=>assertRemoteState(incomplete,baseline),/OBSERVABILITY_INCOMPLETE/);
 });

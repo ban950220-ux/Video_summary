@@ -35,7 +35,7 @@ export function assertProductionTarget(config,env={}){
   }
   if(/^\s*\[observability\.issues\]|^\s*destinations\s*=/m.test(config))throw Error('Deployment target guard: unobserved observability fields');
   const productionVars=config.split(/^\[vars\]\s*$/m)[1]?.split(/^\[/m)[0]??'';
-  for(const [key,value] of Object.entries({ENABLE_LIVE_FREE:'false',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'})){
+  for(const [key,value] of Object.entries({ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'})){
     if(!new RegExp(`^${key}\\s*=\\s*"${value}"\\s*$`,'m').test(productionVars))throw Error(`Deployment target guard: invalid ${key}`);
   }
   if(/^\s*(ACCESS_AUD|ACCESS_TEAM_DOMAIN|ACCESS_OWNER_EMAIL|KEY_ENCRYPTION_KEY_B64)\s*=/m.test(config)){
@@ -44,6 +44,10 @@ export function assertProductionTarget(config,env={}){
   const previewConfig=config.split(/^\[previews(?:\.|\])|^previews\s*=/m)[1]??'';
   if(/database_id\s*=|\[\[previews\.d1_databases\]\]/m.test(previewConfig)){
     throw Error('Deployment target guard: preview must not bind production D1');
+  }
+  const previewVars=config.split(/^\[previews\.vars\]\s*$/m)[1]?.split(/^\[/m)[0]??'';
+  for(const [key,value] of Object.entries({ENABLE_LIVE_FREE:'false',ALLOW_PAID_API:'false',SITE_DEPLOYED:'false'})){
+    if(!new RegExp(`^${key}\\s*=\\s*"${value}"\\s*$`,'m').test(previewVars))throw Error(`Deployment target guard: invalid preview ${key}`);
   }
   if(env.WRANGLER_CI_OVERRIDE_NAME&&env.WRANGLER_CI_OVERRIDE_NAME!=='holy-rice-b914'){
     throw Error('Deployment target guard: WRANGLER_CI_OVERRIDE_NAME targets a different Worker');

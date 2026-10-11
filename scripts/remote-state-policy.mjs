@@ -37,12 +37,13 @@ const baselineObservability={
 };
 
 export const approvedRemoteBaseline={
-  activeVersionId:'a33b9720-c167-4998-b8cb-3b065439b0d0',
+  activeVersionId:'5bac92f0-c885-4973-8be8-72750482c50b',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
-  assetsPresent:false,
-  // Read-only preflight e9c72f29 confirmed the exact observed baseline at ec69db7.
+  assetsPresent:true,
+  // The previous guarded deploy installed ASSETS; recheck all remote state before the next upload.
   remoteSettingsReviewed:true,
+  runtimeFlags:{ENABLE_LIVE_FREE:'false',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'},
   optionalScriptFields:{limits:{present:false},placement_mode:{present:false},streaming_tail_consumers:{present:false}},
   scriptSettings:{logpush:false,tail_consumers:null,observability:baselineObservability},
   observability:baselineObservability,
@@ -70,7 +71,9 @@ export function assertRemoteState(remote,baseline,{postDeploy=false}={}){
   if(!shape.unique||!shape.complete)fail('BINDINGS_UNEXPECTED');
   const bindings=new Map(remote.bindings.map(binding=>[binding.name,binding]));
   if(bindings.get('DB')?.id!==baseline.databaseId)fail('D1_MISMATCH');
-  for(const [name,value] of Object.entries({ENABLE_LIVE_FREE:'false',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'})){
+  const expectedFlags={...baseline.runtimeFlags,...(postDeploy?{ENABLE_LIVE_FREE:'true'}:{})};
+  if(!baseline.runtimeFlags||baseline.runtimeFlags.ALLOW_PAID_API!=='false'||baseline.runtimeFlags.SITE_DEPLOYED!=='true'||!['false','true'].includes(baseline.runtimeFlags.ENABLE_LIVE_FREE))fail('RUNTIME_FLAGS_BASELINE_INVALID');
+  for(const [name,value] of Object.entries(expectedFlags)){
     if(bindings.get(name)?.text!==value)fail('RUNTIME_FLAGS_MISMATCH');
   }
   if(typeof bindings.get('ACCESS_AUD')?.text!=='string'||bindings.get('ACCESS_AUD').text.length<12||!/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(bindings.get('ACCESS_TEAM_DOMAIN')?.text??''))fail('ACCESS_VARS_MISSING');

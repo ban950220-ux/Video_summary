@@ -6,7 +6,7 @@ import {assertProductionBranch} from '../scripts/production-branch.mjs';
 
 const config=readFileSync(new URL('../wrangler.toml',import.meta.url),'utf8');
 
-test('production target, existing D1 and disabled paid/live API pass offline guard',()=>{
+test('production target, existing D1, enabled free and disabled paid API pass offline guard',()=>{
   assert.equal(assertProductionTarget(config),true);
 });
 
@@ -25,9 +25,11 @@ test('Workers Builds detached checkout uses branch and commit metadata',()=>{
   assert.throws(()=>assertProductionBranch({},'codex/production-config-review',sha),/main branch/);
 });
 
-test('public Access values, live API and production D1 in previews fail',()=>{
+test('public Access values, wrong free API setting and production D1 in previews fail',()=>{
   assert.throws(()=>assertProductionTarget(config+'\nACCESS_AUD = "do-not-publish"\n'),/private Access/);
-  assert.throws(()=>assertProductionTarget(config.replace('ENABLE_LIVE_FREE = "false"','ENABLE_LIVE_FREE = "true"')),/ENABLE_LIVE_FREE/);
+  assert.throws(()=>assertProductionTarget(config.replace('ENABLE_LIVE_FREE = "true"','ENABLE_LIVE_FREE = "false"')),/ENABLE_LIVE_FREE/);
+  assert.throws(()=>assertProductionTarget(config.replace('[previews.vars]\nENABLE_LIVE_FREE = "false"','[previews.vars]\nENABLE_LIVE_FREE = "true"')),/preview ENABLE_LIVE_FREE/);
+  assert.throws(()=>assertProductionTarget(config.replace('[previews.vars]\nENABLE_LIVE_FREE = "false"\nALLOW_PAID_API = "false"','[previews.vars]\nENABLE_LIVE_FREE = "false"\nALLOW_PAID_API = "true"')),/preview ALLOW_PAID_API/);
   assert.throws(()=>assertProductionTarget(config+'\n[[previews.d1_databases]]\ndatabase_id = "d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34"\n'),/preview/);
 });
 

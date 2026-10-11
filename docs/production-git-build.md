@@ -1,5 +1,22 @@
 # Existing Worker Git Build handoff
 
+## Current guarded free-provider rollout
+
+The current 100% active version is `5bac92f0-c885-4973-8be8-72750482c50b`
+from source `f5e3f8b776a515bc5f5af734e6ea0ec530f59913`. It already has one
+`ASSETS` binding. The next guarded deployment expects `ENABLE_LIVE_FREE=false`
+before upload and `ENABLE_LIVE_FREE=true` afterward. `ALLOW_PAID_API=false`,
+`SITE_DEPLOYED=true`, the production D1 binding, owner-only Access, secrets,
+exposure and metadata remain guarded. Preview flags remain disabled. The
+precheck rereads remote state twice immediately before upload; a mismatch
+blocks the deployment. Free-provider execution also requires a current
+provider-specific D1 quota grant and confirmed billing-disabled status.
+Passing local tests does not verify a provider call or a complete video result.
+
+The historical first-assets-deployment discussion below describes the prior
+rollout; use the current baseline in `scripts/remote-state-policy.mjs` for the
+next deployment.
+
 This repository now identifies the existing `holy-rice-b914` Worker and its existing
 `DB` binding to `youtube-ai-analyzer-private-db`. The database UUID is deployment
 metadata, not a credential. No database migration or remote write is part of this
@@ -49,10 +66,10 @@ Worker metadata twice before invoking pinned Wrangler with
 missing response fields, or unexpected remote changes stop before upload.
 `--keep-vars` preserves existing dashboard runtime text variables not specified
 by config, including `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN`; the three configured
-flags are explicitly sent as `false`, `false`, and `true`. The existing `ACCESS_OWNER_EMAIL` and
+flags are explicitly sent as `true`, `false`, and `true`. The existing `ACCESS_OWNER_EMAIL` and
 `KEY_ENCRYPTION_KEY_B64` Worker Secrets are not read or changed. Their values
 must never be added to this repository. `ALLOW_PAID_API=false`,
-`ENABLE_LIVE_FREE=false`, and `SITE_DEPLOYED=true` are explicit in the config.
+`ENABLE_LIVE_FREE=true`, and `SITE_DEPLOYED=true` are explicit in the config.
 The production `DB` binding points to the existing database. Never run a D1
 migration or schema command as part of this Build.
 
@@ -131,7 +148,7 @@ automatic approval. The exact observed production response shape was
 independently reconciled before the gate changed.
 
 Its approved baseline currently identifies active version
-`a33b9720-c167-4998-b8cb-3b065439b0d0`. A later deployment must update the
+`5bac92f0-c885-4973-8be8-72750482c50b`. A later deployment must update the
 baseline after independently confirming the then-active version. See
 [the remote guard design](remote-deploy-guard-proposal.md).
 

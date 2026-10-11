@@ -29,7 +29,7 @@ binding = "ASSETS"
 run_worker_first = true
 
 [vars]
-ENABLE_LIVE_FREE = "false"
+ENABLE_LIVE_FREE = "true"
 ALLOW_PAID_API = "false"
 SITE_DEPLOYED = "true"
 # ACCESS_AUD and ACCESS_TEAM_DOMAIN stay in dashboard runtime variables.
