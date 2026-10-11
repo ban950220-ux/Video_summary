@@ -50,6 +50,31 @@ export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,
   const result=await requestJson('https://api.groq.com/openai/v1/audio/transcriptions',{method:'POST',headers:{Authorization:`Bearer ${env.GROQ_API_KEY}`},body:data},fetchFn);
   return {provider:'groq',model:'whisper-large-v3-turbo',text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION',safeRateLimit:result.safeRateLimit};
 }
+function safeGroqSummaryHeaders(headers){
+ const integer=(name,max)=>{const value=headers.get(name);return value!==null&&/^\d{1,9}$/.test(value)&&Number(value)<=max?Number(value):null;};
+ const reset=headers.get('x-ratelimit-reset-tokens');
+ return {retryAfterSeconds:integer('retry-after',3600),remainingRequests:integer('x-ratelimit-remaining-requests',1_000_000),remainingTokens:integer('x-ratelimit-remaining-tokens',1_000_000),tokenReset:typeof reset==='string'&&/^\d{1,5}(?:\.\d{1,2})?s$/.test(reset)?reset:null};
+}
+export async function summarizeTranscriptWithGroq({env,messages,maxCompletionTokens,fetchFn=fetch,beforeFetch}){
+ assertLive(env,'GROQ');
+ if(!env.GROQ_API_KEY)throw new ProviderError('KEY_MISSING','Groq API 키 미설정');
+ if(!Array.isArray(messages)||messages.length!==2||!Number.isSafeInteger(maxCompletionTokens)||maxCompletionTokens<1||maxCompletionTokens>1800)throw new InputError('Groq 요약 요청 범위 오류');
+ const body={model:'openai/gpt-oss-120b',messages,response_format:{type:'json_object'},reasoning_effort:'low',max_completion_tokens:maxCompletionTokens,temperature:0,stream:false};
+ await beforeFetch?.();
+ const response=await fetchFn('https://api.groq.com/openai/v1/chat/completions',{method:'POST',headers:{Authorization:`Bearer ${env.GROQ_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(120000)});
+ const safeRateLimit=safeGroqSummaryHeaders(response.headers);
+ if(!response.ok){const error=new ProviderError(String(response.status),`api.groq.com HTTP ${response.status}`);error.safeRateLimit=safeRateLimit;throw error;}
+ let result;try{result=await response.json();}catch{throw new ProviderError('SUMMARY_RESPONSE_INVALID','요약 응답 JSON을 확인할 수 없습니다.');}
+ const choice=result?.choices?.[0],usage=result?.usage,number=value=>Number.isSafeInteger(value)&&value>=0;
+ const reasoningTokens=usage?.completion_tokens_details?.reasoning_tokens??usage?.reasoning_tokens??null;
+ if(result?.model!=='openai/gpt-oss-120b'||choice?.finish_reason!=='stop'||typeof choice?.message?.content!=='string'||!choice.message.content.trim()||choice.message.tool_calls?.length||choice.message.function_call||!number(usage?.prompt_tokens)||!number(usage?.completion_tokens)||!number(usage?.total_tokens)||usage.total_tokens<usage.prompt_tokens+usage.completion_tokens||usage.completion_tokens>maxCompletionTokens||(reasoningTokens!==null&&(!number(reasoningTokens)||reasoningTokens>usage.completion_tokens))){
+  const error=new ProviderError('SUMMARY_FINISH_UNVERIFIED','요약 종료 상태·모델·실제 사용량을 검토하세요.');
+  error.reviewResult={model:result?.model??null,finishReason:choice?.finish_reason??null,partialText:typeof choice?.message?.content==='string'?choice.message.content.slice(0,12000):null,usage:number(usage?.prompt_tokens)&&number(usage?.completion_tokens)&&number(usage?.total_tokens)?{inputTokens:usage.prompt_tokens,outputTokens:usage.completion_tokens,reasoningTokens:number(reasoningTokens)?reasoningTokens:null,totalTokens:usage.total_tokens}:null};
+  error.safeRateLimit=safeRateLimit;
+  throw error;
+ }
+ return {text:choice.message.content,model:result.model,inputTokens:usage.prompt_tokens,completionTokens:usage.completion_tokens,totalTokens:usage.total_tokens,usage:{inputTokens:usage.prompt_tokens,outputTokens:usage.completion_tokens,reasoningTokens,totalTokens:usage.total_tokens},safeRateLimit};
+}
 function base64Audio(bytes){let out='';for(let i=0;i<bytes.length;i+=12288){const slice=bytes.subarray(i,i+12288);out+=btoa(String.fromCharCode(...slice));}return out;}
 function assertGeminiDeadlinesAtFetch(env){if(env.quotaExpiresAt===undefined&&env.capacityValidUntil===undefined)return;if(!Number.isFinite(env.quotaExpiresAt)||env.quotaExpiresAt<=Date.now()||!Number.isFinite(env.capacityValidUntil)||env.capacityValidUntil<=Date.now()){const error=new ProviderError('CAPACITY_WAIT','제공자 관측치 또는 무료 허가가 전송 직전에 만료됐습니다.');error.preDispatchBlocked=true;throw error;}}
 export async function transcribeOwnedAudioWithGemini({bytes,durationSeconds,env,fetchFn=fetch,beforeFetch}){

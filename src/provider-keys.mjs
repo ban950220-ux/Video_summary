@@ -1,7 +1,7 @@
 // Server-only credential bridge. NEVER import from browser assets.
 // No credential is included in HTTP responses, logs, D1 plaintext or usage events.
 import {configuredMasterKey,decryptProviderKey,providerAllowed} from './vault.mjs';
-import {ProviderError,assertLive,pollSupadataCaption,fetchSupadataCaption,transcribeOwnedAudio,transcribeOwnedAudioWithGemini,summarizeTranscriptWithGemini} from './adapters.mjs';
+import {ProviderError,assertLive,pollSupadataCaption,fetchSupadataCaption,transcribeOwnedAudio,transcribeOwnedAudioWithGemini,summarizeTranscriptWithGemini,summarizeTranscriptWithGroq} from './adapters.mjs';
 
 const CONFIG={supadata:'SUPADATA',groq:'GROQ',gemini:'GEMINI',assemblyai:'ASSEMBLYAI'};
 
@@ -43,6 +43,11 @@ export async function runTranscriptSummary({env,text,fetchFn=fetch,beforeDispatc
   const prepared=await ephemeralEnv(env,'gemini');
   await beforeDispatch?.();
   return summarizeTranscriptWithGemini(text,prepared,fetchFn,beforeFetch);
+}
+export async function runOwnedGroqSummary({env,messages,maxCompletionTokens,fetchFn=fetch,beforeDispatch,beforeFetch}){
+ const prepared=await ephemeralEnv(env,'groq');
+ await beforeDispatch?.();
+ return summarizeTranscriptWithGroq({env:prepared,messages,maxCompletionTokens,fetchFn,beforeFetch});
 }
 /** Only lawful owner-uploaded audio, <=24MB per call. The live route chunks MP3 files before invoking this adapter. */
 export async function runOwnedAudioTranscription({env,bytes,name,mime,durationSeconds,fetchFn=fetch,beforeDispatch,beforeFetch}){

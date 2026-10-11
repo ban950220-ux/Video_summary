@@ -37,6 +37,21 @@ export async function runApprovedFreeBatch({jobId,fileSha256,approvedChunkIds,ch
  }
  return {complete:true,summaryStarted:false,reason:'BATCH_COMPLETE_BEFORE_SUMMARY'};
 }
+export async function runApprovedGroqSummary({jobId,scope,getApproval,sendStage,wait,foreground=()=>true,now=Date.now,onUpdate=()=>{}}){
+ if(scope?.jobId!==jobId||scope.model!=='openai/gpt-oss-120b'||scope.state!=='APPROVED'||!Number.isSafeInteger(scope.maxRequests)||scope.maxRequests<1)return {complete:false,reason:'SUMMARY_APPROVAL_INVALID'};
+ for(let stage=0;stage<=scope.maxRequests;stage++){
+  if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED'};
+  const fresh=await getApproval();
+  if(fresh?.jobId!==jobId||fresh.transcriptHash!==scope.transcriptHash||fresh.model!==scope.model||fresh.state!=='APPROVED'||fresh.maxRequests!==scope.maxRequests||fresh.maxInputTokensPerRequest!==scope.maxInputTokensPerRequest||fresh.maxCompletionTokensPerRequest!==scope.maxCompletionTokensPerRequest||fresh.totalTokenUpperBound!==scope.totalTokenUpperBound||fresh.expiresAt!==scope.expiresAt||fresh.expiresAt<=now())return {complete:false,reason:'SUMMARY_APPROVAL_CHANGED'};
+  if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED'};
+  let result;try{result=await sendStage();}catch(error){return {complete:false,reason:error?.code||'SUMMARY_OUTCOME_UNKNOWN_REVIEW_REQUIRED'};}
+  if(!result?.pending)return result?.job?.report?.kind==='GROQ_EVIDENCE_LINKED'?{complete:true,result}:{complete:false,reason:'SUMMARY_RESULT_UNVERIFIED'};
+  onUpdate({stage:result.stage});
+  if(stage===scope.maxRequests)return {complete:false,reason:'SUMMARY_STAGE_LIMIT_REACHED'};
+  try{await wait(61_000);}catch{return {complete:false,reason:'FOREGROUND_REQUIRED'};}
+ }
+ return {complete:false,reason:'SUMMARY_STAGE_LIMIT_REACHED'};
+}
 export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,chooseProvider,authorizedProviders=()=>['groq','gemini'],sendChunk,review429,wait,now=Date.now,foreground=()=>true,onUpdate=()=>{}}){
  for(const chunk of chunks){
   for(;;){
