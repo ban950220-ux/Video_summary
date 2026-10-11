@@ -16,7 +16,23 @@ const requiredObservability={
 };
 const valueAt=(obj,path)=>path.split('.').reduce((value,key)=>value?.[key],obj);
 const canonical=value=>JSON.stringify(value,(_,entry)=>entry&&typeof entry==='object'&&!Array.isArray(entry)?Object.fromEntries(Object.entries(entry).sort(([a],[b])=>a.localeCompare(b))):entry);
+export const sameCanonical=(left,right)=>canonical(left)===canonical(right);
 const fail=code=>{throw Error(`Remote deployment guard: ${code}`);};
+const requiredBindingTypes=new Map([
+  ['DB','d1'],['ACCESS_AUD','plain_text'],['ACCESS_TEAM_DOMAIN','plain_text'],
+  ['ACCESS_OWNER_EMAIL','secret_text'],['KEY_ENCRYPTION_KEY_B64','secret_text'],
+  ['ENABLE_LIVE_FREE','plain_text'],['ALLOW_PAID_API','plain_text'],['SITE_DEPLOYED','plain_text'],
+]);
+
+export function inspectBindingSet(bindings){
+  if(!Array.isArray(bindings))return {available:false,unique:false,complete:false};
+  const names=bindings.map(binding=>binding?.name);
+  const unique=names.every(name=>typeof name==='string')&&new Set(names).size===names.length;
+  const actual=new Map(bindings.map(binding=>[binding?.name,binding?.type]));
+  const expected=new Map(requiredBindingTypes);
+  if(actual.has('ASSETS'))expected.set('ASSETS','assets');
+  return {available:true,unique,complete:unique&&actual.size===expected.size&&[...expected].every(([name,type])=>actual.get(name)===type)};
+}
 const baselineObservability={
   enabled:true,head_sampling_rate:1,redact_query_string:false,
   logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true,destinations:[]},
@@ -51,19 +67,10 @@ export function assertRemoteState(remote,baseline){
   if(canonical(remote.observability)!==canonical(baseline.observability))fail('OBSERVABILITY_MISMATCH');
   for(const path of Object.keys(requiredObservability))if(valueAt(remote.scriptSettings.observability,path)===undefined||valueAt(baseline.scriptSettings.observability,path)===undefined)fail('SCRIPT_SETTINGS_OBSERVABILITY_INCOMPLETE');
   if(canonical(remote.scriptSettings.observability)!==canonical(baseline.scriptSettings.observability))fail('SCRIPT_SETTINGS_OBSERVABILITY_MISMATCH');
-  if(!Array.isArray(remote.bindings))fail('BINDINGS_UNAVAILABLE');
-  const bindings=new Map();
-  for(const binding of remote.bindings){
-    if(typeof binding?.name!=='string'||bindings.has(binding.name))fail('BINDINGS_UNEXPECTED');
-    bindings.set(binding.name,binding);
-  }
-  const expected=new Map([
-    ['DB','d1'],['ACCESS_AUD','plain_text'],['ACCESS_TEAM_DOMAIN','plain_text'],
-    ['ACCESS_OWNER_EMAIL','secret_text'],['KEY_ENCRYPTION_KEY_B64','secret_text'],
-    ['ENABLE_LIVE_FREE','plain_text'],['ALLOW_PAID_API','plain_text'],['SITE_DEPLOYED','plain_text'],
-  ]);
-  if(bindings.has('ASSETS'))expected.set('ASSETS','assets');
-  if(bindings.size!==expected.size||[...expected].some(([name,type])=>bindings.get(name)?.type!==type))fail('BINDINGS_UNEXPECTED');
+  const shape=inspectBindingSet(remote.bindings);
+  if(!shape.available)fail('BINDINGS_UNAVAILABLE');
+  if(!shape.unique||!shape.complete)fail('BINDINGS_UNEXPECTED');
+  const bindings=new Map(remote.bindings.map(binding=>[binding.name,binding]));
   if(bindings.get('DB')?.id!==baseline.databaseId)fail('D1_MISMATCH');
   for(const [name,value] of Object.entries({ENABLE_LIVE_FREE:'false',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'})){
     if(bindings.get(name)?.text!==value)fail('RUNTIME_FLAGS_MISMATCH');

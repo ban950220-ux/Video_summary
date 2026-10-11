@@ -98,8 +98,13 @@ Build run with its existing `CLOUDFLARE_API_TOKEN`. It requires `WORKERS_CI`,
 reuses the guard's fixed Cloudflare GET endpoints, and never calls Wrangler,
 uploads code, deploys, or writes D1. It is not part of the current Build or
 Deploy commands. Add it to a Build only after separately reviewing that change.
-The JSON output contains only comparison booleans, observability switches and
-sampling rates, optional-field presence/kind, and array counts. It omits
+Exit code 0 and `diagnosticReadSucceeded=true` mean only that the read succeeded.
+`matchesProposedBaseline` and a fixed `mismatchCode` separately report the
+guard's diagnostic comparison; `reviewGateEnabled=false` still blocks deploy.
+The `bindings` result reports availability, unique names, and complete
+expected names/types without listing them. Object key order does not affect
+comparisons. The JSON output contains only comparison booleans, observability
+switches and sampling rates, optional-field presence/kind, and array counts. It omits
 tokens, Access values, raw bindings/responses, account/DB/version IDs, Worker
 tags, routes, domains and consumer names. Unexpected objects are classified
 without printing their contents. A failed read emits only a fixed error code.

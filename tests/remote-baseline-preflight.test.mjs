@@ -32,6 +32,42 @@ test('preflight emits only approved booleans, rates, presence and counts',()=>{
  assert.equal(report.scriptSettings.logpushMatchesProposed,true);
  assert.equal(report.scriptSettings.tailConsumersMatchProposed,false);
  assert.equal(report.reviewGateEnabled,false);
+ assert.equal(report.diagnosticReadSucceeded,true);
+ assert.equal(report.matchesProposedBaseline,false);
+ assert.equal(report.mismatchCode,'ROUTES_MISMATCH');
+});
+
+test('diagnostic ignores object key order and reports complete, unique bindings separately from review approval',()=>{
+ const reorder=value=>Array.isArray(value)?value.map(reorder):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).reverse().map(([key,entry])=>[key,reorder(entry)])):value;
+ const state=remote();
+ state.routes=[];state.domains=[];
+ state.observability=reorder(approvedRemoteBaseline.observability);
+ state.optionalScriptFields=reorder(approvedRemoteBaseline.optionalScriptFields);
+ state.scriptSettings={logpush:false,tail_consumers:[],observability:reorder(approvedRemoteBaseline.scriptSettings.observability)};
+ state.bindings.find(item=>item.name==='ACCESS_AUD').text='TEST_AUDIENCE_LONG_ENOUGH';
+ state.bindings.find(item=>item.name==='ACCESS_TEAM_DOMAIN').text='https://test.cloudflareaccess.com';
+ const report=safeRemoteBaselineReport(state,{WRANGLER_CI_MATCH_TAG:secret});
+ assert.deepEqual(report.bindings,{available:true,unique:true,complete:true});
+ assert.equal(report.metadata.observabilityMatchesProposed,true);
+ assert.equal(report.metadata.optionalFieldsMatchProposed,true);
+ assert.equal(report.scriptSettings.observabilityMatchesProposed,true);
+ assert.equal(report.matchesProposedBaseline,true);
+ assert.equal(report.reviewGateEnabled,false);
+ for(const mutate of [
+  x=>x.bindings.push({...x.bindings[1]}),
+  x=>x.bindings.splice(1,1),
+  x=>x.bindings.push({name:'PRIVATE_EXTRA',type:'plain_text',text:secret}),
+  x=>{x.bindings[1].type='secret_text';},
+ ]){
+  const changed=structuredClone(state);mutate(changed);
+  const result=safeRemoteBaselineReport(changed,{WRANGLER_CI_MATCH_TAG:secret});
+  assert.equal(result.bindings.complete,false);
+  assert.equal(result.matchesProposedBaseline,false);
+  assert.equal(result.mismatchCode,'BINDINGS_UNEXPECTED');
+  assert.ok(!JSON.stringify(result).includes(secret));
+ }
+ const duplicate=structuredClone(state);duplicate.bindings.push({...duplicate.bindings[1]});
+ assert.equal(safeRemoteBaselineReport(duplicate).bindings.unique,false);
 });
 
 test('preflight uses only fixed Cloudflare GET endpoints and never logs API data on failure',async()=>{
