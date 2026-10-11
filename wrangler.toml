@@ -3,6 +3,11 @@ name = "holy-rice-b914"
 main = "src/site-worker.mjs"
 compatibility_date = "2026-10-10"
 workers_dev = true
+preview_urls = false
+keep_vars = true
+
+[observability]
+enabled = true
 
 [assets]
 directory = "./web/site"
