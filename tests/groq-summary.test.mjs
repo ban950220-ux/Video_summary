@@ -139,29 +139,44 @@ test('read-only summary review reports safe failure stage without leaking backen
   assert.doesNotMatch(JSON.stringify(credentialError),/PRIVATE_BACKEND_DETAIL/);
  }finally{f.db.close();}
 });
-test('empty approval read identifies prepare, bind, or first failure without exposing D1 detail',async()=>{
+test('D1 50-byte LIKE limit does not block scoped approval and checkpoint reads',async()=>{
  const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('unexpected provider call');};
- const target="SELECT state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? ORDER BY CAST(substr(id,length(?)+1) AS INTEGER) DESC LIMIT 1";
  try{
-  for(const phase of ['PREPARE','BIND','FIRST']){
-   const env={...f.env,DB:{...f.env.DB,prepare(sql){
-    if(sql!==target)return f.env.DB.prepare(sql);
-    if(phase==='PREPARE')throw Error('D1_ERROR: PRIVATE_BACKEND_DETAIL');
-    const statement=f.env.DB.prepare(sql);
-    return {bind(...args){
-     if(phase==='BIND')throw Error('D1_ERROR: PRIVATE_BACKEND_DETAIL');
-     const bound=statement.bind(...args);
-     return {...bound,async first(){throw Error('D1_ERROR: no such column: PRIVATE_BACKEND_DETAIL');}};
-    }};
-   }}};
-   const response=await routeApi(request(f.path+'/groq-summary-plan'),env);
-   assert.equal(response.status,500);
-   const body=await response.json();assert.equal(body.error.code,'SUMMARY_REVIEW_APPROVAL_'+phase+'_D1_INTERNAL');
-   assert.doesNotMatch(JSON.stringify(body),/PRIVATE_BACKEND_DETAIL/);
-   if(phase==='FIRST')assert.match(body.error.message,/COLUMN \[schema:OK,count:OK,zero:ZERO,simple:OK,fields:OK,order:OK,exactAll:OK\]/);
-  }
+  assert.equal(Buffer.byteLength(f.id+':groq-summary:approval:%'),60);
+  assert.equal(Buffer.byteLength(f.id+':groq-summary:'+f.plan.transcriptHash+':%'),116);
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'groq',0,'DONE',?)").run(f.id+':audio:0',f.id,new Date().toISOString());
+  const env={...f.env,DB:{...f.env.DB,prepare(sql){const statement=f.env.DB.prepare(sql);return {bind(...args){if(sql.includes(' LIKE ?')&&args.some(value=>typeof value==='string'&&Buffer.byteLength(value)>50))throw Error('LIKE or GLOB pattern too complex');return statement.bind(...args);}};}}};
+  const plan=await routeApi(request(f.path+'/groq-summary-plan'),env);assert.equal(plan.status,200,await plan.clone().text());
+  const approval=await routeApi(request(f.path+'/groq-summary-approval'),env);assert.equal(approval.status,200,await approval.clone().text());
+  assert.equal((await approval.json()).approved,false);assert.equal(calls,0);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('approval sequence and job scope reject lookalikes without provider calls',async()=>{
+ const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('unexpected provider call');};
+ const insert=(suffix,jobId,provider,scope)=>f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)").run(f.id+':groq-summary:approval:'+suffix,jobId,provider,0,'STOPPED',new Date().toISOString(),JSON.stringify(scope));
+ try{
+  insert('999','another-job','groq-summary',{sequence:999});insert('998',f.id,'groq',{sequence:998});
+  assert.equal((await routeApi(request(f.path+'/groq-summary-plan'),f.env)).status,200);
+  for(let sequence=0;sequence<=10;sequence++)insert(String(sequence),f.id,'groq-summary',{sequence});
+  const posted=await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);assert.equal(posted.status,200,await posted.clone().text());
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM yta_operations WHERE id=?').get(f.id+':groq-summary:approval:11').n,1);
+  insert('999evil',f.id,'groq-summary',{sequence:999});
+  const rejected=await routeApi(request(f.path+'/groq-summary-plan'),f.env);assert.equal((await rejected.json()).error.code,'SUMMARY_APPROVAL_INVALID');
   assert.equal(calls,0);
  }finally{globalThis.fetch=old;f.db.close();}
+});
+test('checkpoint prefix reads only the current transcript hash and owner job',async()=>{
+ const f=await fixture();
+ const insert=(key,jobId,provider)=>f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)").run(key,jobId,provider,0,'DONE',new Date().toISOString(),'{}');
+ const base=f.id+':groq-summary:'+f.plan.transcriptHash+':';
+ try{
+  insert(f.id+':groq-summary:'+'b'.repeat(64)+':raw:0',f.id,'groq-summary');
+  insert(base+'raw:99','another-job','groq-summary');
+  insert(base+'raw:98',f.id,'groq');
+  const before=await(await routeApi(request(f.path+'/groq-summary-plan'),f.env)).json();assert.equal(before.windowStart,0);
+  insert(base+'raw:0',f.id,'groq-summary');
+  const after=await(await routeApi(request(f.path+'/groq-summary-plan'),f.env)).json();assert.equal(after.windowStart,1);
+ }finally{f.db.close();}
 });
 test('1,226-segment audio source produces a read-only summary scope without provider calls',async()=>{
  const f=await fixture({complete:false});
