@@ -13,7 +13,8 @@ been completed.
    `ENABLE_LIVE_FREE=false` until the specific free-only execution is approved.
    Do not publish credential values.
 2. Transfer the already owned full MP3 from Library in the authorized workflow.
-   Check its byte size/hash against the selected file, duration, every MP3 frame,
+   Record its SHA-256 and byte size, then check the same file hash on resume;
+   inspect its duration, every MP3 frame,
    20 chunk boundaries, <=8 MB per chunk, and overlap before any upload. The
    scanner now rejects a large unparsed tail. Use the full file and the same
    analysis ID when resuming; a short fixture is not acceptable evidence.

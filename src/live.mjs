@@ -139,12 +139,13 @@ export async function routeLive(request,env){
   }
   if(action==='audio-plan'&&request.method==='POST'){
    const body=await readJson(request);if(body.rightsConfirmed!==true)throw new InputError('적법하게 보유한 파일 업로드 확인 필요');
+   if(typeof body.fileSha256!=='string'||!/^[a-f0-9]{64}$/.test(body.fileSha256))throw new InputError('전체 음성 파일 SHA-256이 필요합니다.');
    const chunks=body.chunks;if(!Array.isArray(chunks)||!chunks.length||chunks.length>160)throw new InputError('음성 조각 계획 오류');let edge=0;
    for(let i=0;i<chunks.length;i++){const c=chunks[i];if(c.index!==i||!Number.isFinite(c.start)||!Number.isFinite(c.end)||c.start<0||c.end<=c.start||c.end-c.start>601||c.start>edge+.1||c.start<Math.max(0,edge-5)||c.end>job.duration_seconds+2)throw new InputError('음성 시간축 불연속/범위 오류');edge=c.end;}
    if(Math.abs(edge-job.duration_seconds)>2)throw new InputError('전체 음성 범위를 포함하는 계획이어야 합니다.');
    const exists=await env.DB.prepare('SELECT COUNT(*) AS n FROM yta_audio WHERE job_id=?').bind(id).first();
-   if(exists.n>0){const prior=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results; if(prior.length!==chunks.length||prior.some((c,i)=>Math.abs(c.start_sec-chunks[i].start)>.01||Math.abs(c.end_sec-chunks[i].end)>.01))throw new InputError('기존 음성 계획과 다릅니다.');return json({planned:true,reused:true});}
-   for(const c of chunks)await env.DB.prepare('INSERT INTO yta_audio(job_id,chunk_index,start_sec,end_sec,state) VALUES(?,?,?,?,?)').bind(id,c.index,c.start,c.end,'PLANNED').run();
+   if(exists.n>0){const prior=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results; if(prior.length!==chunks.length||prior.some((c,i)=>Math.abs(c.start_sec-chunks[i].start)>.01||Math.abs(c.end_sec-chunks[i].end)>.01||JSON.parse(c.result_json||'{}').fileSha256!==body.fileSha256))throw new InputError('기존 음성 파일 또는 계획과 다릅니다.');return json({planned:true,reused:true});}
+   for(const c of chunks)await env.DB.prepare('INSERT INTO yta_audio(job_id,chunk_index,start_sec,end_sec,state,result_json) VALUES(?,?,?,?,?,?)').bind(id,c.index,c.start,c.end,'PLANNED',JSON.stringify({fileSha256:body.fileSha256})).run();
    return json({planned:true,chunks:chunks.length,uploadSeconds:chunks.reduce((sum,c)=>sum+c.end-c.start,0)});
   }
   if(action==='audio-progress'&&request.method==='GET'){
@@ -160,7 +161,7 @@ export async function routeLive(request,env){
    const duration=scanMp3(bytes).durationSeconds;if(Math.abs(duration-(chunk.end_sec-chunk.start_sec))>1)throw new InputError('음성 조각 길이와 계획이 다릅니다.');
    const result=await execute(env,{id:id+':audio:'+index,job:id,provider:'groq',units:Math.max(10,Math.ceil(duration))},active=>runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration}));
    if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','음성 조각 전사가 비었습니다. 전체 전사로 처리하지 않습니다.');
-   await env.DB.prepare('UPDATE yta_audio SET state=?,result_json=? WHERE job_id=? AND chunk_index=?').bind('DONE',JSON.stringify(result),id,index).run();return json({index,state:'DONE',segmentCount:result.segments.length});
+   await env.DB.prepare('UPDATE yta_audio SET state=?,result_json=? WHERE job_id=? AND chunk_index=?').bind('DONE',JSON.stringify({...result,fileSha256:JSON.parse(chunk.result_json).fileSha256}),id,index).run();return json({index,state:'DONE',segmentCount:result.segments.length});
   }
   if(action==='audio-finish'&&request.method==='POST'){
    const rows=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];

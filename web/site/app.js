@@ -61,7 +61,8 @@ async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button
   if(live){
    if(state.mode==='url'){progress.textContent='기존 자막 조회 중…';result=await api('/api/jobs/'+id+'/native',{method:'POST',body:{}});if(['NEED_UPLOAD','NATIVE_PENDING'].includes(result.job.status)){showReport(result.job,$('#result-content'),true);throw Error(result.job.status==='NATIVE_PENDING'?'제공자 처리 대기: 이력에서 자막 결과 조회를 사용하세요.':'기존 자막이 없습니다. 보유 음성/자막을 사용하세요.');}}
    if(state.mode==='audio'){
-    await api('/api/jobs/'+id+'/audio-plan',{method:'POST',body:{rightsConfirmed:true,chunks:plan.chunks.map(({index,start,end})=>({index,start,end}))}});
+    const fileSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
+    await api('/api/jobs/'+id+'/audio-plan',{method:'POST',body:{rightsConfirmed:true,fileSha256,chunks:plan.chunks.map(({index,start,end})=>({index,start,end}))}});
     const done=new Set((await api('/api/jobs/'+id+'/audio-progress')).chunks.filter(c=>c.state==='DONE').map(c=>c.index));
     for(const c of plan.chunks){if(done.has(c.index))continue;progress.textContent='음성 전사 '+(c.index+1)+' / '+plan.chunks.length+' (기록 '+id+')';const response=await fetch('/api/jobs/'+id+'/audio-chunk?index='+c.index+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},credentials:'same-origin',body:bytes.slice(c.byteStart,c.byteEnd)});const json=await response.json();if(!response.ok)throw Error(json.error?.message||'음성 처리 실패');}
     result=await api('/api/jobs/'+id+'/audio-finish',{method:'POST',body:{}});showReport(result.job,$('#result-content'),true);
