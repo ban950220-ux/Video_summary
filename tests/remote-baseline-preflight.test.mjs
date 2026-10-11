@@ -70,6 +70,44 @@ test('diagnostic ignores object key order and reports complete, unique bindings 
  assert.equal(safeRemoteBaselineReport(duplicate).bindings.unique,false);
 });
 
+test('diagnostic separates omitted, null and invalid remote fields without exposing values',()=>{
+ const omitted=remote();
+ omitted.compatibilityFlagsPresent=false;
+ delete omitted.compatibilityFlags;
+ delete omitted.observability.logs.destinations;
+ delete omitted.observability.issues;
+ delete omitted.scriptSettings.tail_consumers;
+ const missing=safeRemoteBaselineReport(omitted);
+ assert.deepEqual(missing.metadata.compatibilityFlags,{kind:'OMITTED',count:'OMITTED'});
+ assert.equal(missing.metadata.observability.logs.destinationCount,'OMITTED');
+ assert.equal(missing.metadata.observability.issues.kind,'OMITTED');
+ assert.equal(missing.scriptSettings.tailConsumerCount,'OMITTED');
+ assert.equal(missing.matchesProposedBaseline,false);
+
+ const nulled=remote();
+ nulled.compatibilityFlags=null;
+ nulled.observability.logs.destinations=null;
+ nulled.observability.issues=null;
+ nulled.scriptSettings.tail_consumers=null;
+ const nullReport=safeRemoteBaselineReport(nulled);
+ assert.deepEqual(nullReport.metadata.compatibilityFlags,{kind:'NULL',count:'NULL'});
+ assert.equal(nullReport.metadata.observability.logs.destinationCount,'NULL');
+ assert.equal(nullReport.metadata.observability.issues.kind,'NULL');
+ assert.equal(nullReport.scriptSettings.tailConsumerCount,'NULL');
+
+ const invalid=remote();
+ invalid.compatibilityFlags=secret;
+ invalid.observability.logs.destinations=secret;
+ invalid.observability.issues=secret;
+ invalid.scriptSettings.tail_consumers=secret;
+ const invalidReport=safeRemoteBaselineReport(invalid);
+ assert.deepEqual(invalidReport.metadata.compatibilityFlags,{kind:'INVALID_TYPE',count:'INVALID_TYPE'});
+ assert.equal(invalidReport.metadata.observability.logs.destinationCount,'INVALID_TYPE');
+ assert.equal(invalidReport.metadata.observability.issues.kind,'INVALID_TYPE');
+ assert.equal(invalidReport.scriptSettings.tailConsumerCount,'INVALID_TYPE');
+ assert.ok(!JSON.stringify(invalidReport).includes(secret));
+});
+
 test('preflight uses only fixed Cloudflare GET endpoints and never logs API data on failure',async()=>{
  const calls=[],output=[];
  const fetcher=async(url,options)=>{
@@ -77,7 +115,7 @@ test('preflight uses only fixed Cloudflare GET endpoints and never logs API data
   const path=new URL(url).pathname;
   let result;
   if(path.endsWith('/workers/services/holy-rice-b914'))result={default_environment:{environment:'production',script:{tag:secret}}};
-  else if(path.endsWith('/environments/production'))result={script:{compatibility_date:'2026-10-10',compatibility_flags:[],observability:remote().observability}};
+  else if(path.endsWith('/environments/production'))result={script:{compatibility_date:'2026-10-10',observability:remote().observability}};
   else if(path.endsWith('/bindings'))result=remote().bindings;
   else if(path.endsWith('/subdomain'))result={enabled:true,previews_enabled:false};
   else if(path.endsWith('/routes'))result=[];
@@ -91,6 +129,7 @@ test('preflight uses only fixed Cloudflare GET endpoints and never logs API data
  assert.equal(calls.length,8);
  assert.ok(calls.every(call=>call.method==='GET'&&call.url.startsWith('https://api.cloudflare.com/client/v4/accounts/')));
  assert.ok(!output.join('').includes(secret));
+ assert.deepEqual(JSON.parse(output[0]).metadata.compatibilityFlags,{kind:'OMITTED',count:'OMITTED'});
  const denied=[];
  assert.equal(await runRemoteBaselinePreflight({env:{WORKERS_CI:'1',CLOUDFLARE_API_TOKEN:secret},fetcher:()=>{throw Error(secret);},write:value=>denied.push(value)}),false);
  assert.deepEqual(denied,['REMOTE_BASELINE_PREFLIGHT_FAILED: READ_OR_RESPONSE_INVALID']);

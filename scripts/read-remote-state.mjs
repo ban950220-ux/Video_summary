@@ -39,6 +39,7 @@ export async function readRemoteState({token,fetcher=fetch}={}){
     workersDev:subdomain?.enabled,previewUrls:subdomain?.previews_enabled,
     routes,domains,
     compatibilityDate:metadata?.script?.compatibility_date,
+    compatibilityFlagsPresent:Object.hasOwn(metadata.script,'compatibility_flags'),
     compatibilityFlags:metadata?.script?.compatibility_flags,
     observability:metadata?.script?.observability,
     optionalScriptFields:Object.fromEntries(['limits','placement_mode','streaming_tail_consumers'].map(key=>[key,{present:Object.hasOwn(metadata.script,key),value:metadata.script[key]}])),
