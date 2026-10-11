@@ -391,9 +391,11 @@ export async function routeLive(request,env){
   if(action==='summary'&&request.method==='POST'){
    const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
    if(job.report?.kind==='GEMINI_EVIDENCE_LINKED')return json({job,persisted:true,cached:true});
-   const auditJson=JSON.stringify(job.audit),summarySourceChanged=()=>{const error=new ProviderError('SUMMARY_INPUT_CHANGED','요약 원본·경계 검토 정보가 변경됐습니다. 새로 검토하세요.');error.preDispatchBlocked=true;throw error;};
-   const assertSummarySource=async(operationId,requireClaimed)=>{
-    const row=await env.DB.prepare("SELECT 1 AS ok FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=? AND j.owner_id='owner' AND j.audit_json=? AND j.report_json=? AND s.raw=? AND s.segments_json=? AND NOT EXISTS (SELECT 1 FROM yta_operations d WHERE d.id=? AND d.provider='deletion' AND d.state='DELETING') AND EXISTS (SELECT 1 FROM yta_operations o WHERE o.id=? AND o.job_id=j.id AND o.provider='gemini' AND o.state=?)").bind(id,auditJson,job.report_json,source.raw,source.segments_json,id+':deleting',operationId,requireClaimed?'CLAIMED':'DONE').first();
+   const auditJson=JSON.stringify(job.audit),summarySourceChanged=()=>{const error=new ProviderError('SUMMARY_INPUT_CHANGED','요약 원본·경계 검토 정보 또는 무료 허가가 변경됐습니다. 새로 검토하세요.');error.preDispatchBlocked=true;throw error;};
+   const assertSummarySource=async(operationId,requireClaimed,active)=>{
+    const admission=requireClaimed?" AND EXISTS (SELECT 1 FROM yta_quota q JOIN yta_capacity c ON c.provider=q.provider WHERE q.provider='gemini' AND q.billing_disabled=1 AND q.confirmed_at=? AND q.expires_at=? AND q.expires_at>? AND c.model='gemini-2.5-flash' AND c.billing_disabled=1 AND c.version=? AND c.valid_until=? AND c.valid_until>? AND c.source=? AND NOT EXISTS (SELECT 1 FROM provider_credentials p WHERE p.owner_id='owner' AND p.provider='gemini' AND p.updated_at>q.confirmed_at))":"";
+    const admissionArgs=requireClaimed?[active.quotaConfirmedAt,active.quotaExpiresAt,Date.now(),active.capacityVersion,active.capacityValidUntil,Date.now(),'AI_STUDIO_LIVE:'+await capacityIdentity(env,'gemini')]:[];
+    const row=await env.DB.prepare("SELECT 1 AS ok FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=? AND j.owner_id='owner' AND j.audit_json=? AND j.report_json=? AND s.raw=? AND s.segments_json=? AND NOT EXISTS (SELECT 1 FROM yta_operations d WHERE d.id=? AND d.provider='deletion' AND d.state='DELETING') AND EXISTS (SELECT 1 FROM yta_operations o WHERE o.id=? AND o.job_id=j.id AND o.provider='gemini' AND o.state=?)"+admission).bind(id,auditJson,job.report_json,source.raw,source.segments_json,id+':deleting',operationId,requireClaimed?'CLAIMED':'DONE',...admissionArgs).first();
     if(!row)summarySourceChanged();
    };
    const fingerprint=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([source.segments,job.audit]))))).map(x=>x.toString(16).padStart(2,'0')).join('');
@@ -401,7 +403,7 @@ export async function routeLive(request,env){
    const pending=()=>json({job,persisted:true,pending:true,reason:'NEXT_STAGE_REQUIRES_SEPARATE_REQUEST',minimumWaitSeconds:13},202);
    const ask=async(key,prompt,allowed,stage)=>{
     const operationId=id+':summary:'+fingerprint+':'+key;
-    const beforeSummaryFetch=async active=>{await assertGeminiBeforeFetch(env,active);await assertSummarySource(operationId,true);};
+    const beforeSummaryFetch=async active=>{try{await assertGeminiBeforeFetch(env,active);await assertSummarySource(operationId,true,active);}catch(error){error.preDispatchBlocked=true;throw error;}};
     const response=await execute(env,{id:operationId,job:id,provider:'gemini',units:summaryUnits(prompt)},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true',SUMMARY_STAGE_OUTPUT_TOKENS:stage?'2048':'8192'},text:prompt,beforeDispatch:()=>beforeSummaryFetch(active),beforeFetch:()=>beforeSummaryFetch(active)}),()=>{newCall=true;});
     await assertSummarySource(operationId,false);
     let result;try{if(response.text.length>12000&&stage)throw Error('STAGE_TOO_LONG');result=validateAnalysis(JSON.parse(response.text),allowed);}catch{throw new ProviderError('REPORT_VALIDATION_FAILED','요약 근거 형식 검증 실패. 원문은 보관됐으며 자동 재호출하지 않습니다.');}

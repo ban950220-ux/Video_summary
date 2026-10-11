@@ -208,6 +208,16 @@ test('Gemini summary cannot erase reconciled boundary markers when it read the o
   assert.equal(db.prepare('SELECT report_json FROM jobs WHERE id=?').get(id).report_json,'null');
  }finally{globalThis.fetch=old;db.close();}
 });
+test('Gemini grant revoked during final combined admission never reaches provider',async()=>{
+ const {db,env}=setup(),old=fetch;let calls=0,reads=0;globalThis.fetch=async()=>{calls++;throw Error('provider must not run');};
+ try{
+  const j=await job(env);await grant(env);
+  const original=env.DB;env.DB={...original,prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('SELECT 1 AS ok FROM jobs j JOIN yta_sources s')||!sql.includes('yta_quota q JOIN yta_capacity c'))return statement;return {bind(...args){const bound=statement.bind(...args);return {...bound,async first(){if(++reads===2)db.prepare("UPDATE yta_quota SET expires_at=0 WHERE provider='gemini'").run();return bound.first();}};}};}};
+  const response=await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env);
+  assert.equal((await response.json()).error.code,'SUMMARY_INPUT_CHANGED');assert.equal(reads,2);assert.equal(calls,0);
+  assert.equal(db.prepare("SELECT state FROM yta_operations WHERE provider='gemini'").get().state,'BLOCKED');
+ }finally{globalThis.fetch=old;db.close();}
+});
 test('valid-looking Gemini summary JSON with MAX_TOKENS or SAFETY remains uncertain and reviewable',async()=>{
  const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>Response.json({candidates:[{finishReason:++calls===1?'MAX_TOKENS':'SAFETY',content:{parts:[{text:JSON.stringify(valid())}]}}]});
  try{await grant(env);for(const reason of ['MAX_TOKENS','SAFETY']){const j=await job(env),path='/api/jobs/'+j.id;
