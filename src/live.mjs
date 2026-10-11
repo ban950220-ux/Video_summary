@@ -201,8 +201,9 @@ export async function routeLive(request,env){
    const merged=completedAudio(rows,job.duration_seconds);
    const prior=await sourceOf(env,id);
    if(prior){
-    if(prior.provenance!=='GROQ_OWNED_AUDIO'||prior.raw!==merged.segments.map(segment=>segment.text).join('\n')||JSON.stringify(prior.segments)!==JSON.stringify(normalizeSegments(merged.segments))||job.audit?.audioFileSha256!==merged.fileSha256||job.audit?.audioProcessingCoverage!==1)throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','기존 전사와 음성 계획이 일치하지 않습니다.');
-    return json({job,source:prior,persisted:true,cached:true});
+    const current=await ownedJob(env,id);
+    if(prior.provenance!=='GROQ_OWNED_AUDIO'||prior.raw!==merged.segments.map(segment=>segment.text).join('\n')||JSON.stringify(prior.segments)!==JSON.stringify(normalizeSegments(merged.segments))||current.audit?.audioFileSha256!==merged.fileSha256||current.audit?.audioProcessingCoverage!==1)throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','기존 전사와 음성 계획이 일치하지 않습니다.');
+    return json({job:current,source:prior,persisted:true,cached:true});
    }
    return json(await storeAudioTranscriptOnce(env,job,merged));
   }
