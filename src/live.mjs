@@ -91,7 +91,9 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
 async function assertCapacityBeforeDispatch(env,active,provider){
  const row=await env.DB.prepare('SELECT valid_until,version FROM yta_capacity WHERE provider=?').bind(provider).first();
  if(!row||row.version!==active.capacityVersion||row.valid_until!==active.capacityValidUntil){const error=new ProviderError('CAPACITY_WAIT','공급자 계정 사용량 관측이 바뀌었습니다. 다시 확인하세요.');error.preDispatchBlocked=true;throw error;}
-if(!Number.isFinite(active.quotaExpiresAt)||active.quotaExpiresAt<=Date.now()||!Number.isFinite(active.capacityValidUntil)||active.capacityValidUntil<=Date.now()){const error=new ProviderError('CAPACITY_WAIT','공급자 관측치가 호출 직전에 만료됐습니다.');error.preDispatchBlocked=true;throw error;}}
+ assertCapacityAtFetch(active);
+}
+function assertCapacityAtFetch(active){if(!Number.isFinite(active.quotaExpiresAt)||active.quotaExpiresAt<=Date.now()||!Number.isFinite(active.capacityValidUntil)||active.capacityValidUntil<=Date.now()){const error=new ProviderError('CAPACITY_WAIT','공급자 관측치가 실제 전송 직전에 만료됐습니다.');error.preDispatchBlocked=true;throw error;}}
 async function assertGroqBeforeDispatch(env,id,active){
  try{
   const {quotaExpiresAt}=await grantEnv(env,'groq');
@@ -213,7 +215,7 @@ export async function routeLive(request,env){
    let newCall=false;
    const pending=()=>json({job,persisted:true,pending:true,reason:'NEXT_STAGE_REQUIRES_SEPARATE_REQUEST',minimumWaitSeconds:13},202);
    const ask=async(key,prompt,allowed,stage)=>{
-    const response=await execute(env,{id:id+':summary:'+fingerprint+':'+key,job:id,provider:'gemini',units:summaryUnits(prompt)},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true',SUMMARY_STAGE_OUTPUT_TOKENS:stage?'2048':'8192'},text:prompt,beforeDispatch:()=>assertCapacityBeforeDispatch(env,active,'gemini')}),()=>{newCall=true;});
+    const response=await execute(env,{id:id+':summary:'+fingerprint+':'+key,job:id,provider:'gemini',units:summaryUnits(prompt)},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true',SUMMARY_STAGE_OUTPUT_TOKENS:stage?'2048':'8192'},text:prompt,beforeDispatch:()=>assertCapacityBeforeDispatch(env,active,'gemini'),beforeFetch:()=>assertCapacityAtFetch(active)}),()=>{newCall=true;});
     let result;try{if(response.text.length>12000&&stage)throw Error('STAGE_TOO_LONG');result=validateAnalysis(JSON.parse(response.text),allowed);}catch{throw new ProviderError('REPORT_VALIDATION_FAILED','요약 근거 형식 검증 실패. 원문은 보관됐으며 자동 재호출하지 않습니다.');}
     return result;
    };
@@ -299,8 +301,8 @@ export async function routeLive(request,env){
    try{
     const units=provider==='groq'?Math.max(10,Math.ceil(plannedDuration)):Math.ceil(duration*32)+8704;
     const result=await execute(env,{id:operationId,job:id,provider,units},active=>provider==='groq'?
-     runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:()=>assertGroqBeforeDispatch(env,operationId,active)}):
-     runOwnedGeminiAudio({env:active,bytes,durationSeconds:duration,beforeDispatch:()=>assertCapacityBeforeDispatch(env,active,'gemini')}));
+     runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:()=>assertGroqBeforeDispatch(env,operationId,active),beforeFetch:()=>assertCapacityAtFetch(active)}):
+     runOwnedGeminiAudio({env:active,bytes,durationSeconds:duration,beforeDispatch:()=>assertCapacityBeforeDispatch(env,active,'gemini'),beforeFetch:()=>assertCapacityAtFetch(active)}));
     if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','음성 조각 전사가 비었습니다. 전체 전사로 처리하지 않습니다.');
     const updated=await env.DB.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(JSON.stringify({...result,fileSha256:JSON.parse(chunk.result_json).fileSha256}),id,index).run();
     if(updated.meta?.changes!==1)throw new ProviderError('AUDIO_RESULT_RACE','음성 조각 결과가 다른 요청과 충돌했습니다.');
@@ -311,6 +313,7 @@ export async function routeLive(request,env){
     await env.DB.prepare("UPDATE yta_audio SET state=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(safe?'PAUSED':'UNCERTAIN',id,index).run();
     throw error;
    }
+
   }
   if(action==='audio-finish'&&request.method==='POST'){
    const rows=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];

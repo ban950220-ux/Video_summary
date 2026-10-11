@@ -39,23 +39,23 @@ export async function runNativeCaption({env,url,fetchFn=fetch}){
   return fetchSupadataCaption(url,await ephemeralEnv(env,'supadata'),fetchFn);
 }
 /** Transcript-based Korean summary (not a verified verbatim transcript). Needs quota reservation by caller. */
-export async function runTranscriptSummary({env,text,fetchFn=fetch,beforeDispatch}){
+export async function runTranscriptSummary({env,text,fetchFn=fetch,beforeDispatch,beforeFetch}){
   const prepared=await ephemeralEnv(env,'gemini');
   await beforeDispatch?.();
-  return summarizeTranscriptWithGemini(text,prepared,fetchFn);
+  return summarizeTranscriptWithGemini(text,prepared,fetchFn,beforeFetch);
 }
 /** Only lawful owner-uploaded audio, <=24MB per call. The live route chunks MP3 files before invoking this adapter. */
-export async function runOwnedAudioTranscription({env,bytes,name,mime,durationSeconds,fetchFn=fetch,beforeDispatch}){
+export async function runOwnedAudioTranscription({env,bytes,name,mime,durationSeconds,fetchFn=fetch,beforeDispatch,beforeFetch}){
   const prepared=await ephemeralEnv(env,'groq');
   await beforeDispatch?.();
-  return transcribeOwnedAudio({env:prepared,bytes,name,mime,durationSeconds,fetchFn});
+  return transcribeOwnedAudio({env:prepared,bytes,name,mime,durationSeconds,fetchFn,beforeFetch});
 }
 
 export async function runNativePoll({env,jobId,fetchFn=fetch}){return pollSupadataCaption(jobId,await ephemeralEnv(env,'supadata'),fetchFn);}
 
 /** Approved owner-uploaded MP3 fallback; the caller reserves shared Gemini model capacity. */
-export async function runOwnedGeminiAudio({env,bytes,durationSeconds,fetchFn=fetch,beforeDispatch}){
+export async function runOwnedGeminiAudio({env,bytes,durationSeconds,fetchFn=fetch,beforeDispatch,beforeFetch}){
   const prepared=await ephemeralEnv(env,'gemini');
   await beforeDispatch?.();
-  return transcribeOwnedAudioWithGemini({env:prepared,bytes,durationSeconds,fetchFn});
+  return transcribeOwnedAudioWithGemini({env:prepared,bytes,durationSeconds,fetchFn,beforeFetch});
 }

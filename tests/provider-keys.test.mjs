@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {encryptProviderKey} from '../src/vault.mjs';
-import {resolveProviderKey,runNativeCaption,runTranscriptSummary,runOwnedAudioTranscription} from '../src/provider-keys.mjs';
+import {resolveProviderKey,runNativeCaption,runTranscriptSummary,runOwnedAudioTranscription,runOwnedGeminiAudio} from '../src/provider-keys.mjs';
 
 const root=Buffer.alloc(32,31).toString('base64');
 const mockKey={supadata:'mock-supadata-123456',gemini:'mock-gemini-123456',groq:'mock-groq-123456'};
@@ -45,4 +45,18 @@ test('vault rejection: wrong master key, unsupported provider, and no configured
   await assert.rejects(()=>resolveProviderKey({...env,KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,13).toString('base64')},'supadata'),e=>e.code==='VAULT_DECRYPT_FAILED');
   await assert.rejects(()=>resolveProviderKey(env,'unknown'),e=>e.code==='PROVIDER_NOT_SUPPORTED');
   await assert.rejects(()=>resolveProviderKey(env,'assemblyai'),e=>e.code==='PLAN_UNVERIFIED');
+});
+
+test('Groq fetch boundary rechecks expiry after multipart preparation',async()=>{
+ await store('groq');let calls=0,checks=0;
+ await assert.rejects(()=>runOwnedAudioTranscription({env,bytes:new Uint8Array([1,2,3]),name:'test.mp3',mime:'audio/mpeg',durationSeconds:1,beforeDispatch:()=>{checks++;},beforeFetch:()=>{checks++;const error=new Error('EXPIRED_BEFORE_FETCH');error.preDispatchBlocked=true;throw error;},fetchFn:async()=>{calls++;return Response.json({});}}),/EXPIRED_BEFORE_FETCH/);
+ assert.equal(checks,2);assert.equal(calls,0);
+});
+
+test('Gemini summary and encoded audio recheck capacity at the fetch boundary',async()=>{
+ await store('gemini');let calls=0,checks=0;
+ const beforeFetch=()=>{checks++;throw Error('CAPACITY_EXPIRED_BEFORE_FETCH');};
+ await assert.rejects(()=>runTranscriptSummary({env,text:'sample',beforeFetch,fetchFn:async()=>{calls++;return Response.json({});}}),/CAPACITY_EXPIRED_BEFORE_FETCH/);
+ await assert.rejects(()=>runOwnedGeminiAudio({env,bytes:new Uint8Array(100),durationSeconds:1,beforeFetch,fetchFn:async()=>{calls++;return Response.json({});}}),/CAPACITY_EXPIRED_BEFORE_FETCH/);
+ assert.equal(checks,2);assert.equal(calls,0);
 });
