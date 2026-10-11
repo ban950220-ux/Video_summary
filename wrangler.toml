@@ -7,6 +7,7 @@ preview_urls = false
 keep_vars = true
 
 [observability]
+# Preserve the observed API shape: no destinations or issues configuration.
 enabled = true
 head_sampling_rate = 1
 redact_query_string = false
@@ -16,16 +17,11 @@ enabled = true
 head_sampling_rate = 1
 invocation_logs = true
 persist = true
-destinations = []
 
 [observability.traces]
 enabled = false
 head_sampling_rate = 1
 persist = true
-destinations = []
-
-[observability.issues]
-enabled = false
 
 [assets]
 directory = "./web/site"

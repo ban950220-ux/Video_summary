@@ -42,7 +42,7 @@ export async function readRemoteState({token,fetcher=fetch}={}){
     compatibilityFlagsPresent:Object.hasOwn(metadata.script,'compatibility_flags'),
     compatibilityFlags:metadata?.script?.compatibility_flags,
     observability:metadata?.script?.observability,
-    optionalScriptFields:Object.fromEntries(['limits','placement_mode','streaming_tail_consumers'].map(key=>[key,{present:Object.hasOwn(metadata.script,key),value:metadata.script[key]}])),
+    optionalScriptFields:Object.fromEntries(['limits','placement_mode','streaming_tail_consumers'].map(key=>[key,Object.hasOwn(metadata.script,key)?{present:true,value:metadata.script[key]}:{present:false}])),
     scriptSettings,
     bindings,
   };

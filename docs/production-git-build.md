@@ -79,25 +79,27 @@ retried indefinitely for the same commit, and noninteractive Wrangler accepts
 all remote conflicts when strict mode is absent. The replacement guard pins the
 full active version ID, checks the full observability object, routes, domains,
 workers.dev and preview URL switches, D1 UUID, Access variable/secret presence,
-and runtime flags. It permits only the reviewed `ASSETS` binding addition.
+and runtime flags. It permits the `ASSETS` binding only in the post-deploy check.
 The guard also reads script settings (`logpush`, `tail_consumers`, and the
 separate script-settings `observability` object) and version metadata
-(`streaming_tail_consumers`, limits, placement). The metadata fields may
-legitimately be omitted by the API; the guard records presence separately from
-value. The proposed baseline expects explicit `[]` for streaming tails and
-explicit `null` for limits and placement. These shapes and values are **not
-yet verified from the production API**. `remoteSettingsReviewed=false` blocks
-deployment until an actual response is checked and the presence/value baseline
-is updated and explicitly marked reviewed. Missing required settings or any
-unexpected difference still blocks deployment.
+(`streaming_tail_consumers`, limits, placement). Read-only Build
+`603ce3f5-e363-43c6-994b-b3e520fffefd` at source `055647b1` observed
+omitted compatibility flags, limits, placement mode, streaming tails, log and
+trace destinations, and issues. Script-settings tail consumers was explicitly
+`null`. The baseline records these distinct response shapes without treating
+omission as `[]` or `false`. Wrangler config omits destinations and issues to
+match the observed state. A new active version and `ASSETS` binding are the
+only intentional post-deploy differences; other drift fails the check.
+`remoteSettingsReviewed=false` still blocks deployment until the proposed
+comparison and upload behavior are separately reviewed. A post-deploy API
+shape change fails the postcheck rather than being silently accepted.
 
 ### Read-only baseline preflight
 
-`npm run preflight:remote-baseline` is a separate command for a later Workers
-Build run with its existing `CLOUDFLARE_API_TOKEN`. It requires `WORKERS_CI`,
+`npm run preflight:remote-baseline` is the current Workers Builds deploy command.
+It uses the existing `CLOUDFLARE_API_TOKEN` and requires `WORKERS_CI`,
 reuses the guard's fixed Cloudflare GET endpoints, and never calls Wrangler,
-uploads code, deploys, or writes D1. It is not part of the current Build or
-Deploy commands. Add it to a Build only after separately reviewing that change.
+uploads code, deploys, or writes D1. The actual deploy command remains disabled.
 Exit code 0 and `diagnosticReadSucceeded=true` mean only that the read succeeded.
 `matchesProposedBaseline` and a fixed `mismatchCode` separately report the
 guard's diagnostic comparison; `reviewGateEnabled=false` still blocks deploy.

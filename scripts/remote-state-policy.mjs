@@ -7,12 +7,9 @@ const requiredObservability={
   'logs.head_sampling_rate':true,
   'logs.invocation_logs':true,
   'logs.persist':true,
-  'logs.destinations':true,
   'traces.enabled':true,
   'traces.head_sampling_rate':true,
   'traces.persist':true,
-  'traces.destinations':true,
-  'issues.enabled':true,
 };
 const valueAt=(obj,path)=>path.split('.').reduce((value,key)=>value?.[key],obj);
 const canonical=value=>JSON.stringify(value,(_,entry)=>entry&&typeof entry==='object'&&!Array.isArray(entry)?Object.fromEntries(Object.entries(entry).sort(([a],[b])=>a.localeCompare(b))):entry);
@@ -24,42 +21,41 @@ const requiredBindingTypes=new Map([
   ['ENABLE_LIVE_FREE','plain_text'],['ALLOW_PAID_API','plain_text'],['SITE_DEPLOYED','plain_text'],
 ]);
 
-export function inspectBindingSet(bindings){
+export function inspectBindingSet(bindings,{allowAssets=false}={}){
   if(!Array.isArray(bindings))return {available:false,unique:false,complete:false};
   const names=bindings.map(binding=>binding?.name);
   const unique=names.every(name=>typeof name==='string')&&new Set(names).size===names.length;
   const actual=new Map(bindings.map(binding=>[binding?.name,binding?.type]));
   const expected=new Map(requiredBindingTypes);
-  if(actual.has('ASSETS'))expected.set('ASSETS','assets');
+  if(allowAssets&&actual.has('ASSETS'))expected.set('ASSETS','assets');
   return {available:true,unique,complete:unique&&actual.size===expected.size&&[...expected].every(([name,type])=>actual.get(name)===type)};
 }
 const baselineObservability={
   enabled:true,head_sampling_rate:1,redact_query_string:false,
-  logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true,destinations:[]},
-  traces:{enabled:false,head_sampling_rate:1,persist:true,destinations:[]},
-  issues:{enabled:false},
+  logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true},
+  traces:{enabled:false,head_sampling_rate:1,persist:true},
 };
 
 export const approvedRemoteBaseline={
   activeVersionId:'a33b9720-c167-4998-b8cb-3b065439b0d0',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
-  routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],
-  // Review the real API shape and values, then explicitly approve this baseline.
+  routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
+  // Observed by read-only production preflight 603ce3f5; approval remains separate.
   remoteSettingsReviewed:false,
-  optionalScriptFields:{limits:{present:true,value:null},placement_mode:{present:true,value:null},streaming_tail_consumers:{present:true,value:[]}},
-  scriptSettings:{logpush:false,tail_consumers:[],observability:baselineObservability},
+  optionalScriptFields:{limits:{present:false},placement_mode:{present:false},streaming_tail_consumers:{present:false}},
+  scriptSettings:{logpush:false,tail_consumers:null,observability:baselineObservability},
   observability:baselineObservability,
 };
 
-export function assertRemoteState(remote,baseline){
+export function assertRemoteState(remote,baseline,{allowAssets=false}={}){
   if(baseline?.remoteSettingsReviewed!==true)fail('REMOTE_SETTINGS_BASELINE_UNVERIFIED');
-  if(!remote||!baseline||!Array.isArray(remote.routes)||!Array.isArray(remote.domains)||!Array.isArray(baseline.routes)||!Array.isArray(baseline.domains)||!Array.isArray(remote.compatibilityFlags)||!Array.isArray(baseline.compatibilityFlags))fail('METADATA_INCOMPLETE');
+  if(!remote||!baseline||!Array.isArray(remote.routes)||!Array.isArray(remote.domains)||!Array.isArray(baseline.routes)||!Array.isArray(baseline.domains)||typeof remote.compatibilityFlagsPresent!=='boolean'||typeof baseline.compatibilityFlagsPresent!=='boolean'||(remote.compatibilityFlagsPresent&&!Array.isArray(remote.compatibilityFlags))||(baseline.compatibilityFlagsPresent&&!Array.isArray(baseline.compatibilityFlags)))fail('METADATA_INCOMPLETE');
   if(remote?.workerName!=='holy-rice-b914'||remote.environment!=='production')fail('WORKER_TARGET_MISMATCH');
   if(!Array.isArray(remote.activeVersions)||remote.activeVersions.length!==1||remote.activeVersions[0]?.percentage!==100||remote.activeVersions[0]?.id!==baseline?.activeVersionId)fail('ACTIVE_VERSION_MISMATCH');
   if(remote.workersDev!==true||remote.previewUrls!==false)fail('PUBLIC_URL_SETTINGS_MISMATCH');
   if(canonical(remote.routes)!==canonical(baseline.routes)||canonical(remote.domains)!==canonical(baseline.domains))fail('ROUTES_MISMATCH');
-  if(remote.compatibilityDate!==baseline.compatibilityDate||canonical(remote.compatibilityFlags)!==canonical(baseline.compatibilityFlags))fail('COMPATIBILITY_MISMATCH');
-  if(!remote.scriptSettings||typeof remote.scriptSettings.logpush!=='boolean'||!Array.isArray(remote.scriptSettings.tail_consumers)||!remote.scriptSettings.observability||!remote.optionalScriptFields||Object.keys(baseline.optionalScriptFields||{}).some(key=>typeof remote.optionalScriptFields[key]?.present!=='boolean'))fail('SCRIPT_SETTINGS_INCOMPLETE');
+  if(remote.compatibilityDate!==baseline.compatibilityDate||remote.compatibilityFlagsPresent!==baseline.compatibilityFlagsPresent||canonical(remote.compatibilityFlags)!==canonical(baseline.compatibilityFlags))fail('COMPATIBILITY_MISMATCH');
+  if(!remote.scriptSettings||typeof remote.scriptSettings.logpush!=='boolean'||!Object.hasOwn(remote.scriptSettings,'tail_consumers')||!(remote.scriptSettings.tail_consumers===null||Array.isArray(remote.scriptSettings.tail_consumers))||!remote.scriptSettings.observability||!remote.optionalScriptFields||Object.keys(baseline.optionalScriptFields||{}).some(key=>typeof remote.optionalScriptFields[key]?.present!=='boolean'))fail('SCRIPT_SETTINGS_INCOMPLETE');
   if(canonical(remote.scriptSettings.logpush)!==canonical(baseline.scriptSettings?.logpush)||canonical(remote.scriptSettings.tail_consumers)!==canonical(baseline.scriptSettings?.tail_consumers)||canonical(remote.optionalScriptFields)!==canonical(baseline.optionalScriptFields))fail('SCRIPT_SETTINGS_MISMATCH');
   for(const path of Object.keys(requiredObservability)){
     if(valueAt(remote.observability,path)===undefined||valueAt(baseline.observability,path)===undefined)fail('OBSERVABILITY_INCOMPLETE');
@@ -67,7 +63,7 @@ export function assertRemoteState(remote,baseline){
   if(canonical(remote.observability)!==canonical(baseline.observability))fail('OBSERVABILITY_MISMATCH');
   for(const path of Object.keys(requiredObservability))if(valueAt(remote.scriptSettings.observability,path)===undefined||valueAt(baseline.scriptSettings.observability,path)===undefined)fail('SCRIPT_SETTINGS_OBSERVABILITY_INCOMPLETE');
   if(canonical(remote.scriptSettings.observability)!==canonical(baseline.scriptSettings.observability))fail('SCRIPT_SETTINGS_OBSERVABILITY_MISMATCH');
-  const shape=inspectBindingSet(remote.bindings);
+  const shape=inspectBindingSet(remote.bindings,{allowAssets});
   if(!shape.available)fail('BINDINGS_UNAVAILABLE');
   if(!shape.unique||!shape.complete)fail('BINDINGS_UNEXPECTED');
   const bindings=new Map(remote.bindings.map(binding=>[binding.name,binding]));

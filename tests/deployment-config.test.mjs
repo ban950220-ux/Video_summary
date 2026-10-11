@@ -36,4 +36,6 @@ test('production config preserves remote preview, logs, and dashboard variables'
   assert.throws(()=>assertProductionTarget(config.replace('keep_vars = true','keep_vars = false')),/dashboard variables/);
   assert.throws(()=>assertProductionTarget(config.replace('redact_query_string = false','redact_query_string = true')),/observability/);
   assert.throws(()=>assertProductionTarget(config.replace('invocation_logs = true','invocation_logs = false')),/observability/);
+  assert.throws(()=>assertProductionTarget(config.replace('invocation_logs = true','invocation_logs = true\ndestinations = []')),/unobserved observability fields/);
+  assert.throws(()=>assertProductionTarget(config.replace('[assets]','[observability.issues]\nenabled = false\n\n[assets]')),/unobserved observability fields/);
 });

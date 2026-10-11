@@ -22,9 +22,8 @@ export function assertProductionTarget(config,env={}){
   }
   for(const [section,fields] of Object.entries({
     observability:{enabled:'true',head_sampling_rate:'1',redact_query_string:'false'},
-    'observability.logs':{enabled:'true',head_sampling_rate:'1',invocation_logs:'true',persist:'true',destinations:'[]'},
-    'observability.traces':{enabled:'false',head_sampling_rate:'1',persist:'true',destinations:'[]'},
-    'observability.issues':{enabled:'false'},
+    'observability.logs':{enabled:'true',head_sampling_rate:'1',invocation_logs:'true',persist:'true'},
+    'observability.traces':{enabled:'false',head_sampling_rate:'1',persist:'true'},
   })){
     const marker=`[${section}]`,parts=config.split(marker);
     if(parts.length!==2)throw Error(`Deployment target guard: invalid ${section}`);
@@ -34,6 +33,7 @@ export function assertProductionTarget(config,env={}){
       if(entries.length!==1||entries[0][1].trim()!==value)throw Error(`Deployment target guard: invalid ${section}.${key}`);
     }
   }
+  if(/^\s*\[observability\.issues\]|^\s*destinations\s*=/m.test(config))throw Error('Deployment target guard: unobserved observability fields');
   const productionVars=config.split(/^\[vars\]\s*$/m)[1]?.split(/^\[/m)[0]??'';
   for(const [key,value] of Object.entries({ENABLE_LIVE_FREE:'false',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'})){
     if(!new RegExp(`^${key}\\s*=\\s*"${value}"\\s*$`,'m').test(productionVars))throw Error(`Deployment target guard: invalid ${key}`);

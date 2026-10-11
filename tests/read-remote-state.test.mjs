@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readRemoteState,assertRemoteDeploymentBaseline} from '../scripts/read-remote-state.mjs';
 import {approvedRemoteBaseline} from '../scripts/remote-state-policy.mjs';
 
-function fakeApi({status=200,observability=approvedRemoteBaseline.observability,scriptSettings=approvedRemoteBaseline.scriptSettings,omitOptional=false}={}){
+function fakeApi({status=200,observability=approvedRemoteBaseline.observability,scriptSettings=approvedRemoteBaseline.scriptSettings,includeOptional=false}={}){
   const seen=[];
   const fetcher=async(url,options)=>{
     seen.push({url,method:options.method,tokenPresent:options.headers.Authorization==='Bearer TEST_ONLY_TOKEN'});
@@ -11,7 +11,7 @@ function fakeApi({status=200,observability=approvedRemoteBaseline.observability,
     const path=new URL(url).pathname;
     let result;
     if(path.endsWith('/workers/services/holy-rice-b914'))result={default_environment:{environment:'production',script:{tag:'TEST_WORKER_TAG'}}};
-    else if(path.endsWith('/environments/production'))result={script:{compatibility_date:'2026-10-10',compatibility_flags:[],observability,...(omitOptional?{}:{streaming_tail_consumers:[],limits:null,placement_mode:null})}};
+    else if(path.endsWith('/environments/production'))result={script:{compatibility_date:'2026-10-10',observability,...(includeOptional?{streaming_tail_consumers:[],limits:null,placement_mode:null}:{})}};
     else if(path.endsWith('/bindings'))result=[
       {name:'DB',type:'d1',id:approvedRemoteBaseline.databaseId},
       {name:'ACCESS_AUD',type:'plain_text',text:'TEST_ONLY_AUDIENCE'},
@@ -50,7 +50,6 @@ test('guard fails closed when token, API read or observability fields are unavai
   await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({scriptSettings:{tail_consumers:[]}}).fetcher,baseline}),/SCRIPT_SETTINGS_INCOMPLETE/);
   await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({scriptSettings:{...approvedRemoteBaseline.scriptSettings,observability:{enabled:false}}}).fetcher,baseline}),/SCRIPT_SETTINGS_OBSERVABILITY_INCOMPLETE/);
   await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi().fetcher,ciMatchTag:'OTHER',baseline}),/WORKER_TAG_MISMATCH/);
-  await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({omitOptional:true}).fetcher,baseline}),/SCRIPT_SETTINGS_MISMATCH/);
-  const reviewedAbsence={...baseline,optionalScriptFields:Object.fromEntries(['limits','placement_mode','streaming_tail_consumers'].map(key=>[key,{present:false}]))};
-  assert.equal((await assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({omitOptional:true}).fetcher,baseline:reviewedAbsence})).environment,'production');
+  await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({includeOptional:true}).fetcher,baseline}),/SCRIPT_SETTINGS_MISMATCH/);
+  assert.equal((await assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi().fetcher,baseline})).environment,'production');
 });

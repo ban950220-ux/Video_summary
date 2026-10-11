@@ -8,7 +8,7 @@ const remote=()=>({
  workerName:'holy-rice-b914',environment:'production',workerTag:secret,
  activeVersions:[{id:approvedRemoteBaseline.activeVersionId,percentage:100}],
  workersDev:true,previewUrls:false,routes:[{pattern:secret}],domains:[{hostname:secret}],deploymentMessage:secret,
- compatibilityDate:'2026-10-10',compatibilityFlags:[],
+ compatibilityDate:'2026-10-10',compatibilityFlagsPresent:true,compatibilityFlags:[],
  observability:{...structuredClone(approvedRemoteBaseline.observability),logs:{...approvedRemoteBaseline.observability.logs,destinations:[secret]}},
  optionalScriptFields:{limits:{present:false},placement_mode:{present:true,value:null},streaming_tail_consumers:{present:true,value:[{service:secret}]}},
  scriptSettings:{logpush:false,tail_consumers:[{service:secret}],observability:{...structuredClone(approvedRemoteBaseline.observability),traces:{...approvedRemoteBaseline.observability.traces,destinations:[secret]}},tags:[secret]},
@@ -41,9 +41,10 @@ test('diagnostic ignores object key order and reports complete, unique bindings 
  const reorder=value=>Array.isArray(value)?value.map(reorder):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).reverse().map(([key,entry])=>[key,reorder(entry)])):value;
  const state=remote();
  state.routes=[];state.domains=[];
+ state.compatibilityFlagsPresent=false;delete state.compatibilityFlags;
  state.observability=reorder(approvedRemoteBaseline.observability);
  state.optionalScriptFields=reorder(approvedRemoteBaseline.optionalScriptFields);
- state.scriptSettings={logpush:false,tail_consumers:[],observability:reorder(approvedRemoteBaseline.scriptSettings.observability)};
+ state.scriptSettings={logpush:false,tail_consumers:null,observability:reorder(approvedRemoteBaseline.scriptSettings.observability)};
  state.bindings.find(item=>item.name==='ACCESS_AUD').text='TEST_AUDIENCE_LONG_ENOUGH';
  state.bindings.find(item=>item.name==='ACCESS_TEAM_DOMAIN').text='https://test.cloudflareaccess.com';
  const report=safeRemoteBaselineReport(state,{WRANGLER_CI_MATCH_TAG:secret});

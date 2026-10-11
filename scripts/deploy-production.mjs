@@ -22,6 +22,6 @@ for(let i=0;i<2;i++){
   const after=await readRemoteState({token:process.env.CLOUDFLARE_API_TOKEN});
   if(process.env.WRANGLER_CI_MATCH_TAG&&after.workerTag!==process.env.WRANGLER_CI_MATCH_TAG)throw Error('Production deploy: POST_DEPLOY_WORKER_TAG_MISMATCH');
   assertDeployedVersion(after,deployed);
-  assertRemoteState(after,{...approvedRemoteBaseline,activeVersionId:deployed.versionId});
+  assertRemoteState(after,{...approvedRemoteBaseline,activeVersionId:deployed.versionId},{allowAssets:true});
 }
 console.log('Production deploy completed and remote metadata rechecked. Verify owner-only Access separately.');
