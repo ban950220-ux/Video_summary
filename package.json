@@ -6,6 +6,7 @@
   "scripts": {
     "build:dashboard": "node scripts/build-dashboard.mjs",
     "check:deployment": "node scripts/guard-production-target.mjs",
+    "preflight:remote-baseline": "node scripts/remote-baseline-preflight.mjs",
     "deploy:production": "node scripts/deploy-production.mjs",
     "preview:blocked": "node scripts/preview-blocked.mjs",
     "pretest": "npm run build:dashboard",

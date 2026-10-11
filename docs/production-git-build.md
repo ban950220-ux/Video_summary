@@ -90,6 +90,23 @@ yet verified from the production API**. `remoteSettingsReviewed=false` blocks
 deployment until an actual response is checked and the presence/value baseline
 is updated and explicitly marked reviewed. Missing required settings or any
 unexpected difference still blocks deployment.
+
+### Read-only baseline preflight
+
+`npm run preflight:remote-baseline` is a separate command for a later Workers
+Build run with its existing `CLOUDFLARE_API_TOKEN`. It requires `WORKERS_CI`,
+reuses the guard's fixed Cloudflare GET endpoints, and never calls Wrangler,
+uploads code, deploys, or writes D1. It is not part of the current Build or
+Deploy commands. Add it to a Build only after separately reviewing that change.
+The JSON output contains only comparison booleans, observability switches and
+sampling rates, optional-field presence/kind, and array counts. It omits
+tokens, Access values, raw bindings/responses, account/DB/version IDs, Worker
+tags, routes, domains and consumer names. Unexpected objects are classified
+without printing their contents. A failed read emits only a fixed error code.
+An empty/absent field shown by this command is evidence to review, not
+automatic approval: `remoteSettingsReviewed` stays false until its exact
+production response shape is independently reconciled.
+
 Its approved baseline currently identifies active version
 `a33b9720-c167-4998-b8cb-3b065439b0d0`. A later deployment must update the
 baseline after independently confirming the then-active version. See
