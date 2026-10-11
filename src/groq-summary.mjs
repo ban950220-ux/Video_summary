@@ -87,13 +87,17 @@ function validApproval(scope,jobId,hash,keyIdentity){
 const approvalId=(id,sequence)=>id+':groq-summary:approval:'+sequence;
 const stageId=(id,hash,key)=>id+':groq-summary:'+hash+':'+key;
 function approvalD1Category(error){
- const detail=[error?.message,error?.cause?.message].filter(value=>typeof value==='string').join(' ');
+ const parts=[];let current=error;
+ for(let depth=0;depth<4&&current;depth++,current=current.cause)for(const field of ['name','code','message'])if(typeof current[field]==='string')parts.push(current[field]);
+ const detail=parts.join(' ');
  if(/D1_COLUMN_NOTFOUND|no such column/i.test(detail))return 'COLUMN';
  if(/no such function/i.test(detail))return 'FUNCTION';
  if(/D1_TYPE_ERROR|type mismatch/i.test(detail))return 'TYPE';
- if(/binding|parameter|variable number/i.test(detail))return 'BINDING';
+ if(/binding|parameter|variable number|SQLITE_MISUSE/i.test(detail))return 'BINDING';
  if(/syntax error/i.test(detail))return 'SYNTAX';
- if(/limit|overloaded|timeout|reset|network connection/i.test(detail))return 'RESOURCE';
+ if(/SQLITE_TOOBIG|SQLITE_NOMEM|limit|overloaded|timeout|reset|network connection/i.test(detail))return 'RESOURCE';
+ if(/SQLITE_BUSY|SQLITE_LOCKED/i.test(detail))return 'BUSY';
+ if(/D1_EXEC_ERROR|SQLITE_ERROR/i.test(detail))return 'SQL';
  return 'OTHER';
 }
 async function approvalD1Probes(env,id,query){

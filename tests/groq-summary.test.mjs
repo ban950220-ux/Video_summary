@@ -151,7 +151,7 @@ test('empty approval read identifies prepare, bind, or first failure without exp
     return {bind(...args){
      if(phase==='BIND')throw Error('D1_ERROR: PRIVATE_BACKEND_DETAIL');
      const bound=statement.bind(...args);
-     return {...bound,async first(){throw Error('D1_ERROR: no such column: PRIVATE_BACKEND_DETAIL');}};
+     return {...bound,async first(){throw Error('D1_ERROR: wrapper',{cause:Error('inner wrapper',{cause:Error('SQLITE_ERROR: no such column: PRIVATE_BACKEND_DETAIL')})});}};
     }};
    }}};
    const response=await routeApi(request(f.path+'/groq-summary-plan'),env);
