@@ -139,6 +139,26 @@ test('read-only summary review reports safe failure stage without leaking backen
   assert.doesNotMatch(JSON.stringify(credentialError),/PRIVATE_BACKEND_DETAIL/);
  }finally{f.db.close();}
 });
+test('approval review reads a missing approval without requiring computed SQL ordering',async()=>{
+ const f=await fixture(),old=fetch;let calls=0;
+ globalThis.fetch=async()=>{calls++;throw Error('unexpected provider call');};
+ const env={...f.env,DB:{...f.env.DB,prepare(sql){if(sql.includes('ORDER BY CAST(substr('))throw Error('computed ordering unavailable');return f.env.DB.prepare(sql);}}};
+ try{
+  const plan=await routeApi(request(f.path+'/groq-summary-plan'),env);assert.equal(plan.status,200,await plan.clone().text());
+  const review=await routeApi(request(f.path+'/groq-summary-approval'),env);assert.equal(review.status,200,await review.clone().text());
+  assert.equal((await review.json()).approved,false);
+  assert.equal(calls,0);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('approval review chooses numeric sequence 10 after sequence 9',async()=>{
+ const f=await fixture();
+ try{
+  const at=new Date().toISOString();
+  for(let sequence=0;sequence<=10;sequence++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,0,'STOPPED',?,?)").run(f.id+':groq-summary:approval:'+sequence,f.id,'groq-summary',at,JSON.stringify({sequence}));
+  const posted=await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);assert.equal(posted.status,200,await posted.clone().text());
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM yta_operations WHERE id=?').get(f.id+':groq-summary:approval:11').n,1);
+ }finally{f.db.close();}
+});
 test('1,226-segment audio source produces a read-only summary scope without provider calls',async()=>{
  const f=await fixture({complete:false});
  try{

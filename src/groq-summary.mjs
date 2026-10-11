@@ -86,7 +86,19 @@ function validApproval(scope,jobId,hash,keyIdentity){
 }
 const approvalId=(id,sequence)=>id+':groq-summary:approval:'+sequence;
 const stageId=(id,hash,key)=>id+':groq-summary:'+hash+':'+key;
-async function readApproval(env,id){const row=await env.DB.prepare("SELECT state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? ORDER BY CAST(substr(id,length(?)+1) AS INTEGER) DESC LIMIT 1").bind(id+':groq-summary:approval:%',id,'groq-summary',id+':groq-summary:approval:').first();if(!row)return null;let scope;try{scope=JSON.parse(row.result_json);}catch{stop('SUMMARY_APPROVAL_INVALID','저장된 요약 승인을 검토하세요.');}return {...scope,state:row.state};}
+async function readApproval(env,id){
+ const prefix=approvalId(id,''),rows=(await env.DB.prepare("SELECT id,state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? LIMIT 10001").bind(prefix+'%',id,'groq-summary').all()).results||[];
+ if(rows.length>10000)stop('SUMMARY_APPROVAL_INVALID','저장된 요약 승인을 검토하세요.');
+ let latest=null,sequence=-1;
+ for(const row of rows){
+  const suffix=row.id.slice(prefix.length),number=Number(suffix);
+  if(!/^(0|[1-9][0-9]*)$/.test(suffix)||!Number.isSafeInteger(number))stop('SUMMARY_APPROVAL_INVALID','저장된 요약 승인을 검토하세요.');
+  if(number>sequence){latest=row;sequence=number;}
+ }
+ if(!latest)return null;
+ let scope;try{scope=JSON.parse(latest.result_json);}catch{stop('SUMMARY_APPROVAL_INVALID','저장된 요약 승인을 검토하세요.');}
+ return {...scope,state:latest.state};
+}
 async function guard(env,{id,hash,scope,operationId,sourceOf,ownedJob}){
  const block=()=>{const error=new ProviderError('SUMMARY_APPROVAL_CHANGED','Groq Free 요약 승인·원본·키·만료 상태가 바뀌었습니다.');error.preDispatchBlocked=true;throw error;};
  if(env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')block();
