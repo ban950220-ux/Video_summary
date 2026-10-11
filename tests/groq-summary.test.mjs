@@ -123,6 +123,36 @@ test('Groq summary requires complete stored transcript and exact one-time approv
   assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,409);
  }finally{globalThis.fetch=old;f.db.close();}
 });
+test('read-only summary review reports safe failure stage without leaking backend errors',async()=>{
+ const f=await fixture();
+ const breakRead=pattern=>({...f.env,DB:{...f.env.DB,prepare(sql){if(sql.includes(pattern))throw Error('PRIVATE_BACKEND_DETAIL');return f.env.DB.prepare(sql);}}});
+ try{
+  const source=await routeApi(request(f.path+'/groq-summary-plan'),breakRead('SELECT * FROM yta_sources'));
+  assert.equal(source.status,500);
+  const sourceError=(await source.json()).error;
+  assert.equal(sourceError.code,'SUMMARY_REVIEW_SOURCE_INTERNAL');
+  assert.doesNotMatch(JSON.stringify(sourceError),/PRIVATE_BACKEND_DETAIL/);
+  const credential=await routeApi(request(f.path+'/groq-summary-approval'),breakRead('SELECT cipher_version,iv_b64,ciphertext_b64,updated_at FROM provider_credentials'));
+  assert.equal(credential.status,500);
+  const credentialError=(await credential.json()).error;
+  assert.equal(credentialError.code,'SUMMARY_REVIEW_CREDENTIAL_INTERNAL');
+  assert.doesNotMatch(JSON.stringify(credentialError),/PRIVATE_BACKEND_DETAIL/);
+ }finally{f.db.close();}
+});
+test('summary plan accepts preserved TXT spacing but still rejects changed spoken text',async()=>{
+ const f=await fixture();
+ try{
+  const original=f.db.prepare('SELECT raw FROM yta_sources WHERE job_id=?').get(f.id).raw;
+  f.db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(original.replace('원문 1','원문  1'),f.id);
+  const plan=await routeApi(request(f.path+'/groq-summary-plan'),f.env);
+  assert.equal(plan.status,200,await plan.clone().text());
+  assert.ok((await plan.json()).rawStages>0);
+  f.db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(original.replace('원문 1','변조 1'),f.id);
+  const altered=await routeApi(request(f.path+'/groq-summary-plan'),f.env);
+  assert.equal(altered.status,409);
+  assert.equal((await altered.json()).error.code,'TRANSCRIPT_PERSISTENCE_UNVERIFIED');
+ }finally{f.db.close();}
+});
 test('one approved Groq stage saves usage and report once; cached reopen needs no second provider call',async()=>{
  const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return response();};
  try{await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);

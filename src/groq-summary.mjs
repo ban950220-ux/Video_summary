@@ -77,7 +77,10 @@ async function completeSource(env,job,sourceOf){
  const source=await sourceOf(env,job.id);
  if(job.source_type!=='audio'||job.audit?.audioProcessing!=='ALL_PLANNED_CHUNKS_PROCESSED'||job.audit?.audioProcessingCoverage!==1||!(/^[a-f0-9]{64}$/.test(job.audit?.audioFileSha256||''))||!['GROQ_OWNED_AUDIO','GEMINI_OWNED_AUDIO','MIXED_OWNED_AUDIO'].includes(source?.provenance)||!Array.isArray(source.segments)||!source.segments.length||source.segments.some((part,i)=>part.id!==i+1||typeof part.text!=='string'||!part.text.trim()||!Number.isFinite(part.startMs)||!Number.isFinite(part.endMs)||part.startMs<0||part.endMs<=part.startMs||part.endMs>job.duration_seconds*1000+2000||(i&&part.startMs<source.segments[i-1].startMs)))stop('COMPLETE_TRANSCRIPT_REQUIRED','전체 음성 전사와 저장된 원본 시간축이 먼저 필요합니다.');
  const text=source.segments.map(part=>part.text).join('\n');
- if(source.raw!==text)stop('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 TXT와 전사 구간이 다릅니다.');
+ // The saved TXT retains provider spacing; normalizeSegments collapses spacing
+ // in the timestamped copy. Compare spoken text without rewriting either.
+ const normalized=value=>typeof value==='string'?value.replace(/\s+/gu,' ').trim():null;
+ if(normalized(source.raw)!==normalized(text))stop('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 TXT와 전사 구간이 다릅니다.');
  return {source,transcriptHash:await sha(JSON.stringify([source.raw,source.segments,job.audit.audioFileSha256]))};
 }
 function approvalPublic(scope){return {approved:true,jobId:scope.jobId,transcriptHash:scope.transcriptHash,model:scope.model,windowStart:scope.windowStart,totalRequests:scope.totalRequests,maxRequests:scope.maxRequests,maxInputTokensPerRequest:scope.maxInputTokensPerRequest,maxCompletionTokensPerRequest:scope.maxCompletionTokensPerRequest,totalTokenUpperBound:scope.totalTokenUpperBound,credentialGeneration:scope.credentialGeneration,expiresAt:scope.expiresAt,state:scope.state,remainingAccountTokens:'UNKNOWN'};}
@@ -174,18 +177,20 @@ async function stage(env,{id,hash,scope,key,prompt,allowed,groups,partIds,startM
  }
 }
 export async function handleGroqSummaryAction(request,env,{id,action,job,sourceOf,ownedJob}){
- const {source,transcriptHash}=await completeSource(env,job,sourceOf);
- const audit=promptAudit(job),groups=partitionGroqTranscript(source.segments,audit),totalRequests=groups.length*2-1;
- const rows=(await env.DB.prepare("SELECT id,state,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND id LIKE ?").bind(id,id+':groq-summary:'+transcriptHash+':%').all()).results||[];
+ const reviewing=request.method==='GET'&&['groq-summary-plan','groq-summary-approval'].includes(action);
+ const read=async(stage,fn)=>{try{return await fn();}catch(error){if(!reviewing||error instanceof InputError||error instanceof ProviderError)throw error;throw Object.assign(new Error('요약 범위 읽기 오류 ('+stage+'). 저장된 원문은 보존됩니다.'),{safeReviewCode:'SUMMARY_REVIEW_'+stage+'_INTERNAL'});}};
+ const {source,transcriptHash}=await read('SOURCE',()=>completeSource(env,job,sourceOf));
+ const audit=promptAudit(job),groups=await read('PARTITION',()=>partitionGroqTranscript(source.segments,audit)),totalRequests=groups.length*2-1;
+ const rows=(await read('OPERATIONS',()=>env.DB.prepare("SELECT id,state,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND id LIKE ?").bind(id,id+':groq-summary:'+transcriptHash+':%').all())).results||[];
  if(rows.some(row=>row.state!=='DONE'))stop('SUMMARY_OPERATION_REVIEW_REQUIRED','이전 단계의 불명확한 호출을 검토하세요.');
  const completed=rows.length;if(completed>totalRequests)stop('SUMMARY_OPERATION_REVIEW_REQUIRED','저장된 요약 단계 수를 검토하세요.');
- const previous=await readApproval(env,id),windowStart=completed,maxRequests=Math.min(totalRequests-completed,Math.floor(DAY_CAP/(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP))),totalTokenUpperBound=maxRequests*(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP);
+ const previous=await read('APPROVAL',()=>readApproval(env,id)),windowStart=completed,maxRequests=Math.min(totalRequests-completed,Math.floor(DAY_CAP/(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP))),totalTokenUpperBound=maxRequests*(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP);
  const proposed={jobId:id,transcriptHash,model:GROQ_SUMMARY_MODEL,windowStart,totalRequests,maxRequests,maxInputTokensPerRequest:GROQ_SUMMARY_INPUT_BOUND,maxCompletionTokensPerRequest:GROQ_SUMMARY_COMPLETION_CAP,totalTokenUpperBound,remainingAccountTokens:'UNKNOWN',summaryOnly:true};
  const scopeTag=JSON.stringify([windowStart,totalRequests,maxRequests,totalTokenUpperBound]);
  if(action==='groq-summary-plan'&&request.method==='GET')return json({approved:false,...proposed,rawStages:groups.length});
  if(action==='groq-summary-approval'&&request.method==='GET'){
-  if(assembledCheckpointReport({rows,id,hash:transcriptHash,groups,source,audit}))return json({approved:false,finalizationReady:true,jobId:id,transcriptHash,completed,remainingAccountTokens:'UNKNOWN'});
-  return json(previous?.state==='APPROVED'&&previous.expiresAt>Date.now()&&completed<previous.windowStart+previous.maxRequests?approvalPublic(previous):{approved:false,...proposed,credentialGeneration:await credentialGeneration(env,id,transcriptHash,scopeTag)});
+  if(await read('CHECKPOINT',()=>assembledCheckpointReport({rows,id,hash:transcriptHash,groups,source,audit})))return json({approved:false,finalizationReady:true,jobId:id,transcriptHash,completed,remainingAccountTokens:'UNKNOWN'});
+  return json(previous?.state==='APPROVED'&&previous.expiresAt>Date.now()&&completed<previous.windowStart+previous.maxRequests?approvalPublic(previous):{approved:false,...proposed,credentialGeneration:await read('CREDENTIAL',()=>credentialGeneration(env,id,transcriptHash,scopeTag))});
  }
  if(action==='groq-summary-approval'&&request.method==='POST'){
   let body;try{body=await request.json();}catch{throw new InputError('요약 승인 JSON 오류');}
