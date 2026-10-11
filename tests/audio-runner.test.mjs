@@ -11,6 +11,11 @@ test('Groq summary foreground runner rechecks exact approval and stops on first 
  assert.equal((await runApprovedGroqSummary({...args,foreground:()=>false})).reason,'FOREGROUND_REQUIRED');assert.equal(calls,0);
  assert.equal((await runApprovedGroqSummary({...args,sendStage:async()=>{calls++;throw Object.assign(Error(),{code:'429'});}})).reason,'429');assert.equal(calls,1);
 });
+test('Groq summary runner pauses when the next reviewed window needs separate approval',async()=>{
+ const scope={jobId:'job-a',transcriptHash:'a'.repeat(64),model:'openai/gpt-oss-120b',state:'APPROVED',expiresAt:200000,windowStart:0,totalRequests:50,maxRequests:2,maxInputTokensPerRequest:4800,maxCompletionTokensPerRequest:1800,totalTokenUpperBound:13200,credentialGeneration:'opaque'};
+ let calls=0;const result=await runApprovedGroqSummary({jobId:'job-a',scope,getApproval:async()=>calls===2?{approved:false,jobId:'job-a',transcriptHash:scope.transcriptHash,windowStart:2,totalRequests:50}:scope,sendStage:async()=>{calls++;return {pending:true,stage:'raw:'+calls};},wait:async()=>{},now:()=>100000});
+ assert.equal(result.reason,'SUMMARY_WINDOW_COMPLETE');assert.equal(result.completed,2);assert.equal(calls,2);
+});
 
 test('approved Groq batch runs sequentially in foreground and stops before summary',async()=>{
  const planned=[{index:6},{index:7}],sent=[],waits=[];let clock=1000;
