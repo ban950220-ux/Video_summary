@@ -41,7 +41,22 @@ export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,
   const data=new FormData();data.append('file',new Blob([bytes],{type:mime||'application/octet-stream'}),name);
   data.append('model','whisper-large-v3-turbo');data.append('response_format','verbose_json');data.append('temperature','0');data.append('timestamp_granularities[]','segment');
   const result=await requestJson('https://api.groq.com/openai/v1/audio/transcriptions',{method:'POST',headers:{Authorization:`Bearer ${env.GROQ_API_KEY}`},body:data},fetchFn);
-  return {provider:'groq',text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION'};
+  return {provider:'groq',model:'whisper-large-v3-turbo',text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION'};
+}
+function base64Audio(bytes){let out='';for(let i=0;i<bytes.length;i+=12288){const slice=bytes.subarray(i,i+12288);out+=btoa(String.fromCharCode(...slice));}return out;}
+export async function transcribeOwnedAudioWithGemini({bytes,durationSeconds,env,fetchFn=fetch}){
+  assertLive(env,'GEMINI');
+  if(!env.GEMINI_API_KEY)throw new ProviderError('KEY_MISSING','Gemini API 키 미설정');
+  if(!(bytes instanceof Uint8Array)||bytes.length<100||bytes.length>8_000_000||!Number.isFinite(durationSeconds)||durationSeconds<=0||durationSeconds>600)throw new InputError('Gemini 음성 조각의 형식·크기·길이를 확인하세요.');
+  const prompt='보유자가 제공한 이 음성 조각의 말을 원어 그대로 빠짐없이 전사하세요. 조각 시작을 0초로 하는 상대 시각을 사용하세요. JSON 객체 하나만 출력하고 segments 배열의 각 항목은 start(초 숫자), end(초 숫자), text(문자열)입니다. 들리지 않는 부분을 지어내지 말고 요약하거나 번역하지 마세요.';
+  const body={contents:[{role:'user',parts:[{text:prompt},{inlineData:{mimeType:'audio/mp3',data:base64Audio(bytes)}}]}],generationConfig:{temperature:0,responseMimeType:'application/json',maxOutputTokens:8192,thinkingConfig:{thinkingBudget:0}}};
+  if(JSON.stringify(body).length>19_000_000)throw new InputError('Gemini 인라인 요청은 20MB 미만이어야 합니다.');
+  const data=await requestJson('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',{method:'POST',headers:{'x-goog-api-key':env.GEMINI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)},fetchFn);
+  let parsed;try{parsed=JSON.parse(data.candidates?.[0]?.content?.parts?.map(part=>part.text||'').join('')||'');}catch{throw new ProviderError('AUDIO_RESPONSE_INVALID','Gemini 전사 JSON을 확인할 수 없습니다. 재호출 전 사용량을 검토하세요.');}
+  if(!Array.isArray(parsed.segments)||parsed.segments.length<1||parsed.segments.length>500)throw new ProviderError('AUDIO_RESPONSE_INVALID','Gemini 전사 구간을 확인할 수 없습니다.');
+  const segments=parsed.segments.map(part=>({start:Number(part.start),end:Number(part.end),text:String(part.text||'').trim()}));
+  if(segments.some((part,i)=>!Number.isFinite(part.start)||!Number.isFinite(part.end)||part.start<0||part.end<=part.start||part.end>durationSeconds+1||!part.text||part.text.length>2000||(i&&part.start<segments[i-1].start)))throw new ProviderError('AUDIO_RESPONSE_INVALID','Gemini 전사 시간축을 확인할 수 없습니다.');
+  return {provider:'gemini',model:'gemini-2.5-flash',segments,text:segments.map(part=>part.text).join('\n'),durationSeconds,usageProvenance:'PROVIDER_RESPONSE',usage:data.usageMetadata??null};
 }
 export async function summarizeTranscriptWithGemini(text,env,fetchFn=fetch){
   assertLive(env,'GEMINI');

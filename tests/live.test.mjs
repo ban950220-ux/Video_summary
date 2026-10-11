@@ -11,7 +11,7 @@ import {planMp3,scanMp3,prepareMp3Chunk,mergeAudioSegments} from '../src/audio.m
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,SUMMARY_PROMPT_LIMIT,summaryUnits} from '../src/summary-plan.mjs';
 import {reportPrompt} from '../src/report.mjs';
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
-function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema)db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
+function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema){db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0003_observed_capacity.sql',import.meta.url),'utf8'));const now=Date.now();for(const [provider,model,remaining] of [['gemini','gemini-2.5-flash',{requestsMinute:1000,tokensMinute:1000000000,requestsDay:1000}],['groq','whisper-large-v3-turbo',{requestsMinute:1000,audioSecondsHour:100000,audioSecondsDay:100000}]])db.prepare('INSERT INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES(?,?,?,?,?,?,?,?,1)').run(provider,model,'TEST_PROVIDER_OBSERVATION',now,now+60000,JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,now+3600000]))),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,0]))));}const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
 async function job(env){return (await(await routeApi(request('/api/jobs','POST',{sourceType:'text',title:'LOCAL MOCK TEST',filename:'x.srt',transcript:'1\n00:00:00,000 --> 00:01:00,000\n테스트 발언입니다.',durationSeconds:60,persistTranscript:true}),env)).json()).job;}
 async function grant(env,allowance=250000){const r=await routeApi(request('/api/live/quota','PUT',{provider:'gemini',allowance,requestLimit:5,billingDisabled:true,freeOnly:true}),env);assert.equal(r.status,200);}
 const valid=()=>({summary:[{text:'테스트 발언',evidenceIds:[1]}],chapters:[{text:'시작 발언',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실 미검증'});
@@ -203,9 +203,6 @@ test('Groq app-only rolling hourly reservations stop before a provider request',
  globalThis.fetch=async()=>{calls++;return Response.json({text:'전사',segments:[{start:1,end:2,text:'재개'}]});};
  try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),id=created.job.id,path='/api/jobs/'+id;await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'c'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);await routeApi(request('/api/live/quota','PUT',{provider:'groq',allowance:100,requestLimit:5,billingDisabled:true,freeOnly:true}),env);db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').run('other-job-reservation',id,'groq',6495,'DONE',new Date().toISOString());const upload=()=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},body:bytes}),env);const blocked=await upload();assert.equal((await blocked.json()).error.code,'GROQ_HOURLY_APP_LIMIT');assert.equal(calls,0);db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run(new Date(Date.now()-3601000).toISOString(),'other-job-reservation');assert.equal((await upload()).status,200);assert.equal(calls,1);}finally{globalThis.fetch=old;db.close();}
 });
-test.todo('provider-observed fresh account-wide hourly, daily, request and token remaining gates each audio dispatch');
-test.todo('unknown or stale provider remaining, overlap overhead, and external activity persist a pause until observed reset');
-test.todo('approved alternate audio provider preserves chunk provenance and blocks duplicate or uncertain cross-provider attempts');
 test('temporary audio results need completed coverage, durable TXT readback and separate confirmation before cleanup',async()=>{
  const {db,env}=setup();try{
   const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:120}),env)).json();
@@ -312,5 +309,94 @@ test('MOCK long summary resumes completed stages after renewed grants without du
   assert.equal(completed,true);assert.ok(pending>5);assert.ok(renewals>1);assert.equal(calls,db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE provider='gemini' AND state='DONE'").get().n);
   const reopened=await(await routeApi(request('/api/jobs/'+id),env)).json();assert.equal(reopened.job.report.kind,'GEMINI_EVIDENCE_LINKED');assert.ok(reopened.job.report.chapters.length>=plan.stages);
   assert.equal((await routeApi(request('/api/jobs/'+id+'/summary','POST',{}),env)).status,200);assert.equal(calls,db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE provider='gemini' AND state='DONE'").get().n);
+ }finally{globalThis.fetch=old;db.close();}
+});
+
+test('fresh observed Gemini capacity is shared by summary and audio, with durable wait and renewal',async()=>{
+ const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({candidates:[{content:{parts:[{text:JSON.stringify(valid())}]}}]});};
+ try{const j=await job(env);await grant(env);db.prepare("UPDATE yta_capacity SET valid_until=0 WHERE provider='gemini'").run();const first=await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env);assert.equal((await first.json()).error.code,'CAPACITY_WAIT');assert.equal(calls,0);assert.equal(db.prepare('SELECT reason FROM yta_wait').get().reason,'OBSERVATION_MISSING_OR_STALE');
+  const now=Date.now(),remaining={requestsMinute:10,tokensMinute:1000000,requestsDay:10},resetAt=Object.fromEntries(Object.keys(remaining).map(key=>[key,now+3600000]));
+  const invalid=await routeApi(request('/api/live/capacity','PUT',{provider:'gemini',model:'gemini-2.5-flash',source:'AI_STUDIO_LIVE',observedAt:now,remaining,resetAt,billingDisabled:true,freeOnly:true,externalActivity:true}),env);assert.equal(invalid.status,409);assert.equal(db.prepare("SELECT valid_until FROM yta_capacity WHERE provider='gemini'").get().valid_until,0);
+  assert.equal((await routeApi(request('/api/live/capacity','PUT',{provider:'gemini',model:'gemini-2.5-flash',source:'AI_STUDIO_LIVE',observedAt:now,remaining,resetAt,billingDisabled:true,freeOnly:true,externalActivity:false}),env)).status,200);
+  assert.equal((await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)).status,200);assert.equal(calls,1);assert.ok(JSON.parse(db.prepare("SELECT reserved_json FROM yta_capacity WHERE provider='gemini'").get().reserved_json).tokensMinute>0);
+ }finally{globalThis.fetch=old;db.close();}
+});
+
+test('Gemini audio fallback preserves mixed chunk provenance, TXT and cleanup',async()=>{
+ const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);env.GROQ_API_KEY='NOT_REAL_TEST_KEY';for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);const seconds=scanMp3(bytes).durationSeconds;let groq=0,gemini=0;
+ globalThis.fetch=async(url,options)=>{if(String(url).includes('groq.com')){groq++;return Response.json({text:'첫 조각',segments:[{start:1,end:2,text:'첫 조각'}]});}gemini++;const requestBody=JSON.parse(options.body);assert.equal(requestBody.contents[0].parts[1].inlineData.mimeType,'audio/mp3');return Response.json({candidates:[{content:{parts:[{text:JSON.stringify({segments:[{start:1,end:2,text:'둘째 조각'}]})}]}}],usageMetadata:{promptTokenCount:300}});};
+ try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds*2}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
+  assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'a'.repeat(64),chunks:[{index:0,start:0,end:seconds},{index:1,start:seconds,end:seconds*2}]}),env)).status,200);
+  for(const provider of ['groq','gemini'])assert.equal((await routeApi(request('/api/live/quota','PUT',{provider,allowance:provider==='groq'?100:30000,requestLimit:5,billingDisabled:true,freeOnly:true}),env)).status,200);
+  const upload=(index,provider)=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index='+index+'&provider='+provider+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},body:bytes}),env);
+  assert.equal((await upload(0,'groq')).status,200);assert.equal((await upload(0,'gemini')).status,200);assert.equal((await upload(1,'gemini')).status,200);assert.equal(groq,1);assert.equal(gemini,1);
+  const finished=await(await routeApi(request(path+'/audio-finish','POST',{}),env)).json();assert.equal(finished.source.provenance,'MIXED_OWNED_AUDIO');assert.deepEqual(finished.job.audit.audioProviders,['gemini','groq']);
+  const exported=await routeApi(request(path+'/export?format=txt'),env);assert.equal(exported.status,200);const txt=await exported.text();assert.match(txt,/첫 조각/);assert.match(txt,/둘째 조각/);
+  assert.equal((await routeApi(request(path+'/audio-cleanup','POST',{confirmTemporaryTranscriptCleanup:true}),env)).status,200);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_audio').get().n,0);assert.equal((await routeApi(request(path+'/audio-finish','POST',{}),env)).status,200);
+ }finally{globalThis.fetch=old;db.close();}
+});
+
+test('Gemini fallback from Groq 429 needs confirmation tied to exact failed operation',async()=>{
+ const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);env.GROQ_API_KEY='NOT_REAL_TEST_KEY';for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);const seconds=scanMp3(bytes).durationSeconds;let calls=0;
+ globalThis.fetch=async(url)=>{calls++;return String(url).includes('groq.com')?Response.json({error:'rate_limit_exceeded'},{status:429}):Response.json({candidates:[{content:{parts:[{text:JSON.stringify({segments:[{start:1,end:2,text:'대체 전사'}]})}]}}]});};
+ try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),id=created.job.id,path='/api/jobs/'+id;await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'b'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);for(const provider of ['groq','gemini'])await routeApi(request('/api/live/quota','PUT',{provider,allowance:provider==='groq'?100:30000,requestLimit:5,billingDisabled:true,freeOnly:true}),env);
+  const upload=(provider,operationId)=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&provider='+provider+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream',...(operationId?{'x-provider-log-429-no-output-confirmed':'true','x-provider-log-429-operation-id':operationId}:{})},body:bytes}),env);
+  assert.equal((await(await upload('groq')).json()).error.code,'429');const progress=await(await routeApi(request(path+'/audio-progress'),env)).json(),failedId=progress.chunks[0].reviewOperationId;assert.equal(progress.chunks[0].reviewProvider,'groq');assert.equal((await(await upload('gemini','wrong')).json()).error.code,'PROVIDER_429_REVIEW_REQUIRED');assert.equal(calls,1);
+  assert.equal((await upload('gemini',failedId)).status,200);assert.equal(calls,2);assert.equal(db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE provider='gemini' AND id LIKE ?").get(id+':audio:%').n,1);assert.equal((await routeApi(request(path+'/audio-finish','POST',{}),env)).status,200);assert.equal((await routeApi(request(path+'/audio-cleanup','POST',{confirmTemporaryTranscriptCleanup:true}),env)).status,200);
+ }finally{globalThis.fetch=old;db.close();}
+});
+
+test('each observed provider dimension blocks an audio dispatch before network',async()=>{
+ for(const [provider,dimensions] of [['groq',['requestsMinute','audioSecondsHour','audioSecondsDay']],['gemini',['requestsMinute','tokensMinute','requestsDay']]])for(const dimension of dimensions){
+  const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);env.GROQ_API_KEY='NOT_REAL_TEST_KEY';for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not dispatch');};
+  try{const row=db.prepare('SELECT remaining_json FROM yta_capacity WHERE provider=?').get(provider),remaining=JSON.parse(row.remaining_json);remaining[dimension]=0;db.prepare('UPDATE yta_capacity SET remaining_json=? WHERE provider=?').run(JSON.stringify(remaining),provider);
+   const seconds=scanMp3(bytes).durationSeconds,created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),path='/api/jobs/'+created.job.id;
+   await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'c'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);
+   await routeApi(request('/api/live/quota','PUT',{provider,allowance:provider==='groq'?100:30000,requestLimit:5,billingDisabled:true,freeOnly:true}),env);
+   const response=await routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&provider='+provider+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},body:bytes}),env);
+   assert.equal((await response.json()).error.code,'CAPACITY_WAIT',provider+':'+dimension);assert.equal(calls,0);assert.equal(db.prepare('SELECT reason FROM yta_wait').get().reason,'INSUFFICIENT_'+dimension);
+   assert.equal(db.prepare('SELECT state FROM yta_audio').get().state,'PAUSED');
+  }finally{globalThis.fetch=old;db.close();}
+ }
+});
+
+test('external activity invalidates Gemini capacity while key lookup waits',async()=>{
+ const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);const seconds=scanMp3(bytes).durationSeconds;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not dispatch');};
+ let enter,release;const entered=new Promise(resolve=>enter=resolve),gate=new Promise(resolve=>release=resolve);let slow=true;
+ const delayedDB={prepare(sql){const stmt=env.DB.prepare(sql);if(!sql.startsWith('SELECT cipher_version,iv_b64,ciphertext_b64'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async first(){if(slow){slow=false;enter();await gate;}return bound.first();}};}};}};
+ try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),path='/api/jobs/'+created.job.id;await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'d'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);await grant(env,30000);
+  const uploading=routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&provider=gemini&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},body:bytes}),{...env,DB:delayedDB});await entered;
+  const invalidate=await routeApi(request('/api/live/capacity','PUT',{provider:'gemini',externalActivity:true}),env);assert.equal((await invalidate.json()).error.code,'CAPACITY_WAIT');release();
+  const blocked=await uploading;assert.equal((await blocked.json()).error.code,'CAPACITY_WAIT');assert.equal(calls,0);assert.equal(db.prepare('SELECT reason FROM yta_wait').get().reason,'OBSERVATION_EXPIRED_BEFORE_DISPATCH');
+ }finally{release();globalThis.fetch=old;db.close();}
+});
+
+test('Gemini 429 fallback retry requires the current failed ID and a renewed grant',async()=>{
+ const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);const seconds=scanMp3(bytes).durationSeconds;let calls=0;
+ globalThis.fetch=async()=>{calls++;return calls===1?Response.json({error:'rate_limit_exceeded'},{status:429}):Response.json({candidates:[{content:{parts:[{text:JSON.stringify({segments:[{start:1,end:2,text:'재개'}]})}]}}]});};
+ try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),path='/api/jobs/'+created.job.id;await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'f'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);await grant(env,30000);
+  const upload=id=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&provider=gemini&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream',...(id?{'x-provider-log-429-no-output-confirmed':'true','x-provider-log-429-operation-id':id}:{})},body:bytes}),env);
+  assert.equal((await(await upload()).json()).error.code,'429');const progress=await(await routeApi(request(path+'/audio-progress'),env)).json(),failedId=progress.chunks[0].reviewOperationId;assert.equal(progress.chunks[0].reviewProvider,'gemini');assert.equal((await(await upload('stale')).json()).error.code,'PROVIDER_429_REVIEW_REQUIRED');assert.equal(calls,1);
+  assert.equal((await upload(failedId)).status,409);assert.equal(calls,1);db.prepare("UPDATE yta_operations SET created_at=? WHERE provider='gemini' AND error_code='429'").run(new Date(Date.now()-14000).toISOString());await grant(env,30000);
+  assert.equal((await upload(failedId)).status,200);assert.equal(calls,2);assert.equal(db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE provider='gemini' AND id LIKE ?").get(created.job.id+':audio:%').n,2);
+ }finally{globalThis.fetch=old;db.close();}
+});
+
+test('concurrent providers cannot dispatch the same logical audio chunk twice',async()=>{
+ const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);env.GROQ_API_KEY='NOT_REAL_TEST_KEY';for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);const seconds=scanMp3(bytes).durationSeconds;let calls=0;
+ globalThis.fetch=async()=>{calls++;return Response.json({text:'한 번',segments:[{start:1,end:2,text:'한 번'}]});};let enter,release;const entered=new Promise(resolve=>enter=resolve),gate=new Promise(resolve=>release=resolve);let slow=true;
+ const delayedDB={prepare(sql){const stmt=env.DB.prepare(sql);if(!sql.startsWith('SELECT cipher_version,iv_b64,ciphertext_b64'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async first(){if(slow){slow=false;enter();await gate;}return bound.first();}};}};}};
+ try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),path='/api/jobs/'+created.job.id;await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'1'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);for(const provider of ['groq','gemini'])await routeApi(request('/api/live/quota','PUT',{provider,allowance:provider==='groq'?100:30000,requestLimit:5,billingDisabled:true,freeOnly:true}),env);
+  const upload=(provider,activeEnv)=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&provider='+provider+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},body:bytes}),activeEnv);
+  const first=upload('groq',{...env,DB:delayedDB});await entered;assert.equal((await upload('gemini',env)).status,409);assert.equal(calls,0);release();assert.equal((await first).status,200);assert.equal((await(await upload('gemini',env)).json()).cached,true);assert.equal(calls,1);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_operations').get().n,1);
+ }finally{release();globalThis.fetch=old;db.close();}
+});
+
+test('Gemini summary reservation reduces the same model capacity available to audio',async()=>{
+ const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);let calls=0;
+ globalThis.fetch=async()=>{calls++;return Response.json({candidates:[{content:{parts:[{text:JSON.stringify(valid())}]}}]});};
+ try{const remaining=JSON.parse(db.prepare("SELECT remaining_json FROM yta_capacity WHERE provider='gemini'").get().remaining_json);remaining.tokensMinute=30000;db.prepare("UPDATE yta_capacity SET remaining_json=? WHERE provider='gemini'").run(JSON.stringify(remaining));await grant(env,250000);const textJob=await job(env);assert.equal((await routeApi(request('/api/jobs/'+textJob.id+'/summary','POST',{}),env)).status,200);assert.equal(calls,1);db.prepare("UPDATE yta_operations SET created_at=? WHERE provider='gemini' AND state='DONE'").run(new Date(Date.now()-14000).toISOString());
+  const seconds=scanMp3(bytes).durationSeconds,created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),path='/api/jobs/'+created.job.id;await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'2'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);
+  const response=await routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&provider=gemini&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},body:bytes}),env);assert.equal((await response.json()).error.code,'CAPACITY_WAIT');assert.equal(calls,1);assert.equal(db.prepare('SELECT reason FROM yta_wait').get().reason,'INSUFFICIENT_tokensMinute');
  }finally{globalThis.fetch=old;db.close();}
 });

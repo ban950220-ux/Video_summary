@@ -1,7 +1,7 @@
 // Server-only credential bridge. NEVER import from browser assets.
 // No credential is included in HTTP responses, logs, D1 plaintext or usage events.
 import {configuredMasterKey,decryptProviderKey,providerAllowed} from './vault.mjs';
-import {ProviderError,assertLive,pollSupadataCaption,fetchSupadataCaption,transcribeOwnedAudio,summarizeTranscriptWithGemini} from './adapters.mjs';
+import {ProviderError,assertLive,pollSupadataCaption,fetchSupadataCaption,transcribeOwnedAudio,transcribeOwnedAudioWithGemini,summarizeTranscriptWithGemini} from './adapters.mjs';
 
 const CONFIG={supadata:'SUPADATA',groq:'GROQ',gemini:'GEMINI',assemblyai:'ASSEMBLYAI'};
 
@@ -39,8 +39,10 @@ export async function runNativeCaption({env,url,fetchFn=fetch}){
   return fetchSupadataCaption(url,await ephemeralEnv(env,'supadata'),fetchFn);
 }
 /** Transcript-based Korean summary (not a verified verbatim transcript). Needs quota reservation by caller. */
-export async function runTranscriptSummary({env,text,fetchFn=fetch}){
-  return summarizeTranscriptWithGemini(text,await ephemeralEnv(env,'gemini'),fetchFn);
+export async function runTranscriptSummary({env,text,fetchFn=fetch,beforeDispatch}){
+  const prepared=await ephemeralEnv(env,'gemini');
+  await beforeDispatch?.();
+  return summarizeTranscriptWithGemini(text,prepared,fetchFn);
 }
 /** Only lawful owner-uploaded audio, <=24MB per call. The live route chunks MP3 files before invoking this adapter. */
 export async function runOwnedAudioTranscription({env,bytes,name,mime,durationSeconds,fetchFn=fetch,beforeDispatch}){
@@ -50,3 +52,10 @@ export async function runOwnedAudioTranscription({env,bytes,name,mime,durationSe
 }
 
 export async function runNativePoll({env,jobId,fetchFn=fetch}){return pollSupadataCaption(jobId,await ephemeralEnv(env,'supadata'),fetchFn);}
+
+/** Approved owner-uploaded MP3 fallback; the caller reserves shared Gemini model capacity. */
+export async function runOwnedGeminiAudio({env,bytes,durationSeconds,fetchFn=fetch,beforeDispatch}){
+  const prepared=await ephemeralEnv(env,'gemini');
+  await beforeDispatch?.();
+  return transcribeOwnedAudioWithGemini({env:prepared,bytes,durationSeconds,fetchFn});
+}

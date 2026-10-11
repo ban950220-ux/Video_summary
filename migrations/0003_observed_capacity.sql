@@ -1,0 +1,3 @@
+-- Additive only. Provider-observed capacity and durable pauses; no credentials or audio bytes.
+CREATE TABLE IF NOT EXISTS yta_capacity(provider TEXT PRIMARY KEY, model TEXT NOT NULL, source TEXT NOT NULL, observed_at INTEGER NOT NULL, valid_until INTEGER NOT NULL, reset_json TEXT NOT NULL, remaining_json TEXT NOT NULL, reserved_json TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0, billing_disabled INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS yta_wait(operation_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, provider TEXT NOT NULL, reason TEXT NOT NULL, reset_at INTEGER, created_at TEXT NOT NULL);
