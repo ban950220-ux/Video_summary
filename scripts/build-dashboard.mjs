@@ -13,7 +13,7 @@ for(const name of names){
 }
 output='const modules={};\n'+output;
 const assets={};
-for(const [path,file,type] of [['/','index.html','text/html'],['/index.html','index.html','text/html'],['/app.js','app.js','application/javascript'],['/style.css','style.css','text/css'],['/audio.mjs','audio.mjs','application/javascript'],['/audio-runner.mjs','audio-runner.mjs','application/javascript']]){
+for(const [path,file,type] of [['/','index.html','text/html'],['/index.html','index.html','text/html'],['/app.js','app.js','application/javascript'],['/style.css','style.css','text/css'],['/audio.mjs','audio.mjs','application/javascript'],['/audio-runner.mjs','audio-runner.mjs','application/javascript'],['/audio-progress-plan.mjs','audio-progress-plan.mjs','application/javascript']]){
   assets[path]={body:readFileSync(new URL('../web/site/'+file,import.meta.url),'utf8'),type};
 }
 output+='const assets='+JSON.stringify(assets)+';\n';
