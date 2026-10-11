@@ -48,6 +48,56 @@ test('conservative UTF-8 bound partitions long Korean source below Groq Free inp
  assert.equal(fullLength.map(part=>part.text).join('').length,15000);
  assert.ok((bounded.length*2-1)*6600<=195000);
 });
+test('500-segment future merge packs consecutive source IDs without losing the checkpoint guard',()=>{
+ const segments=Array.from({length:500},(_,i)=>({id:i+1,startMs:i*11786,endMs:(i+1)*11786,text:'가나다라마바사아자차'.repeat(10)}));
+ const audit={durationSeconds:5893,audioProcessingCoverage:1,independentVerification:false,externalFactCheck:'NOT_PERFORMED',audioBoundarySegmentIds:Array.from({length:14},(_,i)=>2+33*i)};
+ const groups=partitionGroqTranscript(segments,audit),firstIds=groups.map(group=>group[0].id).filter(id=>id<=397);
+ assert.equal(groups.length,52);
+ const part=(first,last,chapterIds)=>({ids:Array.from({length:last-first+1},(_,i)=>first+i),startMs:(first-1)*11786,endMs:last*11786,report:{summary:[{text:'원문',evidenceIds:[first]}],chapters:[{text:'구간',evidenceIds:chapterIds}],claims:[],numbers:[],critical:[],conclusion:'원문'}});
+ const large=part(1,397,firstIds),small=part(398,500,[398]),size=(parts,final=false)=>groqInputUpperBound(groqSummaryMessages(groqMergePrompt(parts,audit,{final})));
+ assert.match(groqMergePrompt([large,small],audit),/"idRange":\[1,397\]/);
+ assert.ok(size([large,large],true)<=GROQ_SUMMARY_INPUT_BOUND);
+ assert.ok(size([large,small],true)<=GROQ_SUMMARY_INPUT_BOUND);
+ assert.ok(size([small,small],true)<=GROQ_SUMMARY_INPUT_BOUND);
+ assert.match(groqMergePrompt([{...small,ids:[398,400]}],audit),/"ids":\[398,400\]/);
+});
+test('500-segment mocked summary reaches and saves the previously blocked merge checkpoint',async()=>{
+ const f=await fixture({complete:false}),old=fetch;
+ const segments=Array.from({length:500},(_,i)=>({id:i+1,startMs:i*11786,endMs:(i+1)*11786,text:'가나다라마바사아자차'.repeat(10)}));
+ const audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64),audioBoundaryAmbiguities:Array.from({length:14},(_,i)=>({segmentId:2+33*i,chunkIndex:i+1,startMs:(2+33*i)*11786,endMs:(3+33*i)*11786}))};
+ f.db.prepare('UPDATE jobs SET duration_seconds=?,audit_json=? WHERE id=?').run(5893,JSON.stringify(audit),f.id);
+ f.db.prepare('UPDATE yta_sources SET raw=?,segments_json=? WHERE job_id=?').run(segments.map(segment=>segment.text).join('\n'),JSON.stringify(segments),f.id);
+ let calls=0;
+ globalThis.fetch=async(_url,options)=>{
+  calls++;
+  const prompt=JSON.parse(options.body).messages[1].content;
+  let ids;
+  if(prompt.includes('전사 배열 [id,startMs,endMs,text]:'))ids=[JSON.parse(prompt.split('전사 배열 [id,startMs,endMs,text]:\n')[1])[0][0]];
+  else ids=[...new Set(JSON.parse(prompt.split('시간 순서별 부분 보고서:\n')[1]).flatMap(part=>part.report.chapters.flatMap(chapter=>chapter.evidenceIds)))];
+  return response({summary:[{text:'원문',evidenceIds:[ids[0]]}],chapters:[{text:'구간',evidenceIds:ids}],claims:[],numbers:[],critical:[],conclusion:'원문'});
+ };
+ const approve=async()=>{
+  const review=await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json();
+  const body={jobId:f.id,transcriptHash:review.transcriptHash,model:review.model,windowStart:review.windowStart,totalRequests:review.totalRequests,maxRequests:review.maxRequests,maxInputTokensPerRequest:review.maxInputTokensPerRequest,maxCompletionTokensPerRequest:review.maxCompletionTokensPerRequest,totalTokenUpperBound:review.totalTokenUpperBound,credentialGeneration:review.credentialGeneration,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,summaryOnly:true};
+  assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',body),f.env)).status,200);
+ };
+ try{
+  const plan=await(await routeApi(request(f.path+'/groq-summary-plan'),f.env)).json();assert.equal(plan.rawStages,52);
+  await approve();
+  let saved=false;
+  for(let step=0;step<110;step++){
+   const result=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env),body=await result.json();
+   assert.ok([200,202].includes(result.status),JSON.stringify({step,calls,body}));
+   saved=Boolean(f.db.prepare("SELECT 1 AS ok FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND id LIKE ? AND state='DONE'").get(f.id,'%:merge:1:0'));
+   if(saved)break;
+   if(body.windowComplete){f.db.prepare("UPDATE yta_operations SET created_at=? WHERE job_id=? AND provider='groq-summary' AND state='DONE'").run(new Date(Date.now()-90_000_000).toISOString(),f.id);await approve();}
+   else if(body.pending)f.db.prepare("UPDATE yta_operations SET created_at=? WHERE job_id=? AND provider='groq-summary' AND state='DONE' AND created_at>?").run(new Date(Date.now()-62_000).toISOString(),f.id,new Date(Date.now()-60_000).toISOString());
+  }
+  assert.equal(saved,true);
+  assert.ok(calls>=52);
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND state='FAILED_UNCERTAIN'").get(f.id).n,0);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
 test('Gemini and Groq summary payloads disclose retained boundary uncertainty within input caps',()=>{
  const segments=[{id:1,startMs:0,endMs:1000,text:'첫 발언'},{id:2,startMs:500,endMs:1500,text:'겹친 다른 발언'}],marker={segmentId:2,chunkIndex:1,startMs:500,endMs:1500};
  const job={duration_seconds:2,audit:{audioProcessingCoverage:1,audioBoundaryAmbiguities:[marker]}};
@@ -94,7 +144,7 @@ test('hierarchical Groq stages preserve source evidence and resume completed che
   calls++;const body=JSON.parse(options.body),prompt=body.messages[1].content;
   let ids;
   if(prompt.includes('전사 배열 [id,startMs,endMs,text]:'))ids=JSON.parse(prompt.split('전사 배열 [id,startMs,endMs,text]:\n')[1]).map(part=>part[0]);
-  else ids=JSON.parse(prompt.split('시간 순서별 부분 보고서:\n')[1]).flatMap(part=>part.ids);
+  else ids=JSON.parse(prompt.split('시간 순서별 부분 보고서:\n')[1]).flatMap(part=>part.idRange?Array.from({length:part.idRange[1]-part.idRange[0]+1},(_,i)=>part.idRange[0]+i):part.ids);
   const report={summary:[{text:'원문에 기반한 한국어 정리',evidenceIds:[ids[0]]}],chapters:ids.map(id=>({text:'해당 구간 요약',evidenceIds:[id]})),claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'};
   return response(report);
  };
