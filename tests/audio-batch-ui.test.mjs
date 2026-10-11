@@ -4,10 +4,12 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {webcrypto} from 'node:crypto';
 
-test('unchecking batch while audio-plan awaits cannot start ordinary Groq or Gemini summary',async()=>{
+test('unchecking batch while audio-plan awaits cannot start ordinary Groq or Gemini summary',{timeout:10000},async()=>{
  const calls=[];
  let resolvePlan;
  const planPending=new Promise(resolve=>{resolvePlan=resolve;});
+ let signalPlan;
+ const planStarted=new Promise(resolve=>{signalPlan=resolve;});
  const node=()=>({hidden:false,textContent:'',append(){},prepend(){},replaceChildren(){},setAttribute(){},classList:{add(){},remove(){},toggle(){}}});
  const elements=new Map();
  const field=(name,values)=>{const entry=Object.assign(node(),values);elements.set('#'+name,entry);return entry;};
@@ -21,7 +23,7 @@ test('unchecking batch while audio-plan awaits cannot start ordinary Groq or Gem
  let batchRuns=0,ordinaryRuns=0,summaryRuns=0;
  const fetcher=async(path,options)=>{
   calls.push({path,method:options.method});
-  if(path==='/api/jobs/test-job/audio-plan')await planPending;
+  if(path==='/api/jobs/test-job/audio-plan'){signalPlan();await planPending;}
   let body;
   if(path==='/api/preflight')body={};
   else if(path==='/api/jobs/test-job')body={job};
@@ -40,7 +42,7 @@ test('unchecking batch while audio-plan awaits cannot start ordinary Groq or Gem
  runInNewContext(source,context,{filename:'web/site/app.js'});
  context.__state.mode='audio';
  const submitted=context.__handleAnalyze({preventDefault(){}});
- for(let i=0;i<20&&!calls.some(call=>call.path==='/api/jobs/test-job/audio-plan');i++)await new Promise(resolve=>setImmediate(resolve));
+ await Promise.race([planStarted,new Promise((_,reject)=>setTimeout(()=>reject(Error('audio-plan was not reached')),5000))]);
  assert.ok(calls.some(call=>call.path==='/api/jobs/test-job/audio-plan'));
  batch.checked=false;provider.value='auto';gemini.checked=true;
  resolvePlan();await submitted;
