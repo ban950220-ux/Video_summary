@@ -2,7 +2,7 @@ import {InputError,transcriptAudit} from './core.mjs';
 import {ProviderError} from './adapters.mjs';
 import {runNativeCaption,runNativePoll,runTranscriptSummary,runOwnedAudioTranscription,runOwnedGeminiAudio} from './provider-keys.mjs';
 import {normalizeSegments,auditGaps,validateAnalysis,reportPrompt,markdownReport} from './report.mjs';
-import {scanMp3,prepareMp3Chunk,mergeAudioSegments} from './audio.mjs';
+import {scanMp3,prepareMp3Chunk,mergeAudioSegments,boundaryMarkersFromRetained} from './audio.mjs';
 import {recordCapacity,reserveObservedCapacity,capacityBounds,persistWait,ensureCapacitySchema,capacityIdentityMatches,capacityIdentity} from './observed-capacity.mjs';
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,summaryUnits,evidenceIds,assertGroupCoverage} from './summary-plan.mjs';
 import {handleGroqSummaryAction} from './groq-summary.mjs';
@@ -332,7 +332,7 @@ async function executeFreeBatchChunk(env,{jobId,index,operationId,units,batch,by
 }
 export async function routeLive(request,env){
  const url=new URL(request.url),path=url.pathname;
- if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|groq-summary|groq-summary-plan|groq-summary-approval|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-cleanup)$/.test(path))return null;
+ if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|groq-summary|groq-summary-plan|groq-summary-approval|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/.test(path))return null;
  try{
  if(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path)){await ensureLiveSchema(env);const id=path.split('/').pop(),owner=await env.DB.prepare('SELECT 1 AS ok FROM jobs WHERE id=? AND owner_id=?').bind(id,'owner').first();if(!owner)throw new ProviderError('NOT_FOUND','분석 기록 없음');
   // Durable tombstone is written before any private content is cleared. Late provider responses must observe it in their own UPDATE statement.
@@ -354,7 +354,7 @@ export async function routeLive(request,env){
    if(renewed.meta?.changes!==1){const inserted=await env.DB.prepare('INSERT OR IGNORE INTO yta_quota(provider,allowance,consumed,request_limit,request_count,expires_at,confirmed_at,billing_disabled) VALUES(?,?,0,?,0,?,?,1)').bind(provider,body.allowance,body.requestLimit,now+3600000,now).run();if(inserted.meta?.changes!==1)throw new ProviderError('ACTIVE_GRANT_EXISTS','현재 할당이 유효합니다. 중복 설정으로 사용량을 초기화할 수 없습니다.');}
    return json({configured:true,provider,expiresInSeconds:3600,verification:'OWNER_ATTESTED_NOT_INDEPENDENTLY_VERIFIED'});
   }
-  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|groq-summary|groq-summary-plan|groq-summary-approval|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
+  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|groq-summary|groq-summary-plan|groq-summary-approval|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
   const id=match[1],action=match[2],job=await ownedJob(env,id);
   if(action.startsWith('groq-summary'))return await handleGroqSummaryAction(request,env,{id,action,job,sourceOf,ownedJob});
   if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id),...boundaryAuditView(job.audit)});
@@ -620,6 +620,29 @@ export async function routeLive(request,env){
     return json({job:current,source:prior,persisted:true,cached:true});
    }
    return json(await storeAudioTranscriptOnce(env,job,merged));
+  }
+  if(action==='audio-boundary-reconcile'&&['GET','POST'].includes(request.method)){
+   const source=await sourceOf(env,id),audit=job.audit,chunks=audit?.audioChunks,origins=audit?.audioSegmentOrigins;
+   if(job.source_type!=='audio'||audit?.audioProcessing!=='ALL_PLANNED_CHUNKS_PROCESSED'||audit.audioProcessingCoverage!==1||!/^[a-f0-9]{64}$/.test(audit.audioFileSha256||'')||!['GROQ_OWNED_AUDIO','GEMINI_OWNED_AUDIO','MIXED_OWNED_AUDIO'].includes(source?.provenance)||!Array.isArray(chunks)||chunks.length<2||!Array.isArray(origins)||origins.length!==source.segments?.length||source.raw!==source.segments.map(part=>part.text).join('\n'))throw new ProviderError('BOUNDARY_RECONCILE_SOURCE_INVALID','저장된 음성 원본·출처를 검증할 수 없습니다.');
+   if(chunks.some((chunk,index)=>chunk.index!==index||!Number.isFinite(chunk.start)||!Number.isFinite(chunk.end)||chunk.end<=chunk.start||(index&&chunk.start<chunks[index-1].start)))throw new ProviderError('BOUNDARY_RECONCILE_SOURCE_INVALID','저장된 음성 조각 시간축을 검증할 수 없습니다.');
+   const retained=source.segments.map((part,index)=>{
+    const origin=origins[index];
+    if(part.id!==index+1||origin?.segmentId!==part.id||!Number.isSafeInteger(origin.chunkIndex)||origin.chunkIndex<0||origin.chunkIndex>=chunks.length||part.startMs!==origin.startMs||part.endMs!==origin.endMs||typeof part.text!=='string'||!part.text.trim()||part.startMs<0||part.endMs<=part.startMs||part.startMs<chunks[origin.chunkIndex].start*1000-101||part.endMs>chunks[origin.chunkIndex].end*1000+2001)throw new ProviderError('BOUNDARY_RECONCILE_SOURCE_INVALID','저장된 구간과 조각 출처가 일치하지 않습니다.');
+    return {startMs:part.startMs,endMs:part.endMs,text:part.text,chunk:origin.chunkIndex};
+   });
+   const revised=boundaryMarkersFromRetained(chunks,retained),current=audit.audioBoundaryAmbiguities;
+   if(!Array.isArray(current)||current.some(marker=>!revised.some(next=>JSON.stringify(next)===JSON.stringify(marker))))throw new ProviderError('BOUNDARY_RECONCILE_SOURCE_INVALID','기존 경계 검토 표시를 보존할 수 없습니다.');
+   const changed=JSON.stringify(current)!==JSON.stringify(revised)||audit.audioBoundaryReview!==(revised.length?'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED':'NO_NONIDENTICAL_OVERLAP_TEXT');
+   const preview={jobId:id,audioFileSha256:audit.audioFileSha256,sourceSegmentCount:source.segments.length,currentMarkerIds:current.map(item=>item.segmentId),revisedMarkerIds:revised.map(item=>item.segmentId),changed};
+   if(request.method==='GET')return json(preview);
+   const body=await readJson(request);
+   if(body?.confirmBoundaryMetadataReconcile!==true||body.jobId!==id||body.audioFileSha256!==audit.audioFileSha256||JSON.stringify(body.currentMarkerIds)!==JSON.stringify(preview.currentMarkerIds)||JSON.stringify(body.revisedMarkerIds)!==JSON.stringify(preview.revisedMarkerIds))throw new InputError('검토한 경계 표시·파일 지문을 확인하세요.');
+   if(!changed)return json({...preview,reconciled:false,cached:true});
+   if(job.report)throw new ProviderError('BOUNDARY_RECONCILE_REPORT_EXISTS','기존 요약이 있어 경계 표시를 변경할 수 없습니다.');
+   const revisedAudit={...audit,audioBoundaryReview:revised.length?'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED':'NO_NONIDENTICAL_OVERLAP_TEXT',audioBoundaryAmbiguities:revised};
+   const updated=await env.DB.prepare("UPDATE jobs SET audit_json=?,updated_at=? WHERE id=? AND owner_id='owner' AND audit_json=? AND (report_json IS NULL OR report_json='null') AND EXISTS (SELECT 1 FROM yta_sources WHERE job_id=? AND raw=? AND segments_json=? AND provenance=?) AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE job_id=? AND provider='groq-summary')").bind(JSON.stringify(revisedAudit),new Date().toISOString(),id,JSON.stringify(audit),id,source.raw,source.segments_json,source.provenance,id).run();
+   if(updated.meta?.changes!==1)throw new ProviderError('BOUNDARY_RECONCILE_CONFLICT','요약 승인·원본·경계 기록이 변경됐습니다. 새로 검토하세요.');
+   return json({...preview,reconciled:true,job:await ownedJob(env,id)});
   }
   if(action==='audio-cleanup'&&request.method==='POST'){
    const body=await readJson(request);

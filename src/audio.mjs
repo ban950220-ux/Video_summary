@@ -91,11 +91,19 @@ export function mergeAudioSegments(chunks){
  // Provider chunks arrive in source order; overlaps can put a later chunk's
  // first segment before the prior chunk's last segment on the source timeline.
  segments.sort((a,b)=>a.startMs-b.startMs||a.endMs-b.endMs||a.chunk-b.chunk);
+ const boundaryAmbiguities=boundaryMarkersFromRetained(orderedChunks,segments);
+ return {segments:segments.map(({boundaryPreviousEndMs,...segment})=>segment),missingChunks,rejectedSegments,retainedByChunk,boundaryAmbiguities};
+}
+export function boundaryMarkersFromRetained(chunks,segments){
+ const orderedChunks=[...chunks].sort((a,b)=>a.index-b.index);
  const byChunk=new Map(orderedChunks.map(chunk=>[chunk.index,[]]));
  segments.forEach((segment,index)=>byChunk.get(segment.chunk)?.push({segment,id:index+1}));
  const markers=new Map();
  const mark=(item,chunkIndex,previousChunkEndMs)=>markers.set(item.id,{segmentId:item.id,chunkIndex,startMs:item.segment.startMs,endMs:item.segment.endMs,previousChunkEndMs});
- for(const [index,segment] of segments.entries())if(segment.boundaryPreviousEndMs!==undefined)mark({segment,id:index+1},segment.chunk,segment.boundaryPreviousEndMs);
+ for(const [index,segment] of segments.entries()){
+  const prior=orderedChunks.find(chunk=>chunk.index===segment.chunk-1);
+  if(prior&&(segment.startMs+segment.endMs)/2<prior.end*1000)mark({segment,id:index+1},segment.chunk,Math.round(prior.end*1000));
+ }
  // A later chunk's segment can overlap earlier speech even when its midpoint
  // lies past the chunk boundary. Keep both expressions and flag both IDs.
  for(let index=1;index<orderedChunks.length;index++){
@@ -107,6 +115,5 @@ export function mergeAudioSegments(chunks){
    mark(incoming,current.index,previousChunkEndMs);
   }
  }
- const boundaryAmbiguities=[...markers.values()].sort((a,b)=>a.segmentId-b.segmentId);
- return {segments:segments.map(({boundaryPreviousEndMs,...segment})=>segment),missingChunks,rejectedSegments,retainedByChunk,boundaryAmbiguities};
+ return [...markers.values()].sort((a,b)=>a.segmentId-b.segmentId);
 }

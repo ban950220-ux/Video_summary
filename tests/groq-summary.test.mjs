@@ -39,6 +39,38 @@ async function sibling(f){
 const valid=id=>({summary:[{text:'원문 검증',evidenceIds:[id]}],chapters:[{text:'시간대 요약',evidenceIds:[id]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'});
 const response=(body=valid(1),extra={})=>Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify(body)}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390,completion_tokens_details:{reasoning_tokens:10}},...extra});
 
+test('cached audio boundary reconciliation preserves speech, invalidates old review and blocks after approval',async()=>{
+ const prepare=async()=>{
+  const f=await fixture(),segments=[{id:1,startMs:1000,endMs:4000,text:'앞 조각 발언'},{id:2,startMs:3500,endMs:5000,text:'뒤 조각 다른 발언'}];
+  const audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64),audioProviders:['groq'],audioChunks:[{index:0,start:0,end:4,provider:'groq'},{index:1,start:3,end:6,provider:'groq'}],audioSegmentOrigins:[{segmentId:1,chunkIndex:0,startMs:1000,endMs:4000},{segmentId:2,chunkIndex:1,startMs:3500,endMs:5000}],audioBoundaryReview:'NO_NONIDENTICAL_OVERLAP_TEXT',audioBoundaryAmbiguities:[]};
+  f.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),f.id);
+  f.db.prepare('UPDATE yta_sources SET raw=?,segments_json=? WHERE job_id=?').run(segments.map(part=>part.text).join('\n'),JSON.stringify(segments),f.id);
+  return f;
+ };
+ const f=await prepare();try{
+  const before=f.db.prepare('SELECT raw,segments_json,provenance FROM yta_sources WHERE job_id=?').get(f.id),oldPlan=await(await routeApi(request(f.path+'/groq-summary-plan'),f.env)).json(),oldReview=await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json();
+  const preview=await(await routeApi(request(f.path+'/audio-boundary-reconcile'),f.env)).json();
+  assert.deepEqual(preview.currentMarkerIds,[]);assert.deepEqual(preview.revisedMarkerIds,[1,2]);
+  const body={...preview,confirmBoundaryMetadataReconcile:true};
+  assert.equal((await routeApi(request(f.path+'/audio-boundary-reconcile','POST',body),f.env)).status,200);
+  assert.deepEqual(f.db.prepare('SELECT raw,segments_json,provenance FROM yta_sources WHERE job_id=?').get(f.id),before);
+  assert.equal((await(await routeApi(request(f.path+'/audio-finish','POST',{}),f.env)).json()).cached,true);
+  const newPlan=await(await routeApi(request(f.path+'/groq-summary-plan'),f.env)).json();assert.notEqual(newPlan.transcriptHash,oldPlan.transcriptHash);
+  const stale={...f.approval,transcriptHash:oldPlan.transcriptHash,credentialGeneration:oldReview.credentialGeneration};
+  assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',stale),f.env)).status,400);
+  assert.equal((await(await routeApi(request(f.path+'/audio-boundary-reconcile','POST',{...body,currentMarkerIds:[1,2]}),f.env)).json()).cached,true);
+ }finally{f.db.close();}
+ const locked=await prepare();try{
+  const preview=await(await routeApi(request(locked.path+'/audio-boundary-reconcile'),locked.env)).json();
+  const review=await(await routeApi(request(locked.path+'/groq-summary-approval'),locked.env)).json(),plan=await(await routeApi(request(locked.path+'/groq-summary-plan'),locked.env)).json();
+  const approval={...locked.approval,transcriptHash:plan.transcriptHash,credentialGeneration:review.credentialGeneration};
+  assert.equal((await routeApi(request(locked.path+'/groq-summary-approval','POST',approval),locked.env)).status,200);
+  const blocked=await routeApi(request(locked.path+'/audio-boundary-reconcile','POST',{...preview,confirmBoundaryMetadataReconcile:true}),locked.env);
+  assert.equal((await blocked.json()).error.code,'BOUNDARY_RECONCILE_CONFLICT');
+  assert.deepEqual(JSON.parse(locked.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(locked.id).audit_json).audioBoundaryAmbiguities,[]);
+ }finally{locked.db.close();}
+});
+
 test('conservative UTF-8 bound partitions long Korean source below Groq Free input ceiling',()=>{
  const segments=Array.from({length:25},(_,i)=>({id:i+1,startMs:i*24000,endMs:(i+1)*24000,text:'가나다라마바사 '.repeat(12)}));
  const groups=partitionGroqTranscript(segments,{audioFileSha256:'a'.repeat(64)});

@@ -78,7 +78,9 @@ async function completeSource(env,job,sourceOf){
  if(job.source_type!=='audio'||job.audit?.audioProcessing!=='ALL_PLANNED_CHUNKS_PROCESSED'||job.audit?.audioProcessingCoverage!==1||!(/^[a-f0-9]{64}$/.test(job.audit?.audioFileSha256||''))||!['GROQ_OWNED_AUDIO','GEMINI_OWNED_AUDIO','MIXED_OWNED_AUDIO'].includes(source?.provenance)||!Array.isArray(source.segments)||!source.segments.length||source.segments.some((part,i)=>part.id!==i+1||typeof part.text!=='string'||!part.text.trim()||!Number.isFinite(part.startMs)||!Number.isFinite(part.endMs)||part.startMs<0||part.endMs<=part.startMs||part.endMs>job.duration_seconds*1000+2000||(i&&part.startMs<source.segments[i-1].startMs)))stop('COMPLETE_TRANSCRIPT_REQUIRED','전체 음성 전사와 저장된 원본 시간축이 먼저 필요합니다.');
  const text=source.segments.map(part=>part.text).join('\n');
  if(source.raw!==text)stop('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 TXT와 전사 구간이 다릅니다.');
- return {source,transcriptHash:await sha(JSON.stringify([source.raw,source.segments,job.audit.audioFileSha256]))};
+ // Boundary markers change the provider prompts even when every utterance stays
+ // byte-for-byte identical. Bind approvals and checkpoint IDs to those inputs.
+ return {source,transcriptHash:await sha(JSON.stringify([source.raw,source.segments,job.audit.audioFileSha256,promptAudit(job)]))};
 }
 function approvalPublic(scope){return {approved:true,jobId:scope.jobId,transcriptHash:scope.transcriptHash,model:scope.model,windowStart:scope.windowStart,totalRequests:scope.totalRequests,maxRequests:scope.maxRequests,maxInputTokensPerRequest:scope.maxInputTokensPerRequest,maxCompletionTokensPerRequest:scope.maxCompletionTokensPerRequest,totalTokenUpperBound:scope.totalTokenUpperBound,credentialGeneration:scope.credentialGeneration,expiresAt:scope.expiresAt,state:scope.state,remainingAccountTokens:'UNKNOWN'};}
 function validApproval(scope,jobId,hash,keyIdentity){
@@ -193,6 +195,7 @@ export async function handleGroqSummaryAction(request,env,{id,action,job,sourceO
  if(rows.some(row=>row.state!=='DONE'))stop('SUMMARY_OPERATION_REVIEW_REQUIRED','이전 단계의 불명확한 호출을 검토하세요.');
  const completed=rows.length;if(completed>totalRequests)stop('SUMMARY_OPERATION_REVIEW_REQUIRED','저장된 요약 단계 수를 검토하세요.');
  const previous=await read('APPROVAL',()=>readApproval(env,id)),windowStart=completed,maxRequests=Math.min(totalRequests-completed,Math.floor(DAY_CAP/(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP))),totalTokenUpperBound=maxRequests*(GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP);
+ if(previous?.state==='APPROVED'&&previous.transcriptHash!==transcriptHash)stop('SUMMARY_APPROVAL_CHANGED','저장된 승인의 요약 입력이 변경됐습니다. 승인 이력을 검토하세요.');
  const proposed={jobId:id,transcriptHash,model:GROQ_SUMMARY_MODEL,windowStart,totalRequests,maxRequests,maxInputTokensPerRequest:GROQ_SUMMARY_INPUT_BOUND,maxCompletionTokensPerRequest:GROQ_SUMMARY_COMPLETION_CAP,totalTokenUpperBound,remainingAccountTokens:'UNKNOWN',summaryOnly:true};
  const scopeTag=JSON.stringify([windowStart,totalRequests,maxRequests,totalTokenUpperBound]);
  if(action==='groq-summary-plan'&&request.method==='GET')return json({approved:false,...proposed,rawStages:groups.length});
@@ -208,8 +211,8 @@ export async function handleGroqSummaryAction(request,env,{id,action,job,sourceO
   if(previous?.state==='APPROVED'&&previous.expiresAt>Date.now()&&completed<previous.windowStart+previous.maxRequests)stop('SUMMARY_APPROVAL_ALREADY_RECORDED','요약 승인은 자동 갱신하거나 덮어쓸 수 없습니다.');
   if(await capacityIdentity(env,'groq')!==reviewedIdentity)stop('SUMMARY_CREDENTIAL_CHANGED','검토한 Groq 키 세대가 변경됐습니다.');
   const approvedAt=Date.now(),scope={...proposed,sequence:(previous?.sequence??-1)+1,keyIdentity:reviewedIdentity,credentialGeneration:body.credentialGeneration,approvedAt,expiresAt:approvedAt+3_600_000,freeTierConfirmed:true,billingDisabled:true};delete scope.remainingAccountTokens;
-  const inserted=await env.DB.prepare("INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,'APPROVED',?,?)").bind(approvalId(id,scope.sequence),id,'groq-summary',totalTokenUpperBound,nowIso(),JSON.stringify(scope)).run();
-  if(inserted.meta?.changes!==1)stop('SUMMARY_APPROVAL_ALREADY_RECORDED','요약 승인은 자동 갱신하거나 덮어쓸 수 없습니다.');
+  const inserted=await env.DB.prepare("INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT ?,?,?,?,'APPROVED',?,? WHERE EXISTS (SELECT 1 FROM jobs WHERE id=? AND owner_id='owner' AND audit_json=?) AND EXISTS (SELECT 1 FROM yta_sources WHERE job_id=? AND raw=? AND segments_json=?)").bind(approvalId(id,scope.sequence),id,'groq-summary',totalTokenUpperBound,nowIso(),JSON.stringify(scope),id,JSON.stringify(job.audit),id,source.raw,source.segments_json).run();
+  if(inserted.meta?.changes!==1)stop('SUMMARY_APPROVAL_CHANGED','요약 승인·원본 범위가 바뀌었습니다. 새로 검토하세요.');
   if(await capacityIdentity(env,'groq')!==reviewedIdentity){await env.DB.prepare("UPDATE yta_operations SET state='STOPPED',error_code='SUMMARY_CREDENTIAL_CHANGED' WHERE id=? AND state='APPROVED'").bind(approvalId(id,scope.sequence)).run();stop('SUMMARY_CREDENTIAL_CHANGED','검토한 Groq 키 세대가 변경됐습니다.');}
   return json(approvalPublic({...scope,state:'APPROVED'}));
  }
@@ -221,7 +224,7 @@ export async function handleGroqSummaryAction(request,env,{id,action,job,sourceO
    if(body.transcriptHash!==transcriptHash)throw new InputError('요약 원본 범위가 변경됐습니다.');
    const report=assembledCheckpointReport({rows,id,hash:transcriptHash,groups,source,audit});
    if(!report)stop('SUMMARY_FINALIZATION_NOT_READY','저장된 전체 요약 단계가 완료되지 않았습니다.');
-   const updated=await env.DB.prepare("UPDATE jobs SET report_json=?,audit_json=json_set(audit_json,'$.summaryProvider','groq','$.externalFactCheck','NOT_PERFORMED'),updated_at=? WHERE id=? AND owner_id='owner' AND (report_json IS NULL OR report_json='null') AND json_extract(audit_json,'$.audioFileSha256')=? AND json_extract(audit_json,'$.audioProcessingCoverage')=1").bind(JSON.stringify(report),nowIso(),id,job.audit.audioFileSha256).run();
+   const updated=await env.DB.prepare("UPDATE jobs SET report_json=?,audit_json=json_set(audit_json,'$.summaryProvider','groq','$.externalFactCheck','NOT_PERFORMED'),updated_at=? WHERE id=? AND owner_id='owner' AND (report_json IS NULL OR report_json='null') AND audit_json=? AND json_extract(audit_json,'$.audioFileSha256')=? AND json_extract(audit_json,'$.audioProcessingCoverage')=1").bind(JSON.stringify(report),nowIso(),id,JSON.stringify(job.audit),job.audit.audioFileSha256).run();
    if(updated.meta?.changes!==1)stop('SUMMARY_SAVE_RACE','요약 저장 상태가 바뀌었습니다.');
    return json({job:await ownedJob(env,id),persisted:true,remainingAccountTokens:'UNKNOWN'});
   }
@@ -247,7 +250,7 @@ export async function handleGroqSummaryAction(request,env,{id,action,job,sourceO
    parts=next;
   }
   const report=parts[0].report;assertGroupCoverage(report,groups.map(group=>({ids:group.map(part=>part.id)})));
-  const updated=await env.DB.prepare("UPDATE jobs SET report_json=?,audit_json=json_set(audit_json,'$.summaryProvider','groq','$.externalFactCheck','NOT_PERFORMED'),updated_at=? WHERE id=? AND owner_id='owner' AND (report_json IS NULL OR report_json='null') AND json_extract(audit_json,'$.audioFileSha256')=? AND json_extract(audit_json,'$.audioProcessingCoverage')=1").bind(JSON.stringify(report),nowIso(),id,job.audit.audioFileSha256).run();
+  const updated=await env.DB.prepare("UPDATE jobs SET report_json=?,audit_json=json_set(audit_json,'$.summaryProvider','groq','$.externalFactCheck','NOT_PERFORMED'),updated_at=? WHERE id=? AND owner_id='owner' AND (report_json IS NULL OR report_json='null') AND audit_json=? AND json_extract(audit_json,'$.audioFileSha256')=? AND json_extract(audit_json,'$.audioProcessingCoverage')=1").bind(JSON.stringify(report),nowIso(),id,JSON.stringify(job.audit),job.audit.audioFileSha256).run();
   if(updated.meta?.changes!==1)stop('SUMMARY_SAVE_RACE','요약 저장 상태가 바뀌었습니다.');
   return json({job:await ownedJob(env,id),persisted:true,remainingAccountTokens:'UNKNOWN'});
  }
