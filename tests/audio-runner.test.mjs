@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runAudioChunks,runSummaryStages} from '../web/site/audio-runner.mjs';
+import {runAudioChunks,runSummaryStages,detailRequestIsCurrent} from '../web/site/audio-runner.mjs';
 
 const chunks=[0,1,2].map(index=>({index,start:index*300,end:(index+1)*300}));
 function fixture(initialDone=0){let clock=1000000,done=initialDone,last=0;const sent=[],waits=[];const snapshot={provider:'gemini',model:'gemini-2.5-flash',valid_until:clock+60000,remaining:{requestsMinute:5,tokensMinute:100000,requestsDay:5},reserved:{requestsMinute:0,tokensMinute:0,requestsDay:0}};const grant={provider:'gemini',expires_at:clock+3600000,billing_disabled:1,request_count:0,request_limit:5,consumed:0,allowance:250000};return {
@@ -50,7 +50,29 @@ test('exact approved UNKNOWN Groq probe permits one foreground send without fabr
  let sent=0,options=null;const progress=async()=>({chunks:[{index:0,state:sent?'DONE':'UNCERTAIN',reviewedFreeRetryApproved:true,unknownCapacityProbeApproved:true,groqAllowed:true}],complete:sent>0,nextEligibleAt:{groq:null},operationInFlight:{groq:false}});
  const common={chunks:[chunks[0]],getProgress:progress,getCapacity:async()=>({snapshots:[]}),getQuota:async()=>({grants:[]}),authorizedProviders:()=>['groq'],now:()=>1000000,sendChunk:async(_chunk,provider,_review,settings)=>{assert.equal(provider,'groq');options=settings;sent++;return {state:'DONE'};}};
  assert.equal((await runAudioChunks({...common,chooseProvider:()=> 'auto'})).reason,'OPERATION_REVIEW_REQUIRED');assert.equal(sent,0);
- assert.equal((await runAudioChunks({...common,chooseProvider:()=> 'groq'})).complete,true);assert.equal(sent,1);assert.deepEqual(options,{unknownCapacityProbe:true});
+ const result=await runAudioChunks({...common,chooseProvider:()=> 'groq'});assert.equal(result.complete,false);assert.equal(result.probeCompleted,true);assert.equal(result.reason,'UNKNOWN_GROQ_PROBE_COMPLETED_REVIEW');assert.equal(sent,1);assert.deepEqual(options,{unknownCapacityProbe:true});
+});
+test('successful UNKNOWN probe stops before the next chunk or summary stage',async()=>{
+ let sent=0;const two=[{index:0,start:0,end:300},{index:1,start:300,end:600}];
+ const progress=async()=>({chunks:[{index:0,state:sent?'DONE':'UNCERTAIN',reviewedFreeRetryApproved:true,unknownCapacityProbeApproved:true,groqAllowed:true},{index:1,state:'PLANNED',groqAllowed:true}],complete:false,nextEligibleAt:{groq:null},operationInFlight:{groq:false}});
+ const result=await runAudioChunks({chunks:two,getProgress:progress,getCapacity:async()=>({snapshots:[]}),getQuota:async()=>({grants:[]}),chooseProvider:()=> 'groq',authorizedProviders:()=>['groq'],now:()=>1000000,sendChunk:async()=>{sent++;return {state:'DONE'};}});
+ assert.equal(result.reason,'UNKNOWN_GROQ_PROBE_COMPLETED_REVIEW');assert.equal(result.complete,false);assert.equal(sent,1);
+});
+test('foreground changes during capacity lookup block probe and summary before dispatch',async()=>{
+ let visible=true,sends=0;
+ const progress=async()=>({chunks:[{index:0,state:'UNCERTAIN',reviewedFreeRetryApproved:true,unknownCapacityProbeApproved:true,groqAllowed:true}],complete:false,nextEligibleAt:{groq:null},operationInFlight:{groq:false}});
+ const result=await runAudioChunks({chunks:[chunks[0]],getProgress:progress,getCapacity:async()=>{visible=false;return {snapshots:[]};},getQuota:async()=>({grants:[]}),chooseProvider:()=> 'groq',authorizedProviders:()=>['groq'],foreground:()=>visible,now:()=>1000000,sendChunk:async()=>{sends++;return {state:'DONE'};}});
+ assert.equal(result.reason,'FOREGROUND_REQUIRED');assert.equal(sends,0);
+ visible=true;const summary=await runSummaryStages({getProgress:async()=>({operationInFlight:{gemini:false},nextEligibleAt:{gemini:null}}),getCapacity:async()=>{visible=false;return {snapshots:[{provider:'gemini',model:'gemini-2.5-flash',valid_until:1060000,remaining:{requestsMinute:1,tokensMinute:50000,requestsDay:1},reserved:{requestsMinute:0,tokensMinute:0,requestsDay:0}}]};},getQuota:async()=>({grants:[{provider:'gemini',expires_at:1060000,billing_disabled:1,request_count:0,request_limit:1,consumed:0,allowance:50000}]}),foreground:()=>visible,now:()=>1000000,sendSummary:async()=>{sends++;return {pending:false,job:{report:{kind:'GEMINI_EVIDENCE_LINKED'}}};}});
+ assert.equal(summary.reason,'FOREGROUND_REQUIRED');assert.equal(sends,0);
+});
+test('late job-A detail response or stale approval form cannot target job B',()=>{
+ const base={expectedRequestId:4,currentRequestId:4,expectedJobId:'job-a',visibleJobId:'job-a',view:'library',hidden:false};
+ assert.equal(detailRequestIsCurrent(base),true);
+ assert.equal(detailRequestIsCurrent({...base,currentRequestId:5,visibleJobId:'job-b'}),false);
+ assert.equal(detailRequestIsCurrent({...base,visibleJobId:'job-b'}),false);
+ assert.equal(detailRequestIsCurrent({...base,view:'settings'}),false);
+ assert.equal(detailRequestIsCurrent({...base,hidden:true}),false);
 });
 test('three Gemini audio chunks flow into staged summary with shared safe cooldown',async()=>{
  const f=fixture();f.grant.request_limit=10;f.snapshot.remaining.requestsMinute=10;f.snapshot.remaining.requestsDay=10;

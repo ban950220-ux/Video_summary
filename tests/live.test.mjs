@@ -305,6 +305,32 @@ test('UNKNOWN probe respects local rolling usage and never invents provider acco
  }finally{globalThis.fetch=old;f.db.close();}
 });
 
+test('UNKNOWN probe rejects corrupted ledger units, including negative offsets, text, overflow and null',async()=>{
+ for(const [label,units] of [['negative',-6500],['text','not-a-number'],['overflow',1e20]]){
+  const f=await seededUnknownProbe(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not call');};
+  try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+   if(label==='negative')f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').run('positive-offset',f.id,'groq',6500,'DONE',new Date().toISOString());
+   f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').run('corrupt-'+label,f.id,'groq',units,'DONE',new Date().toISOString());
+   const response=await f.upload();assert.equal((await response.json()).error.code,'PROBE_LEDGER_REVIEW_REQUIRED',label);assert.equal(calls,0);
+   assert.equal(f.db.prepare('SELECT state FROM yta_free_probe WHERE job_id=?').get(f.id).state,'APPROVED');
+  }finally{globalThis.fetch=old;f.db.close();}
+ }
+ const f=await seededUnknownProbe(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not call');};
+ try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+  const originalDB=f.env.DB;f.env.DB={prepare(sql){const stmt=originalDB.prepare(sql);if(!sql.startsWith('SELECT id,units,state,created_at,error_code FROM yta_operations'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async all(){const result=await bound.all();result.results.push({id:'corrupt-null',units:null,state:'DONE',created_at:new Date().toISOString(),error_code:null});return result;}};}};}};
+  const response=await f.upload();assert.equal((await response.json()).error.code,'PROBE_LEDGER_REVIEW_REQUIRED');assert.equal(calls,0);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('UNKNOWN probe rejects malformed persisted operation time and state',async()=>{
+ for(const [label,state,createdAt] of [['time','DONE','not-a-time'],['state','UNRECOGNIZED',new Date().toISOString()]]){
+  const f=await seededUnknownProbe(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not call');};
+  try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+   f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').run('corrupt-'+label,f.id,'groq',10,state,createdAt);
+   const response=await f.upload();assert.equal((await response.json()).error.code,'PROBE_LEDGER_REVIEW_REQUIRED');assert.equal(calls,0);
+  }finally{globalThis.fetch=old;f.db.close();}
+ }
+});
+
 test('UNKNOWN probe cancels before network when Free gate changes during key lookup, then permits the same unsent operation',async()=>{
  const f=await seededUnknownProbe(),old=fetch;let calls=0,changed=false;globalThis.fetch=async()=>{calls++;return Response.json({text:'성공',segments:[{start:1,end:2,text:'성공'}]});};
  try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
@@ -313,6 +339,33 @@ test('UNKNOWN probe cancels before network when Free gate changes during key loo
   assert.equal(f.db.prepare('SELECT state FROM yta_free_probe WHERE job_id=?').get(f.id).state,'APPROVED');
   assert.equal(f.db.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').get(f.id+':audio:0:reviewed404:1').error_code,'PROBE_PRE_DISPATCH_BLOCKED');
   f.env.DB=originalDB;f.env.ENABLE_LIVE_FREE='true';assert.equal((await f.upload()).status,200);assert.equal(calls,1);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('UNKNOWN probe blocks if approval expires during the final awaited D1 read',async()=>{
+ const f=await seededUnknownProbe(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not call');};
+ try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+  f.db.prepare('UPDATE yta_free_probe SET expires_at=? WHERE job_id=?').run(Date.now()+200,f.id);
+  const originalDB=f.env.DB;let delayed=false;f.env.DB={prepare(sql){const stmt=originalDB.prepare(sql);if(!sql.includes("AND id<>? LIMIT 1"))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async first(){if(!delayed){delayed=true;await new Promise(resolve=>setTimeout(resolve,250));}return bound.first();}};}};}};
+  const response=await f.upload();assert.equal((await response.json()).error.code,'PROBE_REVIEW_REQUIRED');assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT state FROM yta_free_probe WHERE job_id=?').get(f.id).state,'APPROVED');
+  assert.equal(f.db.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').get(f.id+':audio:0:reviewed404:1').error_code,'PROBE_PRE_DISPATCH_BLOCKED');
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('UNKNOWN probe blocks a changed approval during final authorization read',async()=>{
+ const f=await seededUnknownProbe(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not call');};
+ try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+  const originalDB=f.env.DB;let changed=false;f.env.DB={prepare(sql){const stmt=originalDB.prepare(sql);if(!sql.startsWith('SELECT 1 AS ok FROM yta_free_probe p JOIN'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async first(){if(!changed){changed=true;f.db.prepare("UPDATE yta_free_probe SET state='USED' WHERE job_id=?").run(f.id);}return bound.first();}};}};}};
+  const response=await f.upload();assert.equal((await response.json()).error.code,'PROBE_REVIEW_REQUIRED');assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT state FROM yta_free_probe WHERE job_id=?').get(f.id).state,'USED');
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+
+test('known-unsent CAPACITY_WAIT operation can use the exact approved UNKNOWN probe',async()=>{
+ const f=await seededUnknownProbe(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({text:'성공',segments:[{start:1,end:2,text:'성공'}]});};
+ try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+  f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code) VALUES(?,?,?,?,?,?,?)').run(f.id+':audio:0:reviewed404:1',f.id,'groq',10,'BLOCKED',new Date().toISOString(),'CAPACITY_WAIT');
+  assert.equal((await f.upload()).status,200);assert.equal(calls,1);
+  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(f.id+':audio:0:reviewed404:1').state,'DONE');
  }finally{globalThis.fetch=old;f.db.close();}
 });
 

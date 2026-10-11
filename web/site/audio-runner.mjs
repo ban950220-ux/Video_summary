@@ -9,7 +9,10 @@ export function capacityReady(provider,seconds,snapshots,grants,at){
  if(grant.consumed+units>grant.allowance)return false;
  return Object.entries(needed(provider,seconds)).every(([key,value])=>Number.isSafeInteger(snapshot.remaining?.[key])&&Number.isSafeInteger(snapshot.reserved?.[key])&&snapshot.remaining[key]-snapshot.reserved[key]>=value);
 }
-export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,chooseProvider,authorizedProviders=()=>['groq','gemini'],sendChunk,review429,wait,now=Date.now,onUpdate=()=>{}}){
+export function detailRequestIsCurrent({expectedRequestId,currentRequestId,expectedJobId,visibleJobId,view,hidden}){
+ return expectedRequestId===currentRequestId&&expectedJobId===visibleJobId&&view==='library'&&hidden===false;
+}
+export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,chooseProvider,authorizedProviders=()=>['groq','gemini'],sendChunk,review429,wait,now=Date.now,foreground=()=>true,onUpdate=()=>{}}){
  for(const chunk of chunks){
   for(;;){
    const progress=await getProgress(),saved=progress.chunks.find(row=>row.index===chunk.index);
@@ -33,15 +36,16 @@ export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,ch
    }
    let reviewedId=null;
    if(saved.reviewed429Required){reviewedId=await review429(chunk,saved,provider);if(reviewedId!==saved.reviewOperationId)return {complete:false,reason:'PROVIDER_429_REVIEW_REQUIRED',index:chunk.index};}
+   if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED',index:chunk.index};
    onUpdate({index:chunk.index,provider,sending:true,coveragePercent:progress.coveragePercent});
-   try{const result=await sendChunk(chunk,provider,reviewedId,{unknownCapacityProbe:saved.unknownCapacityProbeApproved===true});if(result?.state!=='DONE')return {complete:false,reason:result?.code||'AUDIO_RESULT_UNVERIFIED',index:chunk.index};}
+   try{const result=await sendChunk(chunk,provider,reviewedId,{unknownCapacityProbe:saved.unknownCapacityProbeApproved===true});if(result?.state!=='DONE')return {complete:false,reason:result?.code||'AUDIO_RESULT_UNVERIFIED',index:chunk.index};if(saved.unknownCapacityProbeApproved)return {complete:false,reason:'UNKNOWN_GROQ_PROBE_COMPLETED_REVIEW',index:chunk.index,probeCompleted:true};}
    catch(error){return {complete:false,reason:error?.code||'DISPATCH_OUTCOME_UNKNOWN_REVIEW_REQUIRED',index:chunk.index};}
    onUpdate({index:chunk.index,provider,done:true});break;
   }
  }
  const progress=await getProgress();return {complete:progress.complete===true,reason:progress.complete?'COMPLETE':'COVERAGE_UNVERIFIED'};
 }
-export async function runSummaryStages({getProgress,getCapacity,getQuota,sendSummary,wait,now=Date.now,onUpdate=()=>{}}){
+export async function runSummaryStages({getProgress,getCapacity,getQuota,sendSummary,wait,now=Date.now,foreground=()=>true,onUpdate=()=>{}}){
  for(let stage=0;stage<160;stage++){
   const [progress,capacity,quota]=await Promise.all([getProgress(),getCapacity(),getQuota()]);const at=now();
   if(!capacityReady('gemini',0,capacity.snapshots,quota.grants,at))return {complete:false,reason:'GEMINI_SUMMARY_CAPACITY_REOBSERVATION_REQUIRED'};
@@ -52,6 +56,7 @@ export async function runSummaryStages({getProgress,getCapacity,getQuota,sendSum
    if(eligible>=expiry||eligible-at>13000)return {complete:false,reason:'GEMINI_SUMMARY_WAIT_AND_REOBSERVE',nextEligibleAt:eligible};
    onUpdate({stage,waitingUntil:eligible});await wait(eligible-at);stage--;continue;
   }
+  if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED'};
   let result;try{result=await sendSummary();}catch(error){
    if(error?.code==='RATE_LIMIT_PENDING'){const refreshed=await getProgress();if(Number.isFinite(refreshed.nextEligibleAt?.gemini)&&refreshed.nextEligibleAt.gemini>now()){stage--;continue;}return {complete:false,reason:'GEMINI_SUMMARY_RATE_LIMIT_REVIEW_REQUIRED'};}
    return {complete:false,reason:error?.code||'SUMMARY_OUTCOME_UNKNOWN_REVIEW_REQUIRED'};

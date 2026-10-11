@@ -199,6 +199,15 @@ async function ensureFreeProbeSchema(env){
  const row=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='yta_free_probe'").bind().first();
  if(!row)throw new ProviderError('PROBE_SCHEMA_REQUIRED','무료 탐침 승인 테이블이 필요합니다.');
 }
+async function validateGroqProbeLedger(env){
+ const invalid=()=>{const error=new ProviderError('PROBE_LEDGER_REVIEW_REQUIRED','Groq 앱 사용 이력에 잘못된 값이 있어 무료 탐침을 중단했습니다. 이력을 먼저 검토하세요.');error.preDispatchBlocked=true;throw error;};
+ const rows=(await env.DB.prepare("SELECT id,units,state,created_at,error_code FROM yta_operations WHERE provider='groq' LIMIT 10001").bind().all()).results||[];
+ if(rows.length>10000)invalid();
+ for(const row of rows){
+  const parsed=Date.parse(row.created_at);
+  if(typeof row.id!=='string'||!row.id||!Number.isSafeInteger(row.units)||row.units<=0||row.units>GROQ_APP_DAILY_CAP_SECONDS||!['CLAIMED','DONE','FAILED_UNCERTAIN','BLOCKED'].includes(row.state)||typeof row.created_at!=='string'||!Number.isFinite(parsed)||new Date(parsed).toISOString()!==row.created_at||parsed>Date.now()+300000||!(row.error_code===null||typeof row.error_code==='string'))invalid();
+ }
+}
 async function assertProbeReady(env,{jobId,index,operationId,keyIdentity,expiresAt}){
  const blocked=()=>{const error=new ProviderError('PROBE_REVIEW_REQUIRED','1회 무료 탐침 승인 또는 현재 키 상태가 바뀌었습니다.');error.preDispatchBlocked=true;throw error;};
  if(env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true'||expiresAt<=Date.now())blocked();
@@ -207,6 +216,7 @@ async function assertProbeReady(env,{jobId,index,operationId,keyIdentity,expires
  const chunk=await env.DB.prepare('SELECT state FROM yta_audio WHERE job_id=? AND chunk_index=?').bind(jobId,index).first();
  const own=await env.DB.prepare('SELECT state FROM yta_operations WHERE id=?').bind(operationId).first();
  if(probe?.state!=='CLAIMED'||probe.key_identity!==keyIdentity||probe.expires_at!==expiresAt||recovery?.state!=='CLAIMED'||recovery.retry_operation_id!==operationId||chunk?.state!=='CLAIMED'||own?.state!=='CLAIMED'||await capacityIdentity(env,'groq')!==keyIdentity)blocked();
+ await validateGroqProbeLedger(env);
  const cutoff=new Date(Date.now()-GROQ_HOURLY_WINDOW_MS).toISOString();
  const other=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='CLAIMED' AND id<>? LIMIT 1").bind(operationId).first();
  const cooldown=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='FAILED_UNCERTAIN' AND error_code='429' AND created_at>? LIMIT 1").bind(cutoff).first();
@@ -214,11 +224,16 @@ async function assertProbeReady(env,{jobId,index,operationId,keyIdentity,expires
  const daily=await env.DB.prepare("SELECT COALESCE(SUM(units),0) AS units FROM yta_operations WHERE provider='groq' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?))").bind(new Date(Date.now()-86_400_000).toISOString()).first();
  const minute=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state IN ('DONE','FAILED_UNCERTAIN') AND created_at>? AND id<>? LIMIT 1").bind(new Date(Date.now()-60_000).toISOString(),operationId).first();
  if(other||cooldown||minute||Number(used?.units||0)>GROQ_APP_HOURLY_CAP_SECONDS||Number(daily?.units||0)>GROQ_APP_DAILY_CAP_SECONDS)blocked();
+ const finalAuthorization=await env.DB.prepare("SELECT 1 AS ok FROM yta_free_probe p JOIN yta_free_recovery r ON r.job_id=p.job_id AND r.chunk_index=p.chunk_index JOIN yta_audio a ON a.job_id=p.job_id AND a.chunk_index=p.chunk_index JOIN yta_operations o ON o.id=p.retry_operation_id WHERE p.job_id=? AND p.chunk_index=? AND p.state='CLAIMED' AND r.state='CLAIMED' AND a.state='CLAIMED' AND o.state='CLAIMED' AND p.retry_operation_id=? AND p.key_identity=? AND p.expires_at=?").bind(jobId,index,operationId,keyIdentity,expiresAt).first();
+ if(!finalAuthorization)blocked();
+ // No await after this check before the adapter starts its fetch. D1 reads may outlive the approval.
+ if(Date.now()>=expiresAt||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')blocked();
 }
 async function executeGroqProbe(env,{jobId,index,operationId,units,probe,bytes}){
  const now=new Date().toISOString(),cutoff=new Date(Date.now()-GROQ_HOURLY_WINDOW_MS).toISOString(),dailyCutoff=new Date(Date.now()-86_400_000).toISOString(),minuteCutoff=new Date(Date.now()-60_000).toISOString();
+ await validateGroqProbeLedger(env);
  const prior=await env.DB.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').bind(operationId).first();
- if(prior&&!(prior.state==='BLOCKED'&&['PROBE_PRE_DISPATCH_BLOCKED','PROBE_LOCAL_LIMIT'].includes(prior.error_code)))throw new ProviderError('OPERATION_REVIEW_REQUIRED','이 탐침의 이전 요청 결과를 검토하세요.');
+ if(prior&&!(prior.state==='BLOCKED'&&['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED','CAPACITY_WAIT','PROBE_PRE_DISPATCH_BLOCKED'].includes(prior.error_code)))throw new ProviderError('OPERATION_REVIEW_REQUIRED','이 탐침의 이전 요청 결과를 검토하세요.');
  const claim=prior?await env.DB.prepare(`UPDATE yta_operations SET state='CLAIMED',error_code=NULL,created_at=? WHERE id=? AND state='BLOCKED' AND ${groqProbePermit}`).bind(now,operationId,cutoff,cutoff,units,GROQ_APP_HOURLY_CAP_SECONDS,dailyCutoff,units,GROQ_APP_DAILY_CAP_SECONDS,minuteCutoff).run():await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,'groq',?,'CLAIMED',? WHERE ${groqProbePermit}`).bind(operationId,jobId,units,now,cutoff,cutoff,units,GROQ_APP_HOURLY_CAP_SECONDS,dailyCutoff,units,GROQ_APP_DAILY_CAP_SECONDS,minuteCutoff).run();
  if(claim.meta?.changes!==1)throw new ProviderError('PROBE_LOCAL_LIMIT','진행 중 요청, 429 대기 또는 앱 시간당 사용 상한으로 탐침을 전송할 수 없습니다.');
  const active={...env,GROQ_FREE_PLAN_CONFIRMED:'true'};
