@@ -94,6 +94,15 @@ only intentional post-deploy differences; other drift fails the check.
 `remoteSettingsReviewed=false` still blocks deployment until the proposed
 comparison and upload behavior are separately reviewed. A post-deploy API
 shape change fails the postcheck rather than being silently accepted.
+Pinned Wrangler 4.149.0 normalizes an omitted `compatibility_flags` config
+entry to `[]` in its upload metadata. It is not yet known whether Cloudflare
+will return the newly uploaded version's flags as omitted or as `[]`. If the
+postcheck reports `COMPATIBILITY_MISMATCH` after upload, treat deployment as
+**unverified**, not successful. Do not retry or automatically redeploy. Read
+the active version, source commit annotation, bindings and metadata through
+read-only API calls, then reconcile the actual shape through a separately
+reviewed baseline change. The comparison must not treat all omitted flags as
+a wildcard.
 
 ### Read-only baseline preflight
 
@@ -131,13 +140,15 @@ remote settings must still match the reviewed baseline.
 Before any later normal redeployment, run the read-only preflight again and
 independently review the active version, binding names and types, D1, Access,
 runtime flags, exposure and full metadata shape. Update the pinned active
-version ID to that observed version and set `assetsPresent=true` only after
+version ID **and** set `assetsPresent=true` only after
 confirming the existing single `ASSETS` binding. Review and test that baseline
 change before enabling the next deployment. The later precheck then requires
 one `ASSETS` binding, and its postcheck requires one as well. If any setting or
 field-presence shape has changed, investigate it and update the baseline only
 after separate review; do not infer that omitted, `null`, and empty values are
-equivalent. An unchanged old version ID or an unexpected binding blocks upload.
+equivalent. Changing only the active version ID will leave the initial
+`assetsPresent=false` policy in place and block the normal precheck. An
+unchanged old version ID or an unexpected binding also blocks upload.
 
 The child Wrangler process receives a minimal environment: the expected token,
 fixed account and reviewed CI Worker name, with unsupported `CF_`,

@@ -56,8 +56,10 @@ in-memory validation and log only field names and generic pass/fail codes.
 4. Require `DB` to reference the reviewed D1 UUID. Require the current Access
    variable and secret **names and types** to remain present. Check expected
    runtime flag values in memory; never print them. Reject unknown bindings.
-5. Permit `ASSETS` to be absent on the first deploy and present with the
-   expected type afterward. Reject any other binding addition, deletion, type
+5. Require `ASSETS` absent before the first upload and exactly once with type
+   `assets` after it. For later deploys, review `assetsPresent=true` alongside
+   the then-active version ID so both precheck and postcheck require it. Reject
+   any other binding addition, deletion, type
    change or identifier change. Keep `--keep-vars` in both config and command.
 6. Reject target-changing environment overrides and give Wrangler a minimal
    environment. Capture its stdout/stderr without relaying raw remote diffs;
