@@ -12,12 +12,22 @@ test('Wrangler child target and log controls are fixed',()=>{
  assert.equal(env.WRANGLER_CI_OVERRIDE_NAME,'holy-rice-b914');
  assert.equal(env.WRANGLER_CI_GENERATE_PREVIEW_ALIAS,'false');
  assert.equal(env.CLOUDFLARE_API_BASE_URL,undefined);
- for(const [key,value] of Object.entries({CLOUDFLARE_API_BASE_URL:'https://example.test',CF_API_BASE_URL:'https://example.test',CF_ACCOUNT_ID:'other',CLOUDFLARE_ENV:'preview',WRANGLER_LOG_PATH:'/tmp/leak',WRANGLER_WRITE_LOGS:'true'})){
-  assert.throws(()=>deploymentEnvironment({...base,[key]:value}),/ENV_OVERRIDE_BLOCKED/);
- }
+ const unsupported={CLOUDFLARE_API_BASE_URL:'PRIVATE_URL',CF_API_BASE_URL:'PRIVATE_URL',CF_ACCOUNT_ID:'PRIVATE_ID',CLOUDFLARE_ENV:'preview',WRANGLER_LOG_PATH:'PRIVATE_PATH',WRANGLER_WRITE_LOGS:'true',WRANGLER_CI_OVERRIDE_NETWORK_MODE_HOST:'true'};
+ assert.throws(()=>deploymentEnvironment({...base,...unsupported}),error=>Object.keys(unsupported).every(name=>error.message.includes(name))&&!error.message.includes('PRIVATE_'));
+ for(const [key,value] of Object.entries(unsupported))assert.throws(()=>deploymentEnvironment({...base,[key]:value}),/ENV_OVERRIDES_BLOCKED/);
+ const many=Object.fromEntries(Array.from({length:15},(_,i)=>[`WRANGLER_UNKNOWN_${i}`,'PRIVATE_VALUE']));
+ assert.throws(()=>deploymentEnvironment({...base,...many}),error=>error.message.includes('MORE_NAMES_OMITTED')&&!error.message.includes('PRIVATE_VALUE')&&error.message.split('WRANGLER_UNKNOWN_').length-1===12);
+ assert.throws(()=>deploymentEnvironment({...base,['WRANGLER_BAD\nPRIVATE_VALUE']:'SECRET'}),error=>error.message.includes('INVALID_NAME')&&!error.message.includes('PRIVATE_VALUE')&&!error.message.includes('SECRET'));
  for(const value of ['true','false'])assert.equal(deploymentEnvironment({...base,WRANGLER_CI_GENERATE_PREVIEW_ALIAS:value}).WRANGLER_CI_GENERATE_PREVIEW_ALIAS,'false');
  for(const value of ['', 'TRUE', '1', 'unexpected', null])assert.throws(()=>deploymentEnvironment({...base,WRANGLER_CI_GENERATE_PREVIEW_ALIAS:value}),/PREVIEW_ALIAS_FLAG_INVALID/);
+ const officialBuild={...base,CI:'true',WORKERS_CI_BUILD_UUID:'11111111-1111-4111-8111-111111111111',WRANGLER_CI_MATCH_TAG:'REVIEWED_TAG',WRANGLER_CI_GENERATE_PREVIEW_ALIAS:'true',WRANGLER_OUTPUT_FILE_DIRECTORY:'/build/system-output',WRANGLER_OUTPUT_FILE_PATH:'/build/untrusted.jsonl'};
+ const filtered=deploymentEnvironment(officialBuild,'REVIEWED_TAG');
+ assert.equal(filtered.WRANGLER_CI_GENERATE_PREVIEW_ALIAS,'false');
+ assert.equal(filtered.WRANGLER_OUTPUT_FILE_DIRECTORY,undefined);
+ assert.equal(filtered.WRANGLER_OUTPUT_FILE_PATH,undefined);
+ for(const key of ['WRANGLER_OUTPUT_FILE_DIRECTORY','WRANGLER_OUTPUT_FILE_PATH'])for(const value of ['',null,17])assert.throws(()=>deploymentEnvironment({...base,[key]:value}),/OUTPUT_LOCATION_INVALID/);
  assert.throws(()=>deploymentEnvironment({...base,WRANGLER_CI_OVERRIDE_NAME:'other'}),/WORKER_NAME_MISMATCH/);
+ assert.throws(()=>deploymentEnvironment({...base,CLOUDFLARE_ACCOUNT_ID:'other'}),/ACCOUNT_MISMATCH/);
  assert.equal(deploymentEnvironment({...base,WRANGLER_CI_MATCH_TAG:'REVIEWED_TAG'},'REVIEWED_TAG').WRANGLER_CI_MATCH_TAG,'REVIEWED_TAG');
  assert.throws(()=>deploymentEnvironment({...base,WRANGLER_CI_MATCH_TAG:'OTHER'},'REVIEWED_TAG'),/WORKER_TAG_MISMATCH/);
 });
@@ -27,6 +37,20 @@ test('raw Wrangler stdout, stderr and errors cannot reach caller output',()=>{
  assert.throws(()=>runWranglerSafely('node','fake','/tmp',deploymentEnvironment(base),'a'.repeat(40),(_,args,input)=>{options=input;return {status:1,stdout:secret,stderr:secret};}),error=>!String(error).includes(secret));
  assert.deepEqual(options.stdio,['ignore','pipe','pipe']);
  assert.equal(options.env.WRANGLER_WRITE_LOGS,'false');
+ assert.equal(options.env.WRANGLER_OUTPUT_FILE_DIRECTORY,undefined);
+});
+test('Build output overrides never replace the private structured result file',()=>{
+ const input={...base,WRANGLER_CI_GENERATE_PREVIEW_ALIAS:'true',WRANGLER_OUTPUT_FILE_DIRECTORY:'/build/system-output',WRANGLER_OUTPUT_FILE_PATH:'/build/untrusted.jsonl'};
+ const environment=deploymentEnvironment(input);
+ const result=runWranglerSafely('node','fake','/tmp',environment,'a'.repeat(40),(_,args,options)=>{
+  assert.equal(options.env.WRANGLER_CI_GENERATE_PREVIEW_ALIAS,'false');
+  assert.equal(options.env.WRANGLER_OUTPUT_FILE_DIRECTORY,undefined);
+  assert.notEqual(options.env.WRANGLER_OUTPUT_FILE_PATH,input.WRANGLER_OUTPUT_FILE_PATH);
+  assert.match(options.env.WRANGLER_OUTPUT_FILE_PATH,/yta-wrangler-output-.*\/result\.jsonl$/);
+  writeFileSync(options.env.WRANGLER_OUTPUT_FILE_PATH,JSON.stringify({type:'deploy',version:1,worker_name:'holy-rice-b914',version_id:'11111111-1111-4111-8111-111111111111'})+'\n');
+  return {status:0,stdout:'PRIVATE_ACCESS_VALUE',stderr:'PRIVATE_ACCESS_VALUE'};
+ });
+ assert.equal(result.versionId,'11111111-1111-4111-8111-111111111111');
 });
 test('structured Wrangler version and commit annotation must match the live deployment',()=>{
  const commit='a'.repeat(40),versionId='11111111-1111-4111-8111-111111111111',otherId='22222222-2222-4222-8222-222222222222';

@@ -162,7 +162,7 @@ fixed account and reviewed CI Worker name, with unsupported `CF_`,
 captured but never relayed to Build output, and pinned Wrangler 4.149.0 receives
 `WRANGLER_WRITE_LOGS=false`. The wrapper emits only a generic failure message.
 Build `f4d2066e-5cbd-4bab-a4b0-46f64d6a4108` at source `38c88c2` stopped
-before any remote precheck or upload because Workers Builds supplied
+before Wrangler execution or upload because Workers Builds supplied
 `WRANGLER_CI_GENERATE_PREVIEW_ALIAS`. Pinned Wrangler 4.149.0 accepts only
 `true` or `false` for that flag (default `false`) and uses `true` when forming
 an alias for `versions upload`. The wrapper now accepts only those exact input
@@ -174,6 +174,20 @@ upload path, would name the same Worker version; `preview_urls=false` remains
 explicit in config and is checked against remote before and after upload.
 [Cloudflare's Version URLs documentation](https://developers.cloudflare.com/workers/versions-and-deployments/version-urls/)
 states that disabling Version URLs disables routing to aliased Version URLs.
+Build `ba6cdca2-09f9-442e-9f05-aedacd7c1e66` at source `81026bb` passed
+the code checks and tests but stopped before Wrangler upload on the injected
+`WRANGLER_OUTPUT_FILE_DIRECTORY`. Wrangler gives `WRANGLER_OUTPUT_FILE_PATH`
+priority over that directory. The wrapper accepts these two exact Build input
+names, validates that supplied values are nonempty strings, and discards both
+values. It creates its own private temporary directory, passes only its own
+`WRANGLER_OUTPUT_FILE_PATH` to the child, verifies the structured deploy
+record, and deletes the temporary file. A parent-supplied output path or
+directory cannot redirect that record. Unsupported `CF_`, `CLOUDFLARE_`, and
+`WRANGLER_` variables still block the child; the error reports at most 12
+safe variable names together, never values or paths. The documented default
+Workers Builds variables (`CI` and `WORKERS_CI_*`) remain separate from this
+Wrangler override allowlist. See [Workers Builds default variables](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
+and [Wrangler output variables](https://developers.cloudflare.com/workers/wrangler/system-environment-variables/).
 This protects against Wrangler's raw dashboard diff appearing in its console
 or Wrangler debug files under this pinned version. It does not make Cloudflare
 platform logs or unrelated Build commands private; never print raw responses

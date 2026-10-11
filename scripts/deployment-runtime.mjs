@@ -5,17 +5,23 @@ import {join} from 'node:path';
 
 const accountId='fe9d7e2a164274b1ff6cef150a75cb0b';
 const workerName='holy-rice-b914';
-const allowedOverrides=new Set(['CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','WRANGLER_CI_OVERRIDE_NAME','WRANGLER_CI_MATCH_TAG','WRANGLER_CI_GENERATE_PREVIEW_ALIAS']);
+const allowedOverrides=new Set(['CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','WRANGLER_CI_OVERRIDE_NAME','WRANGLER_CI_MATCH_TAG','WRANGLER_CI_GENERATE_PREVIEW_ALIAS','WRANGLER_OUTPUT_FILE_DIRECTORY','WRANGLER_OUTPUT_FILE_PATH']);
+const safeName=name=>/^[A-Z][A-Z0-9_]{0,63}$/.test(name)?name:'INVALID_NAME';
 
 export function deploymentEnvironment(input,verifiedWorkerTag){
-  for(const key of Object.keys(input)){
-    if(/^(?:CLOUDFLARE_|CF_|WRANGLER_)/.test(key)&&!allowedOverrides.has(key))throw Error(`Production deploy: ENV_OVERRIDE_BLOCKED: ${key}`);
+  const unsupported=Object.keys(input).filter(key=>/^(?:CLOUDFLARE_|CF_|WRANGLER_)/.test(key)&&!allowedOverrides.has(key)).sort();
+  if(unsupported.length){
+    const names=unsupported.slice(0,12).map(safeName).join(',');
+    throw Error(`Production deploy: ENV_OVERRIDES_BLOCKED: ${names}${unsupported.length>12?',MORE_NAMES_OMITTED':''}`);
   }
   if(!input.CLOUDFLARE_API_TOKEN)throw Error('Production deploy: BUILD_TOKEN_UNAVAILABLE');
   if(input.CLOUDFLARE_ACCOUNT_ID&&input.CLOUDFLARE_ACCOUNT_ID!==accountId)throw Error('Production deploy: ACCOUNT_MISMATCH');
   if(input.WRANGLER_CI_OVERRIDE_NAME&&input.WRANGLER_CI_OVERRIDE_NAME!==workerName)throw Error('Production deploy: WORKER_NAME_MISMATCH');
   if(input.WRANGLER_CI_MATCH_TAG&&(typeof verifiedWorkerTag!=='string'||!verifiedWorkerTag||input.WRANGLER_CI_MATCH_TAG!==verifiedWorkerTag))throw Error('Production deploy: WORKER_TAG_MISMATCH');
   if(Object.hasOwn(input,'WRANGLER_CI_GENERATE_PREVIEW_ALIAS')&&!['true','false'].includes(input.WRANGLER_CI_GENERATE_PREVIEW_ALIAS))throw Error('Production deploy: PREVIEW_ALIAS_FLAG_INVALID');
+  for(const key of ['WRANGLER_OUTPUT_FILE_DIRECTORY','WRANGLER_OUTPUT_FILE_PATH']){
+    if(Object.hasOwn(input,key)&&(typeof input[key]!=='string'||!input[key]))throw Error('Production deploy: OUTPUT_LOCATION_INVALID');
+  }
   return {
     PATH:input.PATH||'/usr/bin:/bin',
     HOME:input.HOME||'/tmp',
@@ -40,8 +46,10 @@ export function runWranglerSafely(node,wrangler,cwd,environment,sourceCommit,spa
   const directory=mkdtempSync(join(tmpdir(),'yta-wrangler-output-'));
   const outputPath=join(directory,'result.jsonl');
   try{
+    const childEnvironment={...environment,WRANGLER_OUTPUT_FILE_PATH:outputPath};
+    delete childEnvironment.WRANGLER_OUTPUT_FILE_DIRECTORY;
     const result=spawn(node,[wrangler,'deploy','--config','wrangler.toml','--name',workerName,'--keep-vars','--message',`source-commit:${sourceCommit}`],{
-      cwd,env:{...environment,WRANGLER_OUTPUT_FILE_PATH:outputPath},
+      cwd,env:childEnvironment,
       stdio:['ignore','pipe','pipe'],encoding:'utf8',maxBuffer:8*1024*1024,
     });
     if(result.error||result.status!==0)throw Error('Production deploy: WRANGLER_FAILED; output withheld to protect runtime variables.');
