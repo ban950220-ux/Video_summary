@@ -39,9 +39,11 @@ preflight review, and the correct Worker target are confirmed.
 
 `deploy:production` requires `main`. In Workers Builds, it verifies
 `WORKERS_CI_BRANCH=main` and that `WORKERS_CI_COMMIT_SHA` matches the checkout
-HEAD, including detached checkouts. Outside Workers Builds it requires a local
-`main` branch. It validates the Worker and D1 target, and invokes
-the pinned Wrangler with `--name holy-rice-b914 --keep-vars --strict` by default.
+HEAD, including detached checkouts. The deployment script now requires Workers
+Builds, validates the Worker and D1 target, and reads the current Cloudflare
+Worker metadata twice before invoking pinned Wrangler with
+`--name holy-rice-b914 --keep-vars`. Missing Build token, missing read permission,
+missing response fields, or unexpected remote changes stop before upload.
 `--keep-vars` preserves existing dashboard runtime text variables not specified
 by config, including `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN`; the three configured
 flags are explicitly sent as `false`, `false`, and `true`. The existing `ACCESS_OWNER_EMAIL` and
@@ -71,13 +73,23 @@ planned new binding.
 
 The previously proposed SHA-limited strict exception was removed. It could be
 retried indefinitely for the same commit, and noninteractive Wrangler accepts
-all remote conflicts when strict mode is absent. Production deployment remains
-blocked until an independently reviewed remote-metadata guard is available and
-the selected Build token's read access is confirmed. The guard must pin the
-active version, inspect the full observability settings, and permit only the
-reviewed `ASSETS` addition while preserving all existing bindings and variables.
-Keep Preview builds disabled. Do not paste raw Wrangler diff output into Git
-or chat because it can contain runtime variable values.
+all remote conflicts when strict mode is absent. The replacement guard pins the
+full active version ID, checks the full observability object, routes, domains,
+workers.dev and preview URL switches, D1 UUID, Access variable/secret presence,
+and runtime flags. It permits only the reviewed `ASSETS` binding addition.
+Its approved baseline currently identifies active version
+`a33b9720-c167-4998-b8cb-3b065439b0d0`. A later deployment must update the
+baseline after independently confirming the then-active version. No token value
+or runtime Access value is logged. See [the remote guard design](remote-deploy-guard-proposal.md).
+
+This guard is offline-tested, but the existing Build token's actual read scope
+and the precise API response shape have not been tested. It deliberately stops
+on insufficient permission or missing fields. The supplied browser review did
+not independently establish query-string redaction or trace-persistence values;
+the baseline currently expects `false` and `true` respectively. If the remote
+values differ, the build stops and the local config must be reconciled only
+after review. Keep Preview builds disabled. Do not paste raw Wrangler diff
+output into Git or chat because it can contain runtime variable values.
 
 Before a later production deployment, inspect the selected Worker, target URL,
 active version, DB binding, Access policy, and names (not values) of variables

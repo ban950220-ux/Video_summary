@@ -34,5 +34,6 @@ test('public Access values, live API and production D1 in previews fail',()=>{
 test('production config preserves remote preview, logs, and dashboard variables',()=>{
   assert.throws(()=>assertProductionTarget(config.replace('preview_urls = false','preview_urls = true')),/version URLs/);
   assert.throws(()=>assertProductionTarget(config.replace('keep_vars = true','keep_vars = false')),/dashboard variables/);
-  assert.throws(()=>assertProductionTarget(config.replace('enabled = true','enabled = false')),/observability/);
+  assert.throws(()=>assertProductionTarget(config.replace('redact_query_string = false','redact_query_string = true')),/observability/);
+  assert.throws(()=>assertProductionTarget(config.replace('invocation_logs = true','invocation_logs = false')),/observability/);
 });

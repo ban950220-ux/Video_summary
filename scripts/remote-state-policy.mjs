@@ -7,13 +7,28 @@ const requiredObservability={
   'logs.head_sampling_rate':true,
   'logs.invocation_logs':true,
   'logs.persist':true,
+  'logs.destinations':true,
   'traces.enabled':true,
   'traces.head_sampling_rate':true,
   'traces.persist':true,
+  'traces.destinations':true,
+  'issues.enabled':true,
 };
 const valueAt=(obj,path)=>path.split('.').reduce((value,key)=>value?.[key],obj);
 const canonical=value=>JSON.stringify(value,(_,entry)=>entry&&typeof entry==='object'&&!Array.isArray(entry)?Object.fromEntries(Object.entries(entry).sort(([a],[b])=>a.localeCompare(b))):entry);
 const fail=code=>{throw Error(`Remote deployment guard: ${code}`);};
+
+export const approvedRemoteBaseline={
+  activeVersionId:'a33b9720-c167-4998-b8cb-3b065439b0d0',
+  databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
+  routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],
+  observability:{
+    enabled:true,head_sampling_rate:1,redact_query_string:false,
+    logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true,destinations:[]},
+    traces:{enabled:false,head_sampling_rate:1,persist:true,destinations:[]},
+    issues:{enabled:false},
+  },
+};
 
 export function assertRemoteState(remote,baseline){
   if(!remote||!baseline||!Array.isArray(remote.routes)||!Array.isArray(remote.domains)||!Array.isArray(baseline.routes)||!Array.isArray(baseline.domains)||!Array.isArray(remote.compatibilityFlags)||!Array.isArray(baseline.compatibilityFlags))fail('METADATA_INCOMPLETE');

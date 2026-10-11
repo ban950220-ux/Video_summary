@@ -11,7 +11,6 @@ export function assertProductionTarget(config,env={}){
     ['production workers.dev route',/^workers_dev\s*=\s*true\s*$/m],
     ['disabled version URLs',/^preview_urls\s*=\s*false\s*$/m],
     ['dashboard variables preserved',/^keep_vars\s*=\s*true\s*$/m],
-    ['production observability',/^enabled\s*=\s*true\s*$/m],
     ['assets binding',/^binding\s*=\s*"ASSETS"\s*$/m],
     ['auth before assets',/^run_worker_first\s*=\s*true\s*$/m],
     ['production D1 binding',/^binding\s*=\s*"DB"\s*$/m],
@@ -20,6 +19,20 @@ export function assertProductionTarget(config,env={}){
   ];
   for(const [label,pattern] of required){
     if(!pattern.test(config))throw Error(`Deployment target guard: invalid ${label}`);
+  }
+  for(const [section,fields] of Object.entries({
+    observability:{enabled:'true',head_sampling_rate:'1',redact_query_string:'false'},
+    'observability.logs':{enabled:'true',head_sampling_rate:'1',invocation_logs:'true',persist:'true',destinations:'[]'},
+    'observability.traces':{enabled:'false',head_sampling_rate:'1',persist:'true',destinations:'[]'},
+    'observability.issues':{enabled:'false'},
+  })){
+    const marker=`[${section}]`,parts=config.split(marker);
+    if(parts.length!==2)throw Error(`Deployment target guard: invalid ${section}`);
+    const body=parts[1].split(/^\[/m)[0];
+    for(const [key,value] of Object.entries(fields)){
+      const entries=[...body.matchAll(new RegExp(`^${key}\\s*=\\s*(.*)$`,'gm'))];
+      if(entries.length!==1||entries[0][1].trim()!==value)throw Error(`Deployment target guard: invalid ${section}.${key}`);
+    }
   }
   const productionVars=config.split(/^\[vars\]\s*$/m)[1]?.split(/^\[/m)[0]??'';
   for(const [key,value] of Object.entries({ENABLE_LIVE_FREE:'false',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'})){

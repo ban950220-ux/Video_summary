@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {assertRemoteState} from '../scripts/remote-state-policy.mjs';
 
-const observability={enabled:true,head_sampling_rate:1,redact_query_string:false,logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true},traces:{enabled:false,head_sampling_rate:1,persist:true}};
+const observability={enabled:true,head_sampling_rate:1,redact_query_string:false,logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true,destinations:[]},traces:{enabled:false,head_sampling_rate:1,persist:true,destinations:[]},issues:{enabled:false}};
 const version='a'.repeat(8)+'-1111-4111-8111-'+'b'.repeat(12);
 const baseline={activeVersionId:version,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],observability,databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34'};
 const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVersions:[{id:version,percentage:100}],workersDev:true,previewUrls:false,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],observability:structuredClone(observability),bindings:[
