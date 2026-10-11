@@ -18,8 +18,8 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
 ]});
 
 test('guard baseline pins the verified active Worker version and source commit',()=>{
-  assert.equal(approvedRemoteBaseline.activeVersionId,'e730511d-c688-4eda-bdc4-8d733eeadb55');
-  assert.equal(approvedRemoteBaseline.sourceCommit,'3b7c704eab39651c308041dceae97c9f08541cab');
+  assert.equal(approvedRemoteBaseline.activeVersionId,'ac481ef1-1a21-4c5a-805e-d1f8bf406f7e');
+  assert.equal(approvedRemoteBaseline.sourceCommit,'18e20da8751b05a99abff8c9ac224270e362be00');
 });
 
 test('offline remote policy requires exactly one ASSETS before and after later deploys',()=>{

@@ -43,7 +43,7 @@ test('cached audio boundary reconciliation preserves speech, invalidates old rev
  const prepare=async()=>{
   const f=await fixture(),segments=[{id:1,startMs:1000,endMs:4000,text:'앞 조각 발언'},{id:2,startMs:3500,endMs:5000,text:'뒤 조각 다른 발언'}];
   const audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64),audioProviders:['groq'],audioChunks:[{index:0,start:0,end:4,provider:'groq'},{index:1,start:3,end:6,provider:'groq'}],audioSegmentOrigins:[{segmentId:1,chunkIndex:0,startMs:1000,endMs:4000},{segmentId:2,chunkIndex:1,startMs:3500,endMs:5000}],audioBoundaryReview:'NO_NONIDENTICAL_OVERLAP_TEXT',audioBoundaryAmbiguities:[]};
-  f.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),f.id);
+  f.db.prepare('UPDATE jobs SET audit_json=?,duration_seconds=6 WHERE id=?').run(JSON.stringify(audit),f.id);
   f.db.prepare('UPDATE yta_sources SET raw=?,segments_json=? WHERE job_id=?').run(segments.map(part=>part.text).join('\n'),JSON.stringify(segments),f.id);
   return f;
  };
@@ -69,6 +69,26 @@ test('cached audio boundary reconciliation preserves speech, invalidates old rev
   assert.equal((await blocked.json()).error.code,'BOUNDARY_RECONCILE_CONFLICT');
   assert.deepEqual(JSON.parse(locked.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(locked.id).audit_json).audioBoundaryAmbiguities,[]);
  }finally{locked.db.close();}
+ for(const mode of ['gemini-summary','deletion-race','string-timestamps']){
+  const candidate=await prepare();try{
+   if(mode==='string-timestamps'){
+    const source=candidate.db.prepare('SELECT segments_json FROM yta_sources WHERE job_id=?').get(candidate.id),segments=JSON.parse(source.segments_json),audit=JSON.parse(candidate.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(candidate.id).audit_json);
+    segments[0].startMs='1000';audit.audioSegmentOrigins[0].startMs='1000';
+    candidate.db.prepare('UPDATE yta_sources SET segments_json=? WHERE job_id=?').run(JSON.stringify(segments),candidate.id);
+    candidate.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),candidate.id);
+    const invalid=await routeApi(request(candidate.path+'/audio-boundary-reconcile'),candidate.env);
+    assert.equal((await invalid.json()).error.code,'BOUNDARY_RECONCILE_SOURCE_INVALID');continue;
+   }
+   const preview=await(await routeApi(request(candidate.path+'/audio-boundary-reconcile'),candidate.env)).json();
+   if(mode==='gemini-summary')candidate.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'gemini',1,'CLAIMED',?)").run(candidate.id+':summary:prior:raw:0',candidate.id,new Date().toISOString());
+   else{
+    const original=candidate.env.DB;candidate.env.DB={...original,prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('UPDATE jobs SET audit_json=?,updated_at=?'))return statement;return {bind(...args){const bound=statement.bind(...args);return {...bound,async run(){candidate.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'deletion',0,'DELETING',?)").run(candidate.id+':deleting',candidate.id,new Date().toISOString());return bound.run();}};}};}};
+   }
+   const blocked=await routeApi(request(candidate.path+'/audio-boundary-reconcile','POST',{...preview,confirmBoundaryMetadataReconcile:true}),candidate.env);
+   assert.equal((await blocked.json()).error.code,'BOUNDARY_RECONCILE_CONFLICT');
+   assert.deepEqual(JSON.parse(candidate.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(candidate.id).audit_json).audioBoundaryAmbiguities,[]);
+  }finally{candidate.db.close();}
+ }
 });
 
 test('conservative UTF-8 bound partitions long Korean source below Groq Free input ceiling',()=>{
@@ -312,6 +332,15 @@ test('approval revoked at final D1 guard cannot reach Groq fetch',async()=>{
  try{await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);
   const original=f.env.DB;let changed=false;f.env.DB={...original,prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('SELECT 1 AS ok FROM yta_operations a JOIN'))return statement;return {bind(...args){const bound=statement.bind(...args);return {...bound,async first(){if(!changed){changed=true;f.db.prepare("UPDATE yta_operations SET state='STOPPED' WHERE id=?").run(f.id+':groq-summary:approval:0');}return bound.first();}};}};}};
   assert.equal((await routeApi(request(f.path+'/groq-summary','POST',{}),f.env)).status,409);assert.equal(calls,0);
+  assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE provider='groq-summary' AND id LIKE ?").get(f.id+':groq-summary:'+f.plan.transcriptHash+':%').state,'BLOCKED');
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('boundary audit changed during final D1 admission cannot reach Groq fetch',async()=>{
+ const f=await fixture(),old=fetch;let calls=0,guardReads=0;globalThis.fetch=async()=>{calls++;throw Error('no provider call');};
+ try{assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);
+  const original=f.env.DB;f.env.DB={...original,prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('SELECT 1 AS ok FROM yta_operations a JOIN'))return statement;return {bind(...args){const bound=statement.bind(...args);return {...bound,async first(){if(++guardReads===3){const row=f.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(row.audit_json);audit.audioBoundaryAmbiguities=[{segmentId:1,chunkIndex:1,startMs:0,endMs:1}];f.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),f.id);}return bound.first();}};}};}};
+  const result=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);
+  assert.equal(result.status,409,await result.clone().text());assert.equal(calls,0);assert.equal(guardReads,3);
   assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE provider='groq-summary' AND id LIKE ?").get(f.id+':groq-summary:'+f.plan.transcriptHash+':%').state,'BLOCKED');
  }finally{globalThis.fetch=old;f.db.close();}
 });
