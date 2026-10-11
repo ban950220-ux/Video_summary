@@ -11,6 +11,8 @@ import {validateAnalysis} from '../src/report.mjs';
 import {planMp3,scanMp3,prepareMp3Chunk,mergeAudioSegments} from '../src/audio.mjs';
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,SUMMARY_PROMPT_LIMIT,summaryUnits} from '../src/summary-plan.mjs';
 import {reportPrompt} from '../src/report.mjs';
+import {encryptProviderKey} from '../src/vault.mjs';
+import {capacityIdentity} from '../src/observed-capacity.mjs';
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema){db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0003_observed_capacity.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0005_reviewed_free_recovery.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0006_unknown_groq_probe.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0007_bounded_free_batch.sql',import.meta.url),'utf8'));const now=Date.now();for(const [provider,model,remaining] of [['gemini','gemini-2.5-flash',{requestsMinute:1000,tokensMinute:1000000000,requestsDay:1000}],['groq','whisper-large-v3-turbo',{requestsMinute:1000,audioSecondsHour:100000,audioSecondsDay:100000}]])db.prepare('INSERT INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES(?,?,?,?,?,?,?,?,1)').run(provider,(model),({gemini:'AI_STUDIO_LIVE',groq:'GROQ_CONSOLE_LIVE'})[provider]+':'+createHash('sha256').update(provider+':NOT_REAL_TEST_KEY').digest('hex'),now,now+60000,JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,now+3600000]))),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,0]))));}const DB={prepare(sql){const make=args=>({sql,args,bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);},async batch(statements){db.exec('BEGIN');try{const results=statements.map(statement=>({meta:{changes:Number(db.prepare(statement.sql).run(...statement.args).changes)}}));db.exec('COMMIT');return results;}catch(error){db.exec('ROLLBACK');throw error;}}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',GROQ_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
 async function job(env){return (await(await routeApi(request('/api/jobs','POST',{sourceType:'text',title:'LOCAL MOCK TEST',filename:'x.srt',transcript:'1\n00:00:00,000 --> 00:01:00,000\n테스트 발언입니다.',durationSeconds:60,persistTranscript:true}),env)).json()).job;}
@@ -216,6 +218,19 @@ test('Gemini grant revoked during final combined admission never reaches provide
   const response=await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env);
   assert.equal((await response.json()).error.code,'SUMMARY_INPUT_CHANGED');assert.equal(reads,2);assert.equal(calls,0);
   assert.equal(db.prepare("SELECT state FROM yta_operations WHERE provider='gemini'").get().state,'BLOCKED');
+ }finally{globalThis.fetch=old;db.close();}
+});
+test('older encrypted Gemini credential passes the final admission timestamp check',async()=>{
+ const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(valid())}]}}]});};
+ try{
+  const root=Buffer.alloc(32,3),encrypted=await encryptProviderKey(root,'gemini','STORED_TEST_ONLY_KEY');
+  env.KEY_ENCRYPTION_KEY_B64=root.toString('base64');delete env.GEMINI_API_KEY;
+  db.prepare('INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES(?,?,?,?,?,?)').run('owner','gemini',encrypted.version,encrypted.ivB64,encrypted.ciphertextB64,new Date(Date.now()-1000).toISOString());
+  db.prepare("UPDATE yta_capacity SET source=? WHERE provider='gemini'").run('AI_STUDIO_LIVE:'+await capacityIdentity(env,'gemini'));
+  const j=await job(env);await grant(env);
+  const response=await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env);
+  assert.equal(response.status,200,await response.clone().text());assert.equal(calls,1);
+  assert.equal((await response.json()).job.report.kind,'GEMINI_EVIDENCE_LINKED');
  }finally{globalThis.fetch=old;db.close();}
 });
 test('valid-looking Gemini summary JSON with MAX_TOKENS or SAFETY remains uncertain and reviewable',async()=>{
