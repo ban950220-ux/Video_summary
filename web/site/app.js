@@ -62,10 +62,14 @@ async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button
    if(state.mode==='url'){progress.textContent='기존 자막 조회 중…';result=await api('/api/jobs/'+id+'/native',{method:'POST',body:{}});if(['NEED_UPLOAD','NATIVE_PENDING'].includes(result.job.status)){showReport(result.job,$('#result-content'),true);throw Error(result.job.status==='NATIVE_PENDING'?'제공자 처리 대기: 이력에서 자막 결과 조회를 사용하세요.':'기존 자막이 없습니다. 보유 음성/자막을 사용하세요.');}}
    if(state.mode==='audio'){
     await api('/api/jobs/'+id+'/audio-plan',{method:'POST',body:{rightsConfirmed:true,chunks:plan.chunks.map(({index,start,end})=>({index,start,end}))}});
-    for(const c of plan.chunks){progress.textContent='음성 전사 '+(c.index+1)+' / '+plan.chunks.length+' (기록 '+id+')';const response=await fetch('/api/jobs/'+id+'/audio-chunk?index='+c.index+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},credentials:'same-origin',body:bytes.slice(c.byteStart,c.byteEnd)});const json=await response.json();if(!response.ok)throw Error(json.error?.message||'음성 처리 실패');}
+    const done=new Set((await api('/api/jobs/'+id+'/audio-progress')).chunks.filter(c=>c.state==='DONE').map(c=>c.index));
+    for(const c of plan.chunks){if(done.has(c.index))continue;progress.textContent='음성 전사 '+(c.index+1)+' / '+plan.chunks.length+' (기록 '+id+')';const response=await fetch('/api/jobs/'+id+'/audio-chunk?index='+c.index+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},credentials:'same-origin',body:bytes.slice(c.byteStart,c.byteEnd)});const json=await response.json();if(!response.ok)throw Error(json.error?.message||'음성 처리 실패');}
     result=await api('/api/jobs/'+id+'/audio-finish',{method:'POST',body:{}});showReport(result.job,$('#result-content'),true);
    }
-   progress.textContent='원문 근거 연결 요약 작성 중…';result=await api('/api/jobs/'+id+'/summary',{method:'POST',body:{}});
+   const summaryPlan=await api('/api/jobs/'+id+'/summary-plan');
+   progress.textContent='원문 근거 연결 요약 '+summaryPlan.stages+'개 구간 작성 중… 첫 단계 예약 상한 '+summaryPlan.firstPassUnits+' 단위. 할당이 부족하면 완료 단계만 보관하고 중단합니다.';
+   const staged=summaryPlan.firstPassUnits>250000;if(staged&&!confirm('이 원문은 첫 단계만 '+summaryPlan.firstPassUnits+' 단위가 필요합니다. 여러 차례 무료 할당 확인이 필요할 수 있고 최종 합성 비용은 아직 모릅니다. 단계별로 진행할까요?'))throw Error('단계별 요약을 시작하지 않았습니다.');
+   result=await api('/api/jobs/'+id+'/summary',{method:'POST',body:{allowStaged:staged}});
   }
   showReport(result.job,$('#result-content'),result.persisted);progress.textContent='처리 결과를 저장했습니다. 완전 전사·외부 사실 검증 상태는 리포트를 확인하세요.';toast('분석 결과 저장 완료');
  }catch(e){progress.textContent=safeError(e)+' — 완료된 원문과 조각은 이력에 보관됩니다. 불명확한 API 요청은 자동 재시도하지 않습니다.';toast(safeError(e));}finally{button.disabled=false;}
@@ -77,7 +81,7 @@ function libraryCard(job){
   const actions=el('div',{className:'library-actions'}),open=el('button',{className:'btn secondary small',text:'리포트 열기'}),remove=el('button',{className:'btn secondary small',text:'삭제'});
   open.onclick=async()=>{try{const data=await api(`/api/jobs/${encodeURIComponent(job.id)}`);const target=$('#library-detail');empty(target);target.hidden=false;target.append(el('h2',{text:data.job.title??'분석 리포트'}));showReport(data.job,target,true);target.scrollIntoView({behavior:'smooth'});}catch(e){toast(safeError(e));}};
   remove.onclick=async()=>{if(!confirm('이 분석 기록과 저장된 리포트를 삭제할까요?'))return;try{await api(`/api/jobs/${encodeURIComponent(job.id)}`,{method:'DELETE'});await loadLibrary();toast('이력에서 삭제했습니다.');}catch(e){toast(safeError(e));}};
-  for(const [action,label] of [['native-poll','자막 결과 조회'],['summary','요약 생성'],['audio-finish','전사 병합']]){const b=el('button',{className:'btn secondary small',text:label});b.onclick=async()=>{b.disabled=true;try{const d=await api('/api/jobs/'+job.id+'/'+action,{method:'POST',body:{}});const target=$('#library-detail');target.hidden=false;showReport(d.job,target,true);}catch(e){toast(safeError(e));}finally{b.disabled=false;}};actions.append(b);}actions.append(open,remove);card.append(actions);return card;
+  for(const [action,label] of [['native-poll','자막 결과 조회'],['summary','요약 생성'],['audio-finish','전사 병합']]){const b=el('button',{className:'btn secondary small',text:label});b.onclick=async()=>{b.disabled=true;try{let body={};if(action==='summary'){const p=await api('/api/jobs/'+job.id+'/summary-plan');if(p.firstPassUnits>250000){if(!confirm('첫 단계 예약 상한 '+p.firstPassUnits+' 단위, 최종 합성 비용은 미정입니다. 무료 할당을 단계별로 확인하며 계속할까요?'))return;body={allowStaged:true};}}const d=await api('/api/jobs/'+job.id+'/'+action,{method:'POST',body});const target=$('#library-detail');target.hidden=false;showReport(d.job,target,true);}catch(e){toast(safeError(e));}finally{b.disabled=false;}};actions.append(b);}actions.append(open,remove);card.append(actions);return card;
 }
 async function loadLibrary(){
   const q=$('#library-search').value.trim(),out=$('#library-list');empty(out);

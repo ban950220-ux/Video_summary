@@ -3,6 +3,7 @@ import {ProviderError} from './adapters.mjs';
 import {runNativeCaption,runNativePoll,runTranscriptSummary,runOwnedAudioTranscription} from './provider-keys.mjs';
 import {normalizeSegments,auditGaps,validateAnalysis,reportPrompt,markdownReport} from './report.mjs';
 import {scanMp3,mergeAudioSegments} from './audio.mjs';
+import {partitionTranscript,partitionSynthesis,synthesisPrompt,summaryUnits,evidenceIds,assertGroupCoverage} from './summary-plan.mjs';
 const initialized=new WeakSet();
 const schemas=[
  'CREATE TABLE IF NOT EXISTS yta_sources(job_id TEXT PRIMARY KEY, raw TEXT NOT NULL, segments_json TEXT NOT NULL, provenance TEXT NOT NULL, updated_at TEXT NOT NULL)',
@@ -25,11 +26,14 @@ async function grantEnv(env,provider){
  return {...env,[provider.toUpperCase()+'_FREE_PLAN_CONFIRMED']:'true'};
 }
 async function execute(env,{id,job,provider,units},fn){
- const active=await grantEnv(env,provider);
  const prior=await env.DB.prepare('SELECT * FROM yta_operations WHERE id=?').bind(id).first();
- if(prior){if(prior.state==='DONE')return JSON.parse(prior.result_json);throw new ProviderError('OPERATION_REVIEW_REQUIRED','이미 요청했거나 결과가 불명확한 작업입니다. 사용량을 확인한 뒤 새 작업으로 진행하세요.');}
+ if(prior?.state==='DONE')return JSON.parse(prior.result_json);
+ if(prior&&!(prior.state==='BLOCKED'&&prior.error_code==='QUOTA_EXHAUSTED'))throw new ProviderError('OPERATION_REVIEW_REQUIRED','이미 요청했거나 결과가 불명확한 작업입니다. 사용량을 확인한 뒤 새 작업으로 진행하세요.');
+ const active=await grantEnv(env,provider);
  // Atomic unique claim and atomic quota decrement: concurrent calls cannot overspend this app's grant.
- const claim=await env.DB.prepare('INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').bind(id,job,provider,units,'CLAIMED',new Date().toISOString()).run();
+ const claim=prior
+  ?await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=NULL WHERE id=? AND state=? AND error_code=?').bind('CLAIMED',id,'BLOCKED','QUOTA_EXHAUSTED').run()
+  :await env.DB.prepare('INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').bind(id,job,provider,units,'CLAIMED',new Date().toISOString()).run();
  if(claim.meta?.changes!==1)throw new ProviderError('OPERATION_BUSY','중복 요청 차단');
  const reserve=await env.DB.prepare('UPDATE yta_quota SET consumed=consumed+?,request_count=request_count+1 WHERE provider=? AND consumed+?<=allowance AND request_count<request_limit AND expires_at>? AND billing_disabled=1').bind(units,provider,units,Date.now()).run();
  if(reserve.meta?.changes!==1){await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=? WHERE id=?').bind('BLOCKED','QUOTA_EXHAUSTED',id).run();throw new ProviderError('QUOTA_EXHAUSTED','무료 사용량 또는 요청 횟수 한도에 도달했습니다.');}
@@ -52,7 +56,7 @@ async function storeTranscriptResult(env,job,segments,provenance,extra={}){
 async function boundedBytes(req,max){const reader=req.body?.getReader();if(!reader)throw new InputError('빈 음성');let size=0;const arrays=[];while(true){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>max){await reader.cancel();throw new InputError('음성 조각은 8MB 이하');}arrays.push(value);}const bytes=new Uint8Array(size);let at=0;for(const arr of arrays){bytes.set(arr,at);at+=arr.length;}return bytes;}
 export async function routeLive(request,env){
  const url=new URL(request.url),path=url.pathname;
- if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|source|export|audio-plan|audio-chunk|audio-finish)$/.test(path))return null;
+ if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|source|export|audio-plan|audio-progress|audio-chunk|audio-finish)$/.test(path))return null;
  try{
  if(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path)){await ensureLiveSchema(env);const id=path.split('/').pop();await ownedJob(env,id);for(const table of ['yta_sources','yta_audio'])await env.DB.prepare('DELETE FROM '+table+' WHERE job_id=?').bind(id).run();await env.DB.prepare('UPDATE yta_operations SET result_json=NULL WHERE job_id=?').bind(id).run();await env.DB.prepare('DELETE FROM jobs WHERE id=? AND owner_id=?').bind(id,'owner').run();return json({deleted:true,id});}
   await ensureLiveSchema(env);
@@ -69,7 +73,7 @@ export async function routeLive(request,env){
    await env.DB.prepare('INSERT INTO yta_quota(provider,allowance,consumed,request_limit,request_count,expires_at,confirmed_at,billing_disabled) VALUES(?,?,0,?,0,?,?,1) ON CONFLICT(provider) DO UPDATE SET allowance=excluded.allowance,consumed=0,request_limit=excluded.request_limit,request_count=0,expires_at=excluded.expires_at,confirmed_at=excluded.confirmed_at,billing_disabled=1').bind(provider,body.allowance,body.requestLimit,Date.now()+3600000,Date.now()).run();
    return json({configured:true,provider,expiresInSeconds:3600,verification:'OWNER_ATTESTED_NOT_INDEPENDENTLY_VERIFIED'});
   }
-  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|source|export|audio-plan|audio-chunk|audio-finish)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
+  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|source|export|audio-plan|audio-progress|audio-chunk|audio-finish)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
   const id=match[1],action=match[2],job=await ownedJob(env,id);
   if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id)});
   if(action==='export'&&request.method==='GET'){
@@ -91,11 +95,46 @@ export async function routeLive(request,env){
    if(result.status==='NO_CAPTIONS')await updateJob(env,id,'NEED_UPLOAD',null,{...job.audit,status:'NO_CAPTIONS'});
    return json({job:await ownedJob(env,id),persisted:true},202);
   }
+  if(action==='summary-plan'&&request.method==='GET'){
+   const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
+   const groups=partitionTranscript(source.segments,job.audit);
+   return json({stages:groups.length,firstPassUnits:groups.reduce((sum,group)=>sum+summaryUnits(reportPrompt(group,job.audit)),0),additionalSynthesisUnits:'UNKNOWN_UNTIL_STAGE_OUTPUT',segmentCount:source.segments.length,completeSourceRequired:true});
+  }
   if(action==='summary'&&request.method==='POST'){
    const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
-   const prompt=reportPrompt(source.segments,job.audit);if(prompt.length>190000)throw new InputError('요약 입력 크기 제한');
-   const response=await execute(env,{id:id+':summary',job:id,provider:'gemini',units:prompt.length*4+16384},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true'},text:prompt}));
-   let report;try{report=validateAnalysis(JSON.parse(response.text),source.segments);}catch{throw new ProviderError('REPORT_VALIDATION_FAILED','요약 근거 형식 검증 실패. 원문은 보관됐으며 자동 재호출하지 않습니다.');}
+   if(job.report?.kind==='GEMINI_EVIDENCE_LINKED')return json({job,persisted:true,cached:true});
+   const fingerprint=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([source.segments,job.audit]))))).map(x=>x.toString(16).padStart(2,'0')).join('');
+   const ask=async(key,prompt,allowed,stage)=>{
+    const response=await execute(env,{id:id+':summary:'+fingerprint+':'+key,job:id,provider:'gemini',units:summaryUnits(prompt)},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true',SUMMARY_STAGE_OUTPUT_TOKENS:stage?'2048':'8192'},text:prompt}));
+    let result;try{if(response.text.length>12000&&stage)throw Error('STAGE_TOO_LONG');result=validateAnalysis(JSON.parse(response.text),allowed);}catch{throw new ProviderError('REPORT_VALIDATION_FAILED','요약 근거 형식 검증 실패. 원문은 보관됐으며 자동 재호출하지 않습니다.');}
+    return result;
+   };
+   const groups=partitionTranscript(source.segments,job.audit);
+   const firstPassUnits=groups.reduce((sum,group)=>sum+summaryUnits(reportPrompt(group,job.audit)),0);
+   if(firstPassUnits>250000){const body=await readJson(request);if(body.allowStaged!==true)throw new InputError('요약에 여러 차례 무료 할당 갱신이 필요합니다. 단계별 비용 상한을 확인하고 명시적으로 계속하세요.');}
+   let report;
+   if(groups.length===1)report=await ask('single',reportPrompt(groups[0],job.audit),groups[0],false);
+   else{
+    let parts=[];
+    for(let i=0;i<groups.length;i++){
+     const chunk=groups[i],partial=await ask('raw:'+i,reportPrompt(chunk,job.audit),chunk,true);
+     parts.push({ids:evidenceIds(partial),startMs:chunk[0].startMs,endMs:chunk.at(-1).endMs,report:partial});
+    }
+    for(let level=0;parts.length>1;level++){
+     if(level>12)throw new InputError('요약 단계가 너무 깊습니다.');
+     const batches=partitionSynthesis(parts,job.audit),next=[];
+     for(let i=0;i<batches.length;i++){
+      const batch=batches[i],prompt=synthesisPrompt(batch,job.audit);
+      const allowed=[...new Set(batch.flatMap(part=>part.ids))].map(id=>({id}));
+      const merged=await ask('merge:'+level+':'+i,prompt,allowed,batches.length>1);
+      assertGroupCoverage(merged,batch);
+      next.push({ids:evidenceIds(merged),startMs:batch[0].startMs,endMs:batch.at(-1).endMs,report:merged});
+     }
+     parts=next;
+    }
+    report=parts[0].report;
+    assertGroupCoverage(report,groups.map(chunk=>({ids:chunk.map(s=>s.id)})));
+   }
    await updateJob(env,id,job.status,report,{...job.audit,summaryProvider:'gemini',externalFactCheck:'NOT_PERFORMED'});return json({job:await ownedJob(env,id),persisted:true});
   }
   if(action==='audio-plan'&&request.method==='POST'){
@@ -107,6 +146,10 @@ export async function routeLive(request,env){
    if(exists.n>0){const prior=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results; if(prior.length!==chunks.length||prior.some((c,i)=>Math.abs(c.start_sec-chunks[i].start)>.01||Math.abs(c.end_sec-chunks[i].end)>.01))throw new InputError('기존 음성 계획과 다릅니다.');return json({planned:true,reused:true});}
    for(const c of chunks)await env.DB.prepare('INSERT INTO yta_audio(job_id,chunk_index,start_sec,end_sec,state) VALUES(?,?,?,?,?)').bind(id,c.index,c.start,c.end,'PLANNED').run();
    return json({planned:true,chunks:chunks.length,uploadSeconds:chunks.reduce((sum,c)=>sum+c.end-c.start,0)});
+  }
+  if(action==='audio-progress'&&request.method==='GET'){
+   const rows=(await env.DB.prepare('SELECT chunk_index,start_sec,end_sec,state FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];
+   return json({chunks:rows.map(c=>({index:c.chunk_index,start:c.start_sec,end:c.end_sec,state:c.state})),complete:rows.length>0&&rows.every(c=>c.state==='DONE')});
   }
   if(action==='audio-chunk'&&request.method==='POST'){
    const index=Number(url.searchParams.get('index'));if(!Number.isInteger(index)||index<0)throw new InputError('조각 번호 오류');

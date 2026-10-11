@@ -49,7 +49,7 @@ export async function summarizeTranscriptWithGemini(text,env,fetchFn=fetch){
   if(typeof text!=='string'||text.length>190_000) throw new InputError('텍스트 길이 제한을 초과했습니다.');
   const model='gemini-2.5-flash';
   const instruction=env.SUMMARY_JSON==='true'?text:`아래 전사문에서만 근거를 찾아 한국어로 정확히 요약하라. 불확실한 숫자/발언은 명시하라. 입력에 없는 인용구를 생성하지 말라. 영어인 경우 한국어로 번역하라.\n\n${text}`;
-  const body={contents:[{role:'user',parts:[{text:instruction}]}],generationConfig:{temperature:0.2,maxOutputTokens:8192,thinkingConfig:{thinkingBudget:0},...(env.SUMMARY_JSON==='true'?{responseMimeType:'application/json'}:{})}};
+  const body={contents:[{role:'user',parts:[{text:instruction}]}],generationConfig:{temperature:0.2,maxOutputTokens:env.SUMMARY_STAGE_OUTPUT_TOKENS==='2048'?2048:8192,thinkingConfig:{thinkingBudget:0},...(env.SUMMARY_JSON==='true'?{responseMimeType:'application/json'}:{})}};
   const result=await requestJson(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:'POST',headers:{'x-goog-api-key':env.GEMINI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)},fetchFn);
   return {provider:'gemini',text:result.candidates?.[0]?.content?.parts?.map(x=>x.text||'').join('')||'',usage:result.usageMetadata??null};
 }

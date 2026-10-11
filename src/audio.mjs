@@ -6,15 +6,16 @@ export function scanMp3(bytes){
  while(offset+4<=bytes.length){
   const a=bytes[offset],b=bytes[offset+1],c=bytes[offset+2];
   const version=(b>>3)&3,layer=(b>>1)&3,rateIndex=(c>>2)&3,bitIndex=c>>4;
-  if(a!==255||(b&224)!==224||version===1||layer!==1||rateIndex===3||bitIndex===0||bitIndex===15){offset++;skipped++;if(frames.length&&skipped>2048)break;continue;}
+  if(a!==255||(b&224)!==224||version===1||layer!==1||rateIndex===3||bitIndex===0||bitIndex===15){offset++;skipped++;if(frames.length&&skipped>2048)throw Error('MP3_UNPARSED_AUDIO');continue;}
   const rates=[44100,48000,32000];const sampleRate=rates[rateIndex]/(version===3?1:version===2?2:4);
   const bitRate=(version===3?[0,32,40,48,56,64,80,96,112,128,160,192,224,256,320]:[0,8,16,24,32,40,48,56,64,80,96,112,128,144,160])[bitIndex]*1000;
   const size=Math.floor((version===3?144:72)*bitRate/sampleRate)+((c>>1)&1);
-  if(offset+size>bytes.length)break;
+  if(offset+size>bytes.length)throw Error('MP3_TRUNCATED_FRAME');
   const duration=(version===3?1152:576)/sampleRate;
   frames.push({byteStart:offset,byteEnd:offset+size,start:seconds,end:seconds+duration});seconds+=duration;offset+=size;skipped=0;
  }
  if(frames.length<2||seconds>7205)throw Error('MP3_DURATION_OR_FRAMES');
+ if(bytes.length-offset>128)throw Error('MP3_UNPARSED_AUDIO');
  return {frames,durationSeconds:seconds};
 }
 export function planMp3(bytes,{chunkSeconds=300,overlapSeconds=3,maxBytes=8_000_000}={}){
