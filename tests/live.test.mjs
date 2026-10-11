@@ -286,6 +286,12 @@ test('FFmpeg flags=3 encoder extension fixture retains decoded samples and is re
 });
 test('MP3 scan rejects an unparsed tail instead of treating a partial file as complete',()=>{const bytes=new Uint8Array(417*3+4096);for(let i=0;i<3;i++)bytes.set([255,251,144,0],i*417);assert.throws(()=>planMp3(bytes),/MP3_UNPARSED_AUDIO/);});
 test('audio merge offsets timestamps, identifies missing chunk and cannot certify completeness',()=>{const r=mergeAudioSegments([{index:0,start:0,end:300,segments:[{start:0,end:2,text:'시작'}]},{index:1,start:297,end:597,segments:[{start:10,end:12,text:'두번째'}]},{index:2,start:594,end:600,segments:[]}]);assert.equal(r.segments[1].startMs,307000);assert.deepEqual(r.missingChunks,[2]);});
+test('audio merge accepts millisecond provider timestamp rounding at chunk end',()=>{
+ const merged=mergeAudioSegments([{index:0,start:0,end:299.976,segments:[{start:299.5,end:299.982,text:'끝 발언'}]}]);
+ assert.deepEqual(merged.missingChunks,[]);
+ assert.deepEqual(merged.rejectedSegments,[]);
+ assert.equal(merged.segments[0].endMs,299982);
+});
 test('audio merge reports a chunk whose segments are all discarded and unexplained overlap',()=>{
  const invalid=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:100,end:101,text:'범위 밖'}]},{index:1,start:60,end:120,segments:[{start:1,end:2,text:'유효'}]}]);
  assert.deepEqual(invalid.missingChunks,[0]);assert.deepEqual(invalid.rejectedSegments.map(x=>x.reason),['INVALID_SEGMENT']);
