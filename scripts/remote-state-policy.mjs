@@ -21,13 +21,13 @@ const requiredBindingTypes=new Map([
   ['ENABLE_LIVE_FREE','plain_text'],['ALLOW_PAID_API','plain_text'],['SITE_DEPLOYED','plain_text'],
 ]);
 
-export function inspectBindingSet(bindings,{allowAssets=false}={}){
+export function inspectBindingSet(bindings,{expectAssets=false}={}){
   if(!Array.isArray(bindings))return {available:false,unique:false,complete:false};
   const names=bindings.map(binding=>binding?.name);
   const unique=names.every(name=>typeof name==='string')&&new Set(names).size===names.length;
   const actual=new Map(bindings.map(binding=>[binding?.name,binding?.type]));
   const expected=new Map(requiredBindingTypes);
-  if(allowAssets&&actual.has('ASSETS'))expected.set('ASSETS','assets');
+  if(expectAssets)expected.set('ASSETS','assets');
   return {available:true,unique,complete:unique&&actual.size===expected.size&&[...expected].every(([name,type])=>actual.get(name)===type)};
 }
 const baselineObservability={
@@ -40,6 +40,7 @@ export const approvedRemoteBaseline={
   activeVersionId:'a33b9720-c167-4998-b8cb-3b065439b0d0',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
+  assetsPresent:false,
   // Observed by read-only production preflight 603ce3f5; approval remains separate.
   remoteSettingsReviewed:false,
   optionalScriptFields:{limits:{present:false},placement_mode:{present:false},streaming_tail_consumers:{present:false}},
@@ -47,8 +48,9 @@ export const approvedRemoteBaseline={
   observability:baselineObservability,
 };
 
-export function assertRemoteState(remote,baseline,{allowAssets=false}={}){
+export function assertRemoteState(remote,baseline,{postDeploy=false}={}){
   if(baseline?.remoteSettingsReviewed!==true)fail('REMOTE_SETTINGS_BASELINE_UNVERIFIED');
+  if(typeof baseline.assetsPresent!=='boolean')fail('BINDINGS_BASELINE_INVALID');
   if(!remote||!baseline||!Array.isArray(remote.routes)||!Array.isArray(remote.domains)||!Array.isArray(baseline.routes)||!Array.isArray(baseline.domains)||typeof remote.compatibilityFlagsPresent!=='boolean'||typeof baseline.compatibilityFlagsPresent!=='boolean'||(remote.compatibilityFlagsPresent&&!Array.isArray(remote.compatibilityFlags))||(baseline.compatibilityFlagsPresent&&!Array.isArray(baseline.compatibilityFlags)))fail('METADATA_INCOMPLETE');
   if(remote?.workerName!=='holy-rice-b914'||remote.environment!=='production')fail('WORKER_TARGET_MISMATCH');
   if(!Array.isArray(remote.activeVersions)||remote.activeVersions.length!==1||remote.activeVersions[0]?.percentage!==100||remote.activeVersions[0]?.id!==baseline?.activeVersionId)fail('ACTIVE_VERSION_MISMATCH');
@@ -63,7 +65,7 @@ export function assertRemoteState(remote,baseline,{allowAssets=false}={}){
   if(canonical(remote.observability)!==canonical(baseline.observability))fail('OBSERVABILITY_MISMATCH');
   for(const path of Object.keys(requiredObservability))if(valueAt(remote.scriptSettings.observability,path)===undefined||valueAt(baseline.scriptSettings.observability,path)===undefined)fail('SCRIPT_SETTINGS_OBSERVABILITY_INCOMPLETE');
   if(canonical(remote.scriptSettings.observability)!==canonical(baseline.scriptSettings.observability))fail('SCRIPT_SETTINGS_OBSERVABILITY_MISMATCH');
-  const shape=inspectBindingSet(remote.bindings,{allowAssets});
+  const shape=inspectBindingSet(remote.bindings,{expectAssets:postDeploy||baseline.assetsPresent});
   if(!shape.available)fail('BINDINGS_UNAVAILABLE');
   if(!shape.unique||!shape.complete)fail('BINDINGS_UNEXPECTED');
   const bindings=new Map(remote.bindings.map(binding=>[binding.name,binding]));

@@ -79,7 +79,8 @@ retried indefinitely for the same commit, and noninteractive Wrangler accepts
 all remote conflicts when strict mode is absent. The replacement guard pins the
 full active version ID, checks the full observability object, routes, domains,
 workers.dev and preview URL switches, D1 UUID, Access variable/secret presence,
-and runtime flags. It permits the `ASSETS` binding only in the post-deploy check.
+and runtime flags. The initial pre-deploy check requires zero `ASSETS` bindings;
+the post-deploy check requires exactly one `ASSETS` binding of type `assets`.
 The guard also reads script settings (`logpush`, `tail_consumers`, and the
 separate script-settings `observability` object) and version metadata
 (`streaming_tail_consumers`, limits, placement). Read-only Build
@@ -118,6 +119,25 @@ Its approved baseline currently identifies active version
 `a33b9720-c167-4998-b8cb-3b065439b0d0`. A later deployment must update the
 baseline after independently confirming the then-active version. See
 [the remote guard design](remote-deploy-guard-proposal.md).
+
+### Baseline lifecycle
+
+For this first assets deployment, `assetsPresent=false` requires zero `ASSETS`
+bindings before upload. The postcheck requires exactly one binding with name
+`ASSETS` and type `assets`, independently of the pre-deploy baseline. It also
+requires the new active version and its source commit annotation; all other
+remote settings must still match the reviewed baseline.
+
+Before any later normal redeployment, run the read-only preflight again and
+independently review the active version, binding names and types, D1, Access,
+runtime flags, exposure and full metadata shape. Update the pinned active
+version ID to that observed version and set `assetsPresent=true` only after
+confirming the existing single `ASSETS` binding. Review and test that baseline
+change before enabling the next deployment. The later precheck then requires
+one `ASSETS` binding, and its postcheck requires one as well. If any setting or
+field-presence shape has changed, investigate it and update the baseline only
+after separate review; do not infer that omitted, `null`, and empty values are
+equivalent. An unchanged old version ID or an unexpected binding blocks upload.
 
 The child Wrangler process receives a minimal environment: the expected token,
 fixed account and reviewed CI Worker name, with unsupported `CF_`,

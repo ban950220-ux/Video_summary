@@ -17,11 +17,21 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
   {name:'SITE_DEPLOYED',type:'plain_text',text:'true'},
 ]});
 
-test('offline remote policy permits ASSETS only after upload',()=>{
+test('offline remote policy requires exactly one ASSETS after upload and on later deploys',()=>{
   assert.equal(assertRemoteState(remote(),baseline),true);
   const after=remote();after.bindings.push({name:'ASSETS',type:'assets'});
   assert.throws(()=>assertRemoteState(after,baseline),/BINDINGS_UNEXPECTED/);
-  assert.equal(assertRemoteState(after,baseline,{allowAssets:true}),true);
+  assert.throws(()=>assertRemoteState(remote(),baseline,{postDeploy:true}),/BINDINGS_UNEXPECTED/);
+  assert.equal(assertRemoteState(after,baseline,{postDeploy:true}),true);
+  assert.equal(assertRemoteState(after,{...baseline,assetsPresent:true}),true);
+  assert.throws(()=>assertRemoteState(remote(),{...baseline,assetsPresent:true}),/BINDINGS_UNEXPECTED/);
+  for(const mutate of [
+    state=>{state.bindings.push({...state.bindings.at(-1)});},
+    state=>{state.bindings.at(-1).type='plain_text';},
+  ]){
+    const invalid=structuredClone(after);mutate(invalid);
+    assert.throws(()=>assertRemoteState(invalid,baseline,{postDeploy:true}),/BINDINGS_UNEXPECTED/);
+  }
 });
 test('offline remote policy fails closed on active version, DB, Access, preview and observability drift',()=>{
   for(const mutate of [
