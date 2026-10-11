@@ -2,7 +2,7 @@ import {InputError,transcriptAudit} from './core.mjs';
 import {ProviderError} from './adapters.mjs';
 import {runNativeCaption,runNativePoll,runTranscriptSummary,runOwnedAudioTranscription} from './provider-keys.mjs';
 import {normalizeSegments,auditGaps,validateAnalysis,reportPrompt,markdownReport} from './report.mjs';
-import {scanMp3,mergeAudioSegments} from './audio.mjs';
+import {scanMp3,prepareMp3Chunk,mergeAudioSegments} from './audio.mjs';
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,summaryUnits,evidenceIds,assertGroupCoverage} from './summary-plan.mjs';
 const liveTables=['yta_sources','yta_quota','yta_operations','yta_audio'];
 export async function ensureLiveSchema(env){
@@ -31,7 +31,7 @@ const GROQ_APP_HOURLY_CAP_SECONDS=6_500; // Below the observed 7,200-second prov
 async function execute(env,{id,job,provider,units},fn,onNewCall){
  const prior=await env.DB.prepare('SELECT * FROM yta_operations WHERE id=?').bind(id).first();
  if(prior?.state==='DONE')return JSON.parse(prior.result_json);
- if(prior&&!(prior.state==='BLOCKED'&&prior.error_code==='QUOTA_EXHAUSTED'))throw new ProviderError('OPERATION_REVIEW_REQUIRED','이미 요청했거나 결과가 불명확한 작업입니다. 사용량을 확인한 뒤 새 작업으로 진행하세요.');
+ if(prior&&!(prior.state==='BLOCKED'&&['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED'].includes(prior.error_code)))throw new ProviderError('OPERATION_REVIEW_REQUIRED','이미 요청했거나 결과가 불명확한 작업입니다. 사용량을 확인한 뒤 새 작업으로 진행하세요.');
  const active=await grantEnv(env,provider);
  // Atomic unique claim and atomic quota decrement: concurrent calls cannot overspend this app's grant.
  const now=new Date().toISOString(),cutoff=new Date(Date.now()-GEMINI_SPACING_MS).toISOString();
@@ -39,12 +39,12 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
  // CLAIMED remains blocking regardless of age: key resolution and network dispatch can be delayed.
  // Settled operations use created_at as their last state-transition timestamp for conservative pacing.
  const recent="SELECT state,created_at FROM yta_operations WHERE provider='gemini' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?)) ORDER BY CASE WHEN state='CLAIMED' THEN 0 ELSE 1 END LIMIT 1";
- const groqPermit="NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider='groq' AND state='FAILED_UNCERTAIN' AND error_code='429' AND created_at>?) AND COALESCE((SELECT SUM(units) FROM yta_operations WHERE provider='groq' AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>?),0)+?<=?";
+ const groqPermit="NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider='groq' AND state='CLAIMED') AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider='groq' AND state='FAILED_UNCERTAIN' AND error_code='429' AND created_at>?) AND COALESCE((SELECT SUM(units) FROM yta_operations WHERE provider='groq' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?))),0)+?<=?";
  const claim=prior
   ?provider==='gemini'
    ?await env.DB.prepare(`UPDATE yta_operations SET state=?,error_code=NULL,created_at=? WHERE id=? AND state=? AND error_code=? AND NOT EXISTS (${recent})`).bind('CLAIMED',now,id,'BLOCKED','QUOTA_EXHAUSTED',cutoff).run()
    :provider==='groq'
-    ?await env.DB.prepare(`UPDATE yta_operations SET state=?,error_code=NULL,created_at=? WHERE id=? AND state=? AND error_code=? AND ${groqPermit}`).bind('CLAIMED',now,id,'BLOCKED','QUOTA_EXHAUSTED',groqCutoff,groqCutoff,units,GROQ_APP_HOURLY_CAP_SECONDS).run()
+    ?await env.DB.prepare(`UPDATE yta_operations SET state=?,error_code=NULL,created_at=? WHERE id=? AND state=? AND error_code IN ('QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED') AND ${groqPermit}`).bind('CLAIMED',now,id,'BLOCKED',groqCutoff,groqCutoff,units,GROQ_APP_HOURLY_CAP_SECONDS).run()
    :await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=NULL WHERE id=? AND state=? AND error_code=?').bind('CLAIMED',id,'BLOCKED','QUOTA_EXHAUSTED').run()
   :provider==='gemini'
    ?await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (${recent})`).bind(id,job,provider,units,'CLAIMED',now,cutoff).run()
@@ -53,9 +53,11 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
    :await env.DB.prepare('INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').bind(id,job,provider,units,'CLAIMED',now).run();
  if(claim.meta?.changes!==1){
   if(provider==='groq'){
+   const inFlight=await env.DB.prepare("SELECT created_at FROM yta_operations WHERE provider='groq' AND state='CLAIMED' LIMIT 1").bind().first();
+   if(inFlight)throw new ProviderError(Date.now()-Date.parse(inFlight.created_at)>300000?'OPERATION_REVIEW_REQUIRED':'OPERATION_IN_FLIGHT','이전 Groq 호출의 완료 상태를 먼저 확인하세요.');
    const recent429=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='FAILED_UNCERTAIN' AND error_code='429' AND created_at>? LIMIT 1").bind(groqCutoff).first();
    if(recent429)throw new ProviderError('GROQ_COOLDOWN_PENDING','Groq 429 이후 최소 1시간 대기 중입니다. 공식 요청 로그와 무료 한도를 다시 확인하세요.');
-   const spent=await env.DB.prepare("SELECT COALESCE(SUM(units),0) AS units FROM yta_operations WHERE provider='groq' AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>?").bind(groqCutoff).first();
+   const spent=await env.DB.prepare("SELECT COALESCE(SUM(units),0) AS units FROM yta_operations WHERE provider='groq' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?))").bind(groqCutoff).first();
    if(Number(spent?.units||0)+units>GROQ_APP_HOURLY_CAP_SECONDS)throw new ProviderError('GROQ_HOURLY_APP_LIMIT','앱이 기록한 최근 1시간 음성 예약 상한에 도달했습니다. 제공자 계정의 실제 잔여량은 별도로 확인하세요.');
   }
   const blocking=provider==='gemini'?await env.DB.prepare(recent).bind(cutoff).first():null;
@@ -75,10 +77,22 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
   await env.DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),job,'owner',provider,'LIVE_FREE',provider==='groq'?'audio_seconds':provider==='supadata'?'credits':'conservative_token_units',units,0,null,'APP_RESERVED_UPPER_BOUND',new Date().toISOString()).run();
   await env.DB.prepare('UPDATE yta_operations SET state=?,result_json=?,created_at=? WHERE id=?').bind('DONE',JSON.stringify(result),new Date().toISOString(),id).run();return result;
  }catch(error){
-  await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=?,created_at=? WHERE id=?').bind('FAILED_UNCERTAIN',String(error.code||'PROCESSING_FAILED'),new Date().toISOString(),id).run();
+  await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=?,created_at=? WHERE id=?').bind(error.preDispatchBlocked?'BLOCKED':'FAILED_UNCERTAIN',error.preDispatchBlocked?'PRE_DISPATCH_BLOCKED':String(error.code||'PROCESSING_FAILED'),new Date().toISOString(),id).run();
   if(['402','429','403'].includes(String(error.code)))await env.DB.prepare('UPDATE yta_quota SET expires_at=0 WHERE provider=?').bind(provider).run();
   throw error;
  }
+}
+async function assertGroqBeforeDispatch(env,id){
+ try{
+  await grantEnv(env,'groq');
+  const own=await env.DB.prepare("SELECT state FROM yta_operations WHERE id=? AND provider='groq'").bind(id).first();
+  if(own?.state!=='CLAIMED')throw new ProviderError('OPERATION_REVIEW_REQUIRED','음성 호출 예약 상태를 확인할 수 없습니다.');
+  const cutoff=new Date(Date.now()-GROQ_HOURLY_WINDOW_MS).toISOString();
+  const recent429=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='FAILED_UNCERTAIN' AND error_code='429' AND created_at>? LIMIT 1").bind(cutoff).first();
+  if(recent429)throw new ProviderError('GROQ_COOLDOWN_PENDING','Groq 429 이후 최소 1시간 대기 중입니다.');
+  const other=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='CLAIMED' AND id<>? LIMIT 1").bind(id).first();
+  if(other)throw new ProviderError('OPERATION_IN_FLIGHT','다른 음성 호출이 진행 중입니다.');
+ }catch(error){error.preDispatchBlocked=true;throw error;}
 }
 async function storeTranscriptResult(env,job,segments,provenance,extra={}){
  const raw=segments.map(s=>s.text).join('\n'),clean=await saveSource(env,job.id,raw,segments,provenance);
@@ -139,10 +153,9 @@ export async function routeLive(request,env){
    if(!['supadata','gemini','groq'].includes(provider)||body.billingDisabled!==true||body.freeOnly!==true)throw new InputError('무료 전용·결제 비활성 확인이 필요합니다.');
    const caps={supadata:100,groq:28800,gemini:250000};
    if(!Number.isFinite(body.allowance)||body.allowance<=0||body.allowance>caps[provider]||!Number.isInteger(body.requestLimit)||body.requestLimit<1||body.requestLimit>100)throw new InputError('무료 잔여량/요청 수를 확인하세요.');
-   // Reconfirming never resets consumption within a grant's lifetime.
-   const old=await env.DB.prepare('SELECT * FROM yta_quota WHERE provider=?').bind(provider).first();
-   if(old&&old.expires_at>Date.now())throw new ProviderError('ACTIVE_GRANT_EXISTS','현재 할당이 유효합니다. 중복 설정으로 사용량을 초기화할 수 없습니다.');
-   await env.DB.prepare('INSERT INTO yta_quota(provider,allowance,consumed,request_limit,request_count,expires_at,confirmed_at,billing_disabled) VALUES(?,?,0,?,0,?,?,1) ON CONFLICT(provider) DO UPDATE SET allowance=excluded.allowance,consumed=0,request_limit=excluded.request_limit,request_count=0,expires_at=excluded.expires_at,confirmed_at=excluded.confirmed_at,billing_disabled=1').bind(provider,body.allowance,body.requestLimit,Date.now()+3600000,Date.now()).run();
+   // Conditional database writes prevent concurrent renewals from erasing a new reservation.
+   const now=Date.now(),renewed=await env.DB.prepare('UPDATE yta_quota SET allowance=?,consumed=0,request_limit=?,request_count=0,expires_at=?,confirmed_at=?,billing_disabled=1 WHERE provider=? AND expires_at<=?').bind(body.allowance,body.requestLimit,now+3600000,now,provider,now).run();
+   if(renewed.meta?.changes!==1){const inserted=await env.DB.prepare('INSERT OR IGNORE INTO yta_quota(provider,allowance,consumed,request_limit,request_count,expires_at,confirmed_at,billing_disabled) VALUES(?,?,0,?,0,?,?,1)').bind(provider,body.allowance,body.requestLimit,now+3600000,now).run();if(inserted.meta?.changes!==1)throw new ProviderError('ACTIVE_GRANT_EXISTS','현재 할당이 유효합니다. 중복 설정으로 사용량을 초기화할 수 없습니다.');}
    return json({configured:true,provider,expiresInSeconds:3600,verification:'OWNER_ATTESTED_NOT_INDEPENDENTLY_VERIFIED'});
   }
   const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|source|export|audio-plan|audio-progress|audio-chunk|audio-finish|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
@@ -228,7 +241,7 @@ export async function routeLive(request,env){
   if(action==='audio-progress'&&request.method==='GET'){
    const rows=(await env.DB.prepare('SELECT chunk_index,start_sec,end_sec,state FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];
    const operations=(await env.DB.prepare("SELECT id,state,error_code FROM yta_operations WHERE job_id=? AND provider='groq' AND id LIKE ?").bind(id,id+':audio:%').all()).results||[];
-   const chunks=rows.map(c=>{const attempts=audioAttempts(operations,id,c.chunk_index),latest=attempts.at(-1);return {index:c.chunk_index,start:c.start_sec,end:c.end_sec,state:c.state,reviewed429Required:c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429',uncertainFailure:c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code!=='429'};});
+   const chunks=rows.map(c=>{const attempts=audioAttempts(operations,id,c.chunk_index),latest=attempts.at(-1),reviewed429Required=c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429';return {index:c.chunk_index,start:c.start_sec,end:c.end_sec,state:c.state,reviewed429Required,reviewOperationId:reviewed429Required?latest.id:null,uncertainFailure:c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code!=='429'};});
    const intervals=chunks.filter(c=>c.state==='DONE').map(c=>({start:c.start,end:c.end}));let covered=0,edge=0;
    for(const range of intervals){covered+=Math.max(0,range.end-Math.max(edge,range.start));edge=Math.max(edge,range.end);}
    let contiguous=0,prefixComplete=true;for(const c of chunks){if(c.state!=='DONE')prefixComplete=false;else if(prefixComplete)contiguous=c.end;}
@@ -240,19 +253,24 @@ export async function routeLive(request,env){
    if(chunk.state==='DONE')return json({index,state:'DONE',cached:true});
    const bytes=await boundedBytes(request,8000000),name=url.searchParams.get('name')||'chunk.mp3';
    if(!/\.mp3$/i.test(name))throw new InputError('대용량 분할 전사는 MP3 입력을 사용하세요.');
-   const duration=scanMp3(bytes).durationSeconds;if(Math.abs(duration-(chunk.end_sec-chunk.start_sec))>1)throw new InputError('음성 조각 길이와 계획이 다릅니다.');
+   const duration=scanMp3(bytes).durationSeconds,plannedDuration=chunk.end_sec-chunk.start_sec;
+   let metadata;
+   try{metadata=prepareMp3Chunk(bytes);}catch(error){throw new InputError('MP3 조각 메타데이터를 검증할 수 없습니다: '+error.message);}
+   if(metadata.metadataCorrected)throw new InputError('MP3 전체 파일 길이 메타데이터가 조각에 남아 있습니다.');
+   if(Math.abs(plannedDuration-duration)>.005)throw new InputError('음성 조각 길이와 계획이 다릅니다.');
    const base=id+':audio:'+index,operations=(await env.DB.prepare("SELECT id,state,error_code FROM yta_operations WHERE job_id=? AND provider='groq' AND id LIKE ?").bind(id,base+'%').all()).results||[];
    const attempts=audioAttempts(operations,id,index),latest=attempts.at(-1);
    let operationId=latest?.id??base;
    if(latest?.state==='FAILED_UNCERTAIN'){
     if(latest.error_code!=='429')throw new ProviderError('OPERATION_REVIEW_REQUIRED','이전 음성 호출 결과가 불명확합니다. 제공자 사용량을 확인하세요.');
-    if(request.headers.get('x-provider-log-429-no-output-confirmed')!=='true')throw new ProviderError('PROVIDER_429_REVIEW_REQUIRED','공식 Groq 요청 로그에서 429 거절과 출력 없음이 확인된 뒤에만 명시적으로 재개하세요.');
+    if(request.headers.get('x-provider-log-429-no-output-confirmed')!=='true'||request.headers.get('x-provider-log-429-operation-id')!==latest.id)throw new ProviderError('PROVIDER_429_REVIEW_REQUIRED','현재 실패 작업의 공식 Groq 요청 로그에서 429 거절과 출력 없음을 확인한 뒤에만 재개하세요.');
     if(attempts.length>=10)throw new ProviderError('RECOVERY_LIMIT_REACHED','이 조각의 재개 횟수가 한도에 도달했습니다. 작업 기록을 검토하세요.');
     operationId=base+':reviewed429:'+attempts.length;
    }
-   const result=await execute(env,{id:operationId,job:id,provider:'groq',units:Math.max(10,Math.ceil(duration))},active=>runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration}));
+   const result=await execute(env,{id:operationId,job:id,provider:'groq',units:Math.max(10,Math.ceil(plannedDuration))},active=>runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:()=>assertGroqBeforeDispatch(env,operationId)}));
    if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','음성 조각 전사가 비었습니다. 전체 전사로 처리하지 않습니다.');
-   await env.DB.prepare('UPDATE yta_audio SET state=?,result_json=? WHERE job_id=? AND chunk_index=?').bind('DONE',JSON.stringify({...result,fileSha256:JSON.parse(chunk.result_json).fileSha256}),id,index).run();return json({index,state:'DONE',segmentCount:result.segments.length});
+   const segments=result.segments;
+   await env.DB.prepare('UPDATE yta_audio SET state=?,result_json=? WHERE job_id=? AND chunk_index=?').bind('DONE',JSON.stringify({...result,segments,fileSha256:JSON.parse(chunk.result_json).fileSha256}),id,index).run();return json({index,state:'DONE',segmentCount:segments.length});
   }
   if(action==='audio-finish'&&request.method==='POST'){
    const rows=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];
@@ -277,7 +295,7 @@ export async function routeLive(request,env){
    if(source?.provenance!=='GROQ_OWNED_AUDIO'||job.audit?.audioFileSha256!==merged.fileSha256||source.raw!==merged.segments.map(segment=>segment.text).join('\n')||JSON.stringify(source.segments)!==JSON.stringify(expected))throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 TXT와 전사 조각의 일치를 확인하지 못했습니다.');
    const operations=(await env.DB.prepare("SELECT id,state,error_code FROM yta_operations WHERE job_id=? AND provider='groq' AND id LIKE ?").bind(id,id+':audio:%').all()).results||[];
    let accounted=0;
-   for(const row of rows){const attempts=audioAttempts(operations,id,row.chunk_index);accounted+=attempts.length;if(attempts.filter(operation=>operation.state==='DONE').length!==1||attempts.some(operation=>operation.state!=='DONE'&&!(operation.state==='FAILED_UNCERTAIN'&&operation.error_code==='429')&&!(operation.state==='BLOCKED'&&operation.error_code==='QUOTA_EXHAUSTED')))throw new ProviderError('AUDIO_OPERATION_UNCERTAIN','음성 처리 기록이 완료 상태인지 확인할 수 없습니다.');}
+   for(const row of rows){const attempts=audioAttempts(operations,id,row.chunk_index);accounted+=attempts.length;if(attempts.filter(operation=>operation.state==='DONE').length!==1||attempts.some(operation=>operation.state!=='DONE'&&!(operation.state==='FAILED_UNCERTAIN'&&operation.error_code==='429')&&!(operation.state==='BLOCKED'&&['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED'].includes(operation.error_code))))throw new ProviderError('AUDIO_OPERATION_UNCERTAIN','음성 처리 기록이 완료 상태인지 확인할 수 없습니다.');}
    if(accounted!==operations.length)throw new ProviderError('AUDIO_OPERATION_UNCERTAIN','알 수 없는 음성 처리 기록이 있습니다.');
    await env.DB.prepare("UPDATE yta_operations SET result_json=NULL WHERE job_id=? AND provider='groq' AND state='DONE' AND id LIKE ?").bind(id,id+':audio:%').run();
    await env.DB.prepare('DELETE FROM yta_audio WHERE job_id=?').bind(id).run();

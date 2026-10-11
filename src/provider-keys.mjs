@@ -43,8 +43,10 @@ export async function runTranscriptSummary({env,text,fetchFn=fetch}){
   return summarizeTranscriptWithGemini(text,await ephemeralEnv(env,'gemini'),fetchFn);
 }
 /** Only lawful owner-uploaded audio, <=24MB per call. The live route chunks MP3 files before invoking this adapter. */
-export async function runOwnedAudioTranscription({env,bytes,name,mime,durationSeconds,fetchFn=fetch}){
-  return transcribeOwnedAudio({env:await ephemeralEnv(env,'groq'),bytes,name,mime,durationSeconds,fetchFn});
+export async function runOwnedAudioTranscription({env,bytes,name,mime,durationSeconds,fetchFn=fetch,beforeDispatch}){
+  const prepared=await ephemeralEnv(env,'groq');
+  await beforeDispatch?.();
+  return transcribeOwnedAudio({env:prepared,bytes,name,mime,durationSeconds,fetchFn});
 }
 
 export async function runNativePoll({env,jobId,fetchFn=fetch}){return pollSupadataCaption(jobId,await ephemeralEnv(env,'supadata'),fetchFn);}

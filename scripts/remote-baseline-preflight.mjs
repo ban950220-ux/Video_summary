@@ -50,6 +50,11 @@ export function safeRemoteBaselineReport(remote,env={}){
     scriptSettings:{logpush:boolean(remote?.scriptSettings,'logpush'),logpushMatchesProposed:remote?.scriptSettings?.logpush===expected.scriptSettings.logpush,tailConsumerCount:count(remote?.scriptSettings,'tail_consumers'),tailConsumersMatchProposed:sameCanonical(remote?.scriptSettings?.tail_consumers,expected.scriptSettings.tail_consumers),observability:safeObservability(remote?.scriptSettings?.observability),observabilityMatchesProposed:sameCanonical(remote?.scriptSettings?.observability,expected.scriptSettings.observability)},
     reviewGateEnabled:expected.remoteSettingsReviewed===true,
   };
+  if(env.REMOTE_PREFLIGHT_VERSION_DIAGNOSTIC==='true'){
+    const version=remote?.activeVersions?.length===1?remote.activeVersions[0]?.id:null;
+    const source=/^source-commit:([0-9a-f]{40})$/i.exec(remote?.deploymentMessage??'');
+    report.versionDiagnostic={activeVersionId:typeof version==='string'&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(version)?version:'UNAVAILABLE',sourceCommit:source?.[1]??'UNAVAILABLE'};
+  }
   try{
     // Diagnostic comparison only: the approved baseline object remains blocked.
     assertRemoteState(remote,{...expected,remoteSettingsReviewed:true});

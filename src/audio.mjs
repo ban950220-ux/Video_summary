@@ -31,6 +31,36 @@ export function planMp3(bytes,{chunkSeconds=300,overlapSeconds=3,maxBytes=8_000_
  }
  return {durationSeconds,chunks};
 }
+function mp3TagCrc(bytes){let crc=0;for(const byte of bytes){crc^=byte;for(let bit=0;bit<8;bit++)crc=(crc>>1)^((crc&1)?0xa001:0);}return crc;}
+export function prepareMp3Chunk(bytes){
+ const {frames}=scanMp3(bytes),first=frames[0],head=bytes.subarray(0,Math.min(first.byteEnd,256));
+ if(first.byteStart!==0||frames.some((frame,i)=>i&&frame.byteStart!==frames[i-1].byteEnd)||frames.at(-1).byteEnd!==bytes.length)throw Error('MP3_CHUNK_FRAMES_UNVERIFIED');
+ const version=(head[1]>>3)&3,mono=(head[3]>>6)===3,sideStart=4+((head[1]&1)?0:2),sideLength=version===3?(mono?17:32):(mono?9:17),xing=sideStart+sideLength;
+ const word=offset=>String.fromCharCode(...head.subarray(offset,offset+4)),markers=[];
+ for(let i=0;i+4<=head.length;i++)if(['Xing','Info','VBRI'].includes(word(i)))markers.push(i);
+ if(!markers.length)return {bytes,metadataCorrected:false};
+ if(markers.length!==1||markers[0]!==xing||!['Xing','Info'].includes(word(xing)))throw Error('MP3_METADATA_UNSUPPORTED');
+ const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),flags=view.getUint32(xing+4);
+ if(![3,15].includes(flags)||first.byteEnd<xing+(flags===15?156:16))throw Error('MP3_XING_LAYOUT_UNSUPPORTED');
+ const frameCount=frames.length-1,advertisedFrames=view.getUint32(xing+8),advertisedBytes=view.getUint32(xing+12);
+ if(advertisedFrames===frameCount&&advertisedBytes===bytes.length)return {bytes,metadataCorrected:false};
+ if(advertisedFrames<frameCount||advertisedBytes<bytes.length)throw Error('MP3_XING_COUNTS_INVALID');
+ const prepared=Uint8Array.from(bytes),out=new DataView(prepared.buffer),endOfFirst=first.byteEnd;
+ out.setUint32(xing+8,frameCount);out.setUint32(xing+12,prepared.length);
+ if(flags===15){
+  const tag=xing+120,encoder=word(tag);
+  if(!['LAME','Lavf','Lavc'].includes(encoder)||endOfFirst<xing+156)throw Error('MP3_LAME_TAG_UNSUPPORTED');
+  if(mp3TagCrc(bytes.subarray(0,xing+154))!==view.getUint16(xing+154))throw Error('MP3_LAME_CRC_INVALID');
+  const toc=xing+16;prepared[toc]=0;
+  for(let i=1;i<100;i++){const frame=frames[Math.min(frames.length-1,1+Math.floor(i*frameCount/100))];prepared[toc+i]=Math.min(255,Math.floor(256*frame.byteStart/prepared.length));}
+  const paddingField=xing+141,delayPadding=(prepared[paddingField]<<16)|(prepared[paddingField+1]<<8)|prepared[paddingField+2];
+  const delay=delayPadding>>>12;prepared[paddingField]=delay>>>4;prepared[paddingField+1]=(delay&15)<<4;prepared[paddingField+2]=0;
+  out.setUint32(xing+148,prepared.length);
+  out.setUint16(xing+152,mp3TagCrc(prepared.subarray(endOfFirst)));
+  out.setUint16(xing+154,mp3TagCrc(prepared.subarray(0,xing+154)));
+ }
+ return {bytes:prepared,metadataCorrected:true};
+}
 export function mergeAudioSegments(chunks){
  const segments=[];let previousEnd=0;const missingChunks=[],rejectedSegments=[],retainedByChunk={};
  for(const chunk of [...chunks].sort((a,b)=>a.start-b.start)){
