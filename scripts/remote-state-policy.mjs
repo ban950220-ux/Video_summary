@@ -37,13 +37,13 @@ const baselineObservability={
 };
 
 export const approvedRemoteBaseline={
-  activeVersionId:'5bac92f0-c885-4973-8be8-72750482c50b',
+  activeVersionId:'3aab49e1-9b32-4543-86bd-bb96fb33f583',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:true,
   // The previous guarded deploy installed ASSETS; recheck all remote state before the next upload.
   remoteSettingsReviewed:true,
-  runtimeFlags:{ENABLE_LIVE_FREE:'false',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'},
+  runtimeFlags:{ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'},
   optionalScriptFields:{limits:{present:false},placement_mode:{present:false},streaming_tail_consumers:{present:false}},
   scriptSettings:{logpush:false,tail_consumers:null,observability:baselineObservability},
   observability:baselineObservability,

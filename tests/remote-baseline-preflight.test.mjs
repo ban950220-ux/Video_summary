@@ -12,7 +12,7 @@ const remote=()=>({
  observability:{...structuredClone(approvedRemoteBaseline.observability),logs:{...approvedRemoteBaseline.observability.logs,destinations:[secret]}},
  optionalScriptFields:{limits:{present:false},placement_mode:{present:true,value:null},streaming_tail_consumers:{present:true,value:[{service:secret}]}},
  scriptSettings:{logpush:false,tail_consumers:[{service:secret}],observability:{...structuredClone(approvedRemoteBaseline.observability),traces:{...approvedRemoteBaseline.observability.traces,destinations:[secret]}},tags:[secret]},
- bindings:[{name:'DB',type:'d1',id:approvedRemoteBaseline.databaseId},{name:'ACCESS_AUD',type:'plain_text',text:secret},{name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:secret},{name:'ACCESS_OWNER_EMAIL',type:'secret_text',text:secret},{name:'KEY_ENCRYPTION_KEY_B64',type:'secret_text',text:secret},{name:'ENABLE_LIVE_FREE',type:'plain_text',text:'false'},{name:'ALLOW_PAID_API',type:'plain_text',text:'false'},{name:'SITE_DEPLOYED',type:'plain_text',text:'true'}],
+ bindings:[{name:'DB',type:'d1',id:approvedRemoteBaseline.databaseId},{name:'ACCESS_AUD',type:'plain_text',text:secret},{name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:secret},{name:'ACCESS_OWNER_EMAIL',type:'secret_text',text:secret},{name:'KEY_ENCRYPTION_KEY_B64',type:'secret_text',text:secret},{name:'ENABLE_LIVE_FREE',type:'plain_text',text:'true'},{name:'ALLOW_PAID_API',type:'plain_text',text:'false'},{name:'SITE_DEPLOYED',type:'plain_text',text:'true'}],
 });
 
 test('preflight emits only approved booleans, rates, presence and counts',()=>{

@@ -12,7 +12,7 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
   {name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:'https://test.cloudflareaccess.com'},
   {name:'ACCESS_OWNER_EMAIL',type:'secret_text'},
   {name:'KEY_ENCRYPTION_KEY_B64',type:'secret_text'},
-  {name:'ENABLE_LIVE_FREE',type:'plain_text',text:'false'},
+  {name:'ENABLE_LIVE_FREE',type:'plain_text',text:'true'},
   {name:'ALLOW_PAID_API',type:'plain_text',text:'false'},
   {name:'SITE_DEPLOYED',type:'plain_text',text:'true'},
 ]});
@@ -21,10 +21,11 @@ test('offline remote policy requires exactly one ASSETS before and after later d
   const after=remote();after.bindings.push({name:'ASSETS',type:'assets'});
   assert.equal(assertRemoteState(after,baseline),true);
   assert.throws(()=>assertRemoteState(remote(),baseline),/BINDINGS_UNEXPECTED/);
+  assert.equal(assertRemoteState(after,baseline,{postDeploy:true}),true);
+  after.bindings.find(item=>item.name==='ENABLE_LIVE_FREE').text='false';
+  assert.throws(()=>assertRemoteState(after,baseline),/RUNTIME_FLAGS_MISMATCH/);
   assert.throws(()=>assertRemoteState(after,baseline,{postDeploy:true}),/RUNTIME_FLAGS_MISMATCH/);
   after.bindings.find(item=>item.name==='ENABLE_LIVE_FREE').text='true';
-  assert.equal(assertRemoteState(after,baseline,{postDeploy:true}),true);
-  assert.throws(()=>assertRemoteState(after,baseline),/RUNTIME_FLAGS_MISMATCH/);
   after.bindings.find(item=>item.name==='ALLOW_PAID_API').text='true';
   assert.throws(()=>assertRemoteState(after,baseline,{postDeploy:true}),/RUNTIME_FLAGS_MISMATCH/);
   assert.equal(assertRemoteState(remote(),{...baseline,assetsPresent:false}),true);
