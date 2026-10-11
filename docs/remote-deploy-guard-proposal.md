@@ -29,6 +29,9 @@ comparing a Dashboard-managed Worker:
   for workers.dev and version URL switches.
 - `GET /workers/scripts/holy-rice-b914/deployments` for the latest active
   deployment and its version ID/traffic percentage.
+- `GET /workers/scripts/holy-rice-b914/script-settings` for Logpush and tail
+  consumers. The environment metadata supplies streaming tail consumers,
+  limits, and placement.
 - Read routes and domains too; unexpected routes must stop deployment.
 
 Every path above is under `/accounts/{account_id}`. The account ID may be
@@ -51,9 +54,16 @@ in-memory validation and log only field names and generic pass/fail codes.
 5. Permit `ASSETS` to be absent on the first deploy and present with the
    expected type afterward. Reject any other binding addition, deletion, type
    change or identifier change. Keep `--keep-vars` in both config and command.
-6. Fetch the active version and metadata twice immediately before upload to
+6. Reject target-changing environment overrides and give Wrangler a minimal
+   environment. Capture its stdout/stderr without relaying raw remote diffs;
+   disable its debug-file logging with the pinned-version setting.
+7. Fetch the active version and metadata twice immediately before upload to
    narrow the time-of-check gap. Any mismatch, API error, non-JSON response or
    insufficient token scope stops before Wrangler runs.
+8. Read the remote metadata twice after upload. A mismatch then is a failed
+   verification of a possibly completed deployment, not proof that no upload
+   happened. These reads do not atomically lock remote settings or establish
+   that a changed active version came solely from this process.
 
 The full active version ID has been independently supplied. Log persistence,
 invocation logs, 100% sampling, and disabled traces/Issues/exports are also

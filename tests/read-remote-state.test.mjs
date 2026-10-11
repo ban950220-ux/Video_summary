@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readRemoteState,assertRemoteDeploymentBaseline} from '../scripts/read-remote-state.mjs';
 import {approvedRemoteBaseline} from '../scripts/remote-state-policy.mjs';
 
-function fakeApi({status=200,observability=approvedRemoteBaseline.observability}={}){
+function fakeApi({status=200,observability=approvedRemoteBaseline.observability,scriptSettings=approvedRemoteBaseline.scriptSettings}={}){
   const seen=[];
   const fetcher=async(url,options)=>{
     seen.push({url,method:options.method,tokenPresent:options.headers.Authorization==='Bearer TEST_ONLY_TOKEN'});
@@ -11,7 +11,7 @@ function fakeApi({status=200,observability=approvedRemoteBaseline.observability}
     const path=new URL(url).pathname;
     let result;
     if(path.endsWith('/workers/services/holy-rice-b914'))result={default_environment:{environment:'production'}};
-    else if(path.endsWith('/environments/production'))result={script:{compatibility_date:'2026-10-10',compatibility_flags:[],observability}};
+    else if(path.endsWith('/environments/production'))result={script:{compatibility_date:'2026-10-10',compatibility_flags:[],observability,streaming_tail_consumers:[],limits:null,placement_mode:null}};
     else if(path.endsWith('/bindings'))result=[
       {name:'DB',type:'d1',id:approvedRemoteBaseline.databaseId},
       {name:'ACCESS_AUD',type:'plain_text',text:'TEST_ONLY_AUDIENCE'},
@@ -26,6 +26,7 @@ function fakeApi({status=200,observability=approvedRemoteBaseline.observability}
     else if(path.endsWith('/routes'))result=[];
     else if(path.endsWith('/domains/records'))result=[];
     else if(path.endsWith('/deployments'))result={deployments:[{versions:[{version_id:approvedRemoteBaseline.activeVersionId,percentage:100}]}]};
+    else if(path.endsWith('/script-settings'))result=scriptSettings;
     else throw Error('Unexpected test API path');
     return {ok:true,async json(){return {success:true,result};}};
   };
@@ -35,7 +36,7 @@ function fakeApi({status=200,observability=approvedRemoteBaseline.observability}
 test('read-only guard checks the active baseline twice before deploy',async()=>{
   const {fetcher,seen}=fakeApi();
   assert.equal(await assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher}),true);
-  assert.equal(seen.length,14);
+  assert.equal(seen.length,16);
   assert.ok(seen.every(call=>call.method==='GET'&&call.tokenPresent));
 });
 test('guard fails closed when token, API read or observability fields are unavailable',async()=>{
@@ -44,4 +45,5 @@ test('guard fails closed when token, API read or observability fields are unavai
   const incomplete=structuredClone(approvedRemoteBaseline.observability);
   delete incomplete.logs.invocation_logs;
   await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({observability:incomplete}).fetcher}),/OBSERVABILITY_INCOMPLETE/);
+  await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({scriptSettings:{tail_consumers:[]}}).fetcher}),/SCRIPT_SETTINGS_INCOMPLETE/);
 });

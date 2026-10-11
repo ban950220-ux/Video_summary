@@ -20,11 +20,12 @@ export async function readRemoteState({token,fetcher=fetch}={}){
   const environment=service?.default_environment?.environment;
   if(environment!=='production')throw Error('Remote deployment guard: WORKER_TARGET_MISMATCH');
   const base=`/workers/services/${workerName}/environments/${environment}`;
-  const [metadata,bindings,subdomain,routes,domains,history]=await Promise.all([
+  const [metadata,bindings,subdomain,routes,domains,history,scriptSettings]=await Promise.all([
     read(base),read(base+'/bindings'),read(base+'/subdomain'),
     read(base+'/routes?show_zonename=true'),
     read(`/workers/domains/records?page=0&per_page=100&service=${workerName}&environment=${environment}`),
     read(`/workers/scripts/${workerName}/deployments`),
+    read(`/workers/scripts/${workerName}/script-settings`),
   ]);
   if(!Array.isArray(bindings)||!Array.isArray(routes)||!Array.isArray(domains)||!Array.isArray(history?.deployments))throw Error('Remote deployment guard: REMOTE_RESPONSE_INVALID');
   const latest=history.deployments[0];
@@ -37,6 +38,10 @@ export async function readRemoteState({token,fetcher=fetch}={}){
     compatibilityDate:metadata?.script?.compatibility_date,
     compatibilityFlags:metadata?.script?.compatibility_flags,
     observability:metadata?.script?.observability,
+    limits:metadata?.script?.limits??null,
+    placement:metadata?.script?.placement_mode??null,
+    streamingTailConsumers:metadata?.script?.streaming_tail_consumers??[],
+    scriptSettings,
     bindings,
   };
 }

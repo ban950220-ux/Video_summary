@@ -44,6 +44,34 @@ test('synthetic MP3 120 min plan covers all frames, frame-aligned byte limits an
 test('MP3 scan rejects an unparsed tail instead of treating a partial file as complete',()=>{const bytes=new Uint8Array(417*3+4096);for(let i=0;i<3;i++)bytes.set([255,251,144,0],i*417);assert.throws(()=>planMp3(bytes),/MP3_UNPARSED_AUDIO/);});
 test('audio merge offsets timestamps, identifies missing chunk and cannot certify completeness',()=>{const r=mergeAudioSegments([{index:0,start:0,end:300,segments:[{start:0,end:2,text:'시작'}]},{index:1,start:297,end:597,segments:[{start:10,end:12,text:'두번째'}]},{index:2,start:594,end:600,segments:[]}]);assert.equal(r.segments[1].startMs,307000);assert.deepEqual(r.missingChunks,[2]);});
 test('audio resume skips completed chunks and rejects a different file or plan',async()=>{const {db,env}=setup();try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600}),env)).json();const path='/api/jobs/'+created.job.id,fileSha256='a'.repeat(64),chunks=[{index:0,start:0,end:300},{index:1,start:297,end:600}];assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256,chunks}),env)).status,200);const progress=await(await routeApi(request(path+'/audio-progress'),env)).json();assert.deepEqual(progress.chunks.map(c=>c.state),['PLANNED','PLANNED']);assert.equal(progress.complete,false);db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=0").run(JSON.stringify({fileSha256,segments:[{start:0,end:1,text:'done'}]}),created.job.id);assert.equal((await(await routeApi(request(path+'/audio-chunk?index=0','POST',{}),env)).json()).cached,true);assert.equal((await routeApi(request(path+'/audio-finish','POST',{}),env)).status,409);assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'b'.repeat(64),chunks}),env)).status,400);assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256,chunks:[{index:0,start:0,end:600}]}),env)).status,400);}finally{db.close();}});
+test('temporary audio results need completed coverage, durable TXT readback and separate confirmation before cleanup',async()=>{
+ const {db,env}=setup();try{
+  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:120}),env)).json();
+  const id=created.job.id,path='/api/jobs/'+id,sha='a'.repeat(64),chunks=[{index:0,start:0,end:60},{index:1,start:60,end:120}];
+  assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:sha,chunks}),env)).status,200);
+  assert.equal((await routeApi(request(path+'/audio-cleanup','POST',{confirmTemporaryTranscriptCleanup:true}),env)).status,409);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM yta_audio').get().n,2);
+  for(let i=0;i<2;i++)db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=?").run(JSON.stringify({fileSha256:sha,segments:[{start:1,end:2,text:'전사 '+i}]}),id,i);
+  const finished=await routeApi(request(path+'/audio-finish','POST',{}),env);assert.equal(finished.status,200);
+  assert.equal((await routeApi(request(path+'/audio-cleanup','POST',{}),env)).status,400);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM yta_audio').get().n,2);
+  const originalRaw=db.prepare('SELECT raw FROM yta_sources WHERE job_id=?').get(id).raw;
+  assert.equal(originalRaw,'전사 0\n전사 1');
+  assert.match(await (await routeApi(request(path+'/export?format=txt'),env)).text(),/전사 0/);
+  db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run('corrupted',id);
+  assert.equal((await routeApi(request(path+'/audio-cleanup','POST',{confirmTemporaryTranscriptCleanup:true}),env)).status,409);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM yta_audio').get().n,2);
+  db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(originalRaw,id);
+  const report=JSON.stringify({kind:'GEMINI_EVIDENCE_LINKED',summary:[{text:'보존',evidenceIds:[1]}]});
+  db.prepare('UPDATE jobs SET report_json=? WHERE id=?').run(report,id);
+  const cleaned=await routeApi(request(path+'/audio-cleanup','POST',{confirmTemporaryTranscriptCleanup:true}),env);assert.equal(cleaned.status,200);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM yta_audio').get().n,0);
+  assert.equal(db.prepare('SELECT raw FROM yta_sources WHERE job_id=?').get(id).raw,originalRaw);
+  assert.equal(db.prepare('SELECT report_json FROM jobs WHERE id=?').get(id).report_json,report);
+  assert.equal((await routeApi(request(path+'/audio-finish','POST',{}),env)).status,200);
+  assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:sha,chunks}),env)).status,400);
+ }finally{db.close();}
+});
 test('summary partitions full transcript without truncation or over-budget requests',()=>{const segments=Array.from({length:240},(_,i)=>({id:i+1,startMs:i*24000,endMs:(i+1)*24000,text:'발언 내용 '.repeat(65)}));const groups=partitionTranscript(segments,{status:'TRANSCRIPT_UNVERIFIED'});assert.ok(groups.length>2);assert.deepEqual(groups.flat().map(s=>s.id),segments.map(s=>s.id));for(const group of groups){const prompt=reportPrompt(group,{status:'TRANSCRIPT_UNVERIFIED'});assert.ok(prompt.length<=SUMMARY_PROMPT_LIMIT);assert.ok(summaryUnits(prompt)<=250000);}const partial=groups.map(g=>({ids:[g[0].id],report:valid()}));for(const batch of partitionSynthesis(partial,{}))assert.ok(synthesisPrompt(batch,{}).length<=SUMMARY_PROMPT_LIMIT);});
 test('MOCK long summary resumes completed stages after renewed grants without duplicate calls',async()=>{
  const {db,env}=setup(),old=fetch;let calls=0;

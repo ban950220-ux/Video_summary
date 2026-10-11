@@ -77,10 +77,34 @@ all remote conflicts when strict mode is absent. The replacement guard pins the
 full active version ID, checks the full observability object, routes, domains,
 workers.dev and preview URL switches, D1 UUID, Access variable/secret presence,
 and runtime flags. It permits only the reviewed `ASSETS` binding addition.
+The guard also reads script settings (`logpush`, `tail_consumers`) and version
+metadata (`streaming_tail_consumers`, limits, placement). Missing or different
+settings block the deploy. The values `false`, empty lists, and no limits or
+placement in the baseline are proposed expectations, **not yet verified from
+the production API**. Confirm the actual response before any deployment.
 Its approved baseline currently identifies active version
 `a33b9720-c167-4998-b8cb-3b065439b0d0`. A later deployment must update the
-baseline after independently confirming the then-active version. No token value
-or runtime Access value is logged. See [the remote guard design](remote-deploy-guard-proposal.md).
+baseline after independently confirming the then-active version. See
+[the remote guard design](remote-deploy-guard-proposal.md).
+
+The child Wrangler process receives a minimal environment: the expected token,
+fixed account and reviewed CI Worker name, with unsupported `CF_`,
+`CLOUDFLARE_`, and `WRANGLER_` overrides rejected. Its stdout and stderr are
+captured but never relayed to Build output, and pinned Wrangler 4.149.0 receives
+`WRANGLER_WRITE_LOGS=false`. The wrapper emits only a generic failure message.
+This protects against Wrangler's raw dashboard diff appearing in its console
+or Wrangler debug files under this pinned version. It does not make Cloudflare
+platform logs or unrelated Build commands private; never print raw responses
+or run an unguarded Wrangler deploy.
+
+Two pre-deploy GET rounds and two post-deploy GET rounds narrow and detect drift
+but are not an atomic lock. Another actor could change remote settings after
+the last precheck or replace the just-deployed version before the postcheck.
+There is no verified compare-and-swap condition in the documented Wrangler path
+used here. A postcheck failure means upload may already have happened; stop and
+inspect the active version and Access policy before any further action. The
+owner-only Cloudflare Access application policy is outside the Worker metadata
+guard and must be checked separately before and after deployment.
 
 This guard is offline-tested, but the existing Build token's actual read scope
 and the precise API response shape have not been tested. It deliberately stops
@@ -118,3 +142,15 @@ migration to the existing D1 database. Do not run it as part of the Build or a
 post-deploy read-only check. Also verify the base `schema.sql` tables exist
 before attempting end-to-end writes; no production schema inventory has yet
 been performed here.
+
+MP3 bytes are read into a browser buffer, sent one chunk at a time to Groq,
+and are not stored as binary in D1 or R2 by this application. `yta_audio`
+stores plan times, state, the file hash and duplicate per-chunk transcript JSON.
+The retained TXT content is `yta_sources.raw`, with timed segments alongside
+it; summary and analysis stay in `jobs`. After every chunk succeeds and
+`audio-finish` saves the full transcript, the owner can separately confirm
+**임시 전사 조각 정리** in the library. The server checks planned time coverage,
+every chunk's result, completion audit, and D1 TXT readback before deleting
+only `yta_audio` rows for that job. Missing/failed chunks or mismatched saved
+text retain the rows for resume and review. This does not delete the PC or
+Library original. No production cleanup was run in this branch.

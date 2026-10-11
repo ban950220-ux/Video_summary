@@ -22,6 +22,9 @@ export const approvedRemoteBaseline={
   activeVersionId:'a33b9720-c167-4998-b8cb-3b065439b0d0',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],
+  // These optional API fields must be confirmed against the actual Worker before deploy.
+  limits:null,placement:null,streamingTailConsumers:[],
+  scriptSettings:{logpush:false,tail_consumers:[]},
   observability:{
     enabled:true,head_sampling_rate:1,redact_query_string:false,
     logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true,destinations:[]},
@@ -37,6 +40,8 @@ export function assertRemoteState(remote,baseline){
   if(remote.workersDev!==true||remote.previewUrls!==false)fail('PUBLIC_URL_SETTINGS_MISMATCH');
   if(canonical(remote.routes)!==canonical(baseline.routes)||canonical(remote.domains)!==canonical(baseline.domains))fail('ROUTES_MISMATCH');
   if(remote.compatibilityDate!==baseline.compatibilityDate||canonical(remote.compatibilityFlags)!==canonical(baseline.compatibilityFlags))fail('COMPATIBILITY_MISMATCH');
+  if(!remote.scriptSettings||typeof remote.scriptSettings.logpush!=='boolean'||!Array.isArray(remote.scriptSettings.tail_consumers)||!Array.isArray(remote.streamingTailConsumers))fail('SCRIPT_SETTINGS_INCOMPLETE');
+  if(canonical(remote.scriptSettings.logpush)!==canonical(baseline.scriptSettings?.logpush)||canonical(remote.scriptSettings.tail_consumers)!==canonical(baseline.scriptSettings?.tail_consumers)||canonical(remote.streamingTailConsumers)!==canonical(baseline.streamingTailConsumers)||canonical(remote.limits)!==canonical(baseline.limits)||canonical(remote.placement)!==canonical(baseline.placement))fail('SCRIPT_SETTINGS_MISMATCH');
   for(const path of Object.keys(requiredObservability)){
     if(valueAt(remote.observability,path)===undefined||valueAt(baseline.observability,path)===undefined)fail('OBSERVABILITY_INCOMPLETE');
   }

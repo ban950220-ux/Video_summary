@@ -4,8 +4,8 @@ import {assertRemoteState} from '../scripts/remote-state-policy.mjs';
 
 const observability={enabled:true,head_sampling_rate:1,redact_query_string:false,logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true,destinations:[]},traces:{enabled:false,head_sampling_rate:1,persist:true,destinations:[]},issues:{enabled:false}};
 const version='a'.repeat(8)+'-1111-4111-8111-'+'b'.repeat(12);
-const baseline={activeVersionId:version,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],observability,databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34'};
-const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVersions:[{id:version,percentage:100}],workersDev:true,previewUrls:false,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],observability:structuredClone(observability),bindings:[
+const baseline={activeVersionId:version,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],observability,databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',limits:null,placement:null,streamingTailConsumers:[],scriptSettings:{logpush:false,tail_consumers:[]}};
+const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVersions:[{id:version,percentage:100}],workersDev:true,previewUrls:false,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],observability:structuredClone(observability),limits:null,placement:null,streamingTailConsumers:[],scriptSettings:{logpush:false,tail_consumers:[]},bindings:[
   {name:'DB',type:'d1',id:baseline.databaseId},
   {name:'ACCESS_AUD',type:'plain_text',text:'test-audience-value'},
   {name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:'https://test.cloudflareaccess.com'},
@@ -31,6 +31,11 @@ test('offline remote policy fails closed on active version, DB, Access, preview 
     state=>{state.observability.logs.persist=false;},
     state=>{state.observability.traces.head_sampling_rate=0.5;},
     state=>{state.bindings.push({name:'OTHER',type:'plain_text',text:'x'});},
+    state=>{state.scriptSettings.logpush=true;},
+    state=>{state.scriptSettings.tail_consumers.push({service:'unexpected'});},
+    state=>{state.streamingTailConsumers.push({service:'unexpected'});},
+    state=>{state.limits={cpu_ms:100};},
+    state=>{state.placement='smart';},
   ]){const state=remote();mutate(state);assert.throws(()=>assertRemoteState(state,baseline),/Remote deployment guard/);}
   const incomplete=remote();delete incomplete.observability.logs.invocation_logs;
   assert.throws(()=>assertRemoteState(incomplete,baseline),/OBSERVABILITY_INCOMPLETE/);
