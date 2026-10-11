@@ -330,8 +330,23 @@ test('audio finish stores ambiguous boundary text, review markers and TXT withou
   assert.equal(finished.job.audit.audioBoundaryReview,'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED');
   assert.deepEqual(finished.job.audit.audioBoundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:297500,endMs:298500,previousChunkEndMs:300000}]);
   assert.deepEqual(finished.source.segments.map(x=>x.text),['겹친 다른 발언','앞 조각 끝','뒤 조각 본문']);
+  const retrieved=await(await routeApi(request(path+'/source'),env)).json();
+  assert.equal(retrieved.audioBoundaryReview,'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED');
+  assert.equal(retrieved.audioBoundaryAmbiguityCount,1);
+  assert.deepEqual(retrieved.audioBoundaryAmbiguities,[{segmentId:1,chunkIndex:1,startMs:297500,endMs:298500}]);
+  assert.deepEqual(retrieved.source.segments,finished.source.segments);
   const exported=await(await routeApi(request(path+'/export?format=txt'),env)).text();
   for(const text of finished.source.segments.map(x=>x.text))assert.ok(exported.includes(text));
+  assert.match(exported,/겹침 경계 검토 필요: 서로 다른 전사 표현 1개/);
+  assert.match(exported,/#1 \[겹침 경계·발언 확인 필요\] 겹친 다른 발언/);
+  assert.match(exported,/## 원본 스크립트\n\n겹친 다른 발언\n앞 조각 끝/);
+  const audit=JSON.parse(db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(id).audit_json);
+  audit.audioBoundaryAmbiguities=Array.from({length:70},(_,i)=>({segmentId:i+1,chunkIndex:1,startMs:i,endMs:i+1}));
+  db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),id);
+  const bounded=await(await routeApi(request(path+'/source'),env)).json();
+  assert.equal(bounded.audioBoundaryAmbiguityCount,70);
+  assert.equal(bounded.audioBoundaryAmbiguities.length,64);
+  assert.equal(bounded.audioBoundaryAmbiguitiesOmitted,6);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_audio WHERE job_id=?').get(id).n,2);
  }finally{db.close();}
 });

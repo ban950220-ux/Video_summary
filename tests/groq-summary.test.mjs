@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
 import {routeApi} from '../src/worker.mjs';
-import {partitionGroqTranscript,groqInputUpperBound,groqSummaryMessages,groqRawPrompt,GROQ_SUMMARY_INPUT_BOUND} from '../src/groq-summary.mjs';
+import {partitionGroqTranscript,groqInputUpperBound,groqSummaryMessages,groqRawPrompt,groqMergePrompt,promptAudit,GROQ_SUMMARY_INPUT_BOUND} from '../src/groq-summary.mjs';
+import {reportPrompt} from '../src/report.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 import {capacityIdentity} from '../src/observed-capacity.mjs';
 
@@ -46,6 +47,23 @@ test('conservative UTF-8 bound partitions long Korean source below Groq Free inp
  const bounded=partitionGroqTranscript(fullLength,{durationSeconds:5892,audioProcessingCoverage:1,independentVerification:false});
  assert.equal(fullLength.map(part=>part.text).join('').length,15000);
  assert.ok((bounded.length*2-1)*6600<=195000);
+});
+test('Gemini and Groq summary payloads disclose retained boundary uncertainty within input caps',()=>{
+ const segments=[{id:1,startMs:0,endMs:1000,text:'첫 발언'},{id:2,startMs:500,endMs:1500,text:'겹친 다른 발언'}],marker={segmentId:2,chunkIndex:1,startMs:500,endMs:1500};
+ const job={duration_seconds:2,audit:{audioProcessingCoverage:1,audioBoundaryAmbiguities:[marker]}};
+ const audit=promptAudit(job);
+ assert.deepEqual(audit.audioBoundarySegmentIds,[2]);
+ const raw=groqRawPrompt(segments,audit);
+ assert.match(raw,/"audioBoundarySegmentIds":\[2\]/);
+ assert.match(raw,/같은 발언을 두 번 집계하거나 어느 표현이 맞는지 단정하지 말고/);
+ assert.ok(groqInputUpperBound(groqSummaryMessages(raw))<=GROQ_SUMMARY_INPUT_BOUND);
+ const merged=groqMergePrompt([{ids:[1,2],startMs:0,endMs:1500,report:valid(1)}],audit,{final:true});
+ assert.match(merged,/"audioBoundaryAmbiguityCount":1/);
+ assert.match(merged,/독립 확인되지 않았다/);
+ assert.ok(groqInputUpperBound(groqSummaryMessages(merged))<=GROQ_SUMMARY_INPUT_BOUND);
+ const gemini=reportPrompt(segments,job.audit);
+ assert.match(gemini,/"segmentId":2/);
+ assert.match(gemini,/같은 발언을 두 번 집계하거나 어느 표현이 맞는지 단정하지 말고/);
 });
 test('Groq summary requires complete stored transcript and exact one-time approval without provider call',async()=>{
  const incomplete=await fixture({complete:false});try{assert.equal((await incomplete.db.prepare('SELECT COUNT(*) n FROM yta_operations').get()).n,0);assert.equal((await routeApi(request(incomplete.path+'/groq-summary-plan'),incomplete.env)).status,409);}finally{incomplete.db.close();}

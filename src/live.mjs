@@ -16,6 +16,10 @@ const json=(x,status=200)=>Response.json(x,{status,headers:{'cache-control':'no-
 async function readJson(req){const text=await req.text();if(text.length>900000)throw new InputError('본문 90만자 제한');try{return JSON.parse(text);}catch{throw new InputError('JSON 오류');}}
 export async function saveSource(env,id,raw,segments,provenance){await ensureLiveSchema(env);const normalized=normalizeSegments(segments);if(new TextEncoder().encode(raw+JSON.stringify(normalized)).byteLength>1500000)throw new InputError('보관 원문 크기 제한');await env.DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET raw=excluded.raw,segments_json=excluded.segments_json,provenance=excluded.provenance,updated_at=excluded.updated_at').bind(id,raw,JSON.stringify(normalized),provenance,new Date().toISOString()).run();return normalized;}
 async function sourceOf(env,id){const row=await env.DB.prepare('SELECT * FROM yta_sources WHERE job_id=?').bind(id).first();return row?{...row,segments:JSON.parse(row.segments_json)}:null;}
+function boundaryAuditView(audit){
+ const markers=(Array.isArray(audit?.audioBoundaryAmbiguities)?audit.audioBoundaryAmbiguities:[]).filter(item=>Number.isSafeInteger(item?.segmentId)&&Number.isSafeInteger(item?.chunkIndex)&&Number.isFinite(item?.startMs)&&Number.isFinite(item?.endMs));
+ return {audioBoundaryReview:audit?.audioBoundaryReview??null,audioBoundaryAmbiguityCount:markers.length,audioBoundaryAmbiguities:markers.slice(0,64).map(({segmentId,chunkIndex,startMs,endMs})=>({segmentId,chunkIndex,startMs,endMs})),audioBoundaryAmbiguitiesOmitted:Math.max(0,markers.length-64)};
+}
 async function ownedJob(env,id){const row=await env.DB.prepare("SELECT * FROM jobs WHERE id=? AND owner_id=? AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,'owner',id+':deleting').first();if(!row)throw new ProviderError('NOT_FOUND','분석 기록 없음');return {...row,report:JSON.parse(row.report_json||'null'),audit:JSON.parse(row.audit_json||'null')};}
 async function updateJob(env,id,status,report,audit){await env.DB.prepare('UPDATE jobs SET status=?,report_json=?,audit_json=?,updated_at=? WHERE id=? AND owner_id=?').bind(status,JSON.stringify(report),JSON.stringify(audit),new Date().toISOString(),id,'owner').run();}
 async function grantEnv(env,provider){
@@ -353,7 +357,7 @@ export async function routeLive(request,env){
   const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|groq-summary|groq-summary-plan|groq-summary-approval|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
   const id=match[1],action=match[2],job=await ownedJob(env,id);
   if(action.startsWith('groq-summary'))return await handleGroqSummaryAction(request,env,{id,action,job,sourceOf,ownedJob});
-  if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id)});
+  if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id),...boundaryAuditView(job.audit)});
   if(action==='export'&&request.method==='GET'){
    const source=await sourceOf(env,id),text=markdownReport(job,source);return new Response(text,{headers:{'content-type':'text/plain; charset=utf-8','cache-control':'no-store','content-disposition':'attachment; filename="analysis-'+id+(url.searchParams.get('format')==='txt'?'.txt':'.md')+'"'}});
   }
