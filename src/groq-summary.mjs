@@ -86,13 +86,37 @@ function validApproval(scope,jobId,hash,keyIdentity){
 }
 const approvalId=(id,sequence)=>id+':groq-summary:approval:'+sequence;
 const stageId=(id,hash,key)=>id+':groq-summary:'+hash+':'+key;
+function approvalD1Category(error){
+ const detail=[error?.message,error?.cause?.message].filter(value=>typeof value==='string').join(' ');
+ if(/D1_COLUMN_NOTFOUND|no such column/i.test(detail))return 'COLUMN';
+ if(/no such function/i.test(detail))return 'FUNCTION';
+ if(/D1_TYPE_ERROR|type mismatch/i.test(detail))return 'TYPE';
+ if(/binding|parameter|variable number/i.test(detail))return 'BINDING';
+ if(/syntax error/i.test(detail))return 'SYNTAX';
+ if(/limit|overloaded|timeout|reset|network connection/i.test(detail))return 'RESOURCE';
+ return 'OTHER';
+}
+async function approvalD1Probes(env,id,query){
+ const prefix=approvalId(id,''),like=prefix+'%';
+ const probe=async fn=>{try{await fn();return 'OK';}catch{return 'ERR';}};
+ const result={};
+ result.schema=await probe(async()=>{const rows=(await env.DB.prepare("SELECT name FROM pragma_table_info('yta_operations') WHERE name IN ('id','job_id','provider','state','result_json')").all()).results||[];if(new Set(rows.map(row=>row.name)).size!==5)throw Error('schema mismatch');});
+ result.count=await probe(async()=>{const row=await env.DB.prepare("SELECT count(*) AS n FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=?").bind(like,id,'groq-summary').first();result.zero=row?.n===0?'ZERO':'NONZERO';});
+ result.simple=await probe(()=>env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? LIMIT 1").bind(like,id,'groq-summary').first());
+ result.fields=await probe(()=>env.DB.prepare("SELECT state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? LIMIT 1").bind(like,id,'groq-summary').first());
+ result.order=await probe(()=>env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? ORDER BY CAST(substr(id,length(?)+1) AS INTEGER) DESC LIMIT 1").bind(like,id,'groq-summary',prefix).first());
+ result.exactAll=await probe(()=>env.DB.prepare(query).bind(like,id,'groq-summary',prefix).all());
+ return ['schema','count','zero','simple','fields','order','exactAll'].map(key=>key+':'+(result[key]??'UNKNOWN')).join(',');
+}
 async function readApproval(env,id,{reviewing=false}={}){
+ const query="SELECT state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? ORDER BY CAST(substr(id,length(?)+1) AS INTEGER) DESC LIMIT 1";
  const step=async(phase,fn)=>{try{return await fn();}catch(error){
   if(!reviewing||error instanceof InputError||error instanceof ProviderError)throw error;
   const kind=error?.name==='D1_ERROR'||/^D1_ERROR\b/.test(error?.message??'')?'D1':error instanceof TypeError?'TYPE':'OTHER';
-  throw Object.assign(new Error('요약 승인 조회 오류 ('+phase+'/'+kind+'). 저장된 원문은 보존됩니다.'),{safeReviewCode:'SUMMARY_REVIEW_APPROVAL_'+phase+'_'+kind+'_INTERNAL'});
+  const detail=phase==='FIRST'&&kind==='D1'?' '+approvalD1Category(error)+' ['+await approvalD1Probes(env,id,query)+']':'';
+  throw Object.assign(new Error('요약 승인 조회 오류 ('+phase+'/'+kind+detail+'). 저장된 원문은 보존됩니다.'),{safeReviewCode:'SUMMARY_REVIEW_APPROVAL_'+phase+'_'+kind+'_INTERNAL'});
  }};
- const statement=await step('PREPARE',()=>env.DB.prepare("SELECT state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? ORDER BY CAST(substr(id,length(?)+1) AS INTEGER) DESC LIMIT 1"));
+ const statement=await step('PREPARE',()=>env.DB.prepare(query));
  const bound=await step('BIND',()=>statement.bind(id+':groq-summary:approval:%',id,'groq-summary',id+':groq-summary:approval:'));
  const row=await step('FIRST',()=>bound.first());
  if(!row)return null;
