@@ -162,7 +162,8 @@ test('job deletion retains recent completed and uncertain summary usage for late
    const retained=f.db.prepare("SELECT state,units,result_json FROM yta_operations WHERE job_id=? AND id LIKE ?").get(f.id,f.id+':groq-summary:'+f.plan.transcriptHash+':%');
    assert.equal(retained.state,prior.state);assert.equal(retained.units,prior.units);assert.equal(retained.result_json,null);
    const next=await sibling(f);assert.equal((await routeApi(request(next.path+'/groq-summary','POST',{}),f.env)).status,409);assert.equal(calls,1);
-   assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE job_id=?").get(f.id).n,2);
+   assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE job_id=?").get(f.id).n,3);
+   assert.equal(f.db.prepare("SELECT state,result_json FROM yta_operations WHERE id=?").get(f.id+':deleting').state,'DELETING');
    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM usage_events WHERE job_id=?").get(f.id).n,mode==='success'?1:0);
   }finally{globalThis.fetch=old;f.db.close();}
  }
@@ -279,4 +280,21 @@ test('deleting during an abnormal provider response retains uncertainty without 
   const row=f.db.prepare("SELECT state,result_json FROM yta_operations WHERE job_id=? AND state='FAILED_UNCERTAIN'").get(f.id);
   assert.equal(row.state,'FAILED_UNCERTAIN');assert.equal(row.result_json,null);assert.equal(calls,1);
  }finally{release();globalThis.fetch=old;f.db.close();}
+});
+test('late truncated response cannot refill cleared payload while final DELETE awaits',async()=>{
+ const f=await fixture(),old=fetch;let releaseFetch,fetchStarted,releaseDelete,deleteReached;
+ const fetchGate=new Promise(resolve=>releaseFetch=resolve),enteredFetch=new Promise(resolve=>fetchStarted=resolve),deleteGate=new Promise(resolve=>releaseDelete=resolve),enteredDelete=new Promise(resolve=>deleteReached=resolve);
+ globalThis.fetch=async()=>{fetchStarted();await fetchGate;return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'length',message:{content:'PRIVATE_PARTIAL_TEXT'}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390}});};
+ try{await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);
+  const pending=routeApi(request(f.path+'/groq-summary','POST',{}),f.env);await enteredFetch;
+  const original=f.env.DB;f.env.DB={...original,prepare(sql){const stmt=original.prepare(sql);if(sql!=='DELETE FROM jobs WHERE id=? AND owner_id=?')return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async run(){deleteReached();await deleteGate;return bound.run();}};}};}};
+  const deleting=routeApi(request(f.path,'DELETE'),f.env);await enteredDelete;
+  assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE id=?").get(f.id+':deleting').state,'DELETING');
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE job_id=? AND result_json IS NOT NULL").get(f.id).n,0);
+  releaseFetch();assert.equal((await pending).status,409);
+  assert.equal(f.db.prepare("SELECT state,result_json FROM yta_operations WHERE job_id=? AND state='FAILED_UNCERTAIN'").get(f.id).result_json,null);
+  releaseDelete();assert.equal((await deleting).status,200);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE job_id=? AND result_json IS NOT NULL").get(f.id).n,0);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM jobs WHERE id=?").get(f.id).n,0);
+ }finally{releaseFetch();releaseDelete();globalThis.fetch=old;f.db.close();}
 });

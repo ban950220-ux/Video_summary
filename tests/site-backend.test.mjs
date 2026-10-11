@@ -6,7 +6,7 @@ import {encryptProviderKey,decryptProviderKey,configuredMasterKey} from '../src/
 const token='test-secret-with-at-least-24-chars';
 const root=Buffer.alloc(32,57).toString('base64');
 class FakeDB {
-  jobs=new Map(); keys=new Map(); events=[];
+  jobs=new Map(); keys=new Map(); events=[]; markers=new Map();
   prepare(sql){
     const db=this;
     return {bind(...args){
@@ -20,6 +20,8 @@ class FakeDB {
           } else if(sql.startsWith('INSERT INTO provider_credentials')){
             const [owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at]=args;
             db.keys.set(`${owner_id}:${provider}`,{owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at});
+          } else if(sql.startsWith('INSERT OR IGNORE INTO yta_operations')){
+            if(db.jobs.get(args[1])?.owner_id==='owner')db.markers.set(args[0],{provider:'deletion',state:'DELETING'});
           } else if(sql.startsWith('DELETE FROM provider_credentials')){
             db.keys.delete(`${args[0]}:${args[1]}`);
           } else if(sql.startsWith('INSERT INTO provider_credential_events')){
@@ -27,7 +29,7 @@ class FakeDB {
           } else if(sql.startsWith('DELETE FROM yta_')||sql.startsWith('UPDATE yta_operations')){} else throw new Error('Unsupported mock run: '+sql);
           return {success:true};
         },
-        async first(){if(sql.includes('FROM sqlite_master'))return null;if(sql.startsWith('SELECT * FROM jobs'))return db.jobs.get(args[0])?.owner_id===args[1]?db.jobs.get(args[0]):null;throw new Error('Unsupported mock first: '+sql);},
+        async first(){if(sql.includes('FROM sqlite_master'))return null;if(sql.startsWith('SELECT 1 AS ok FROM jobs'))return db.jobs.get(args[0])?.owner_id===args[1]?{ok:1}:null;if(sql.startsWith('SELECT provider,state FROM yta_operations'))return db.markers.get(args[0])??null;if(sql.startsWith('SELECT * FROM jobs'))return db.jobs.get(args[0])?.owner_id===args[1]?db.jobs.get(args[0]):null;throw new Error('Unsupported mock first: '+sql);},
         async all(){
           if(sql.includes('FROM sqlite_master'))return {results:['yta_sources','yta_quota','yta_operations','yta_audio'].map(name=>({name}))};
           if(sql.startsWith('SELECT provider,updated_at FROM provider_credentials'))return {results:[...db.keys.values()].filter(x=>x.owner_id===args[0])};
