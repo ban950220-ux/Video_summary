@@ -158,7 +158,7 @@ test('empty approval read identifies prepare, bind, or first failure without exp
    assert.equal(response.status,500);
    const body=await response.json();assert.equal(body.error.code,'SUMMARY_REVIEW_APPROVAL_'+phase+'_D1_INTERNAL');
    assert.doesNotMatch(JSON.stringify(body),/PRIVATE_BACKEND_DETAIL/);
-   if(phase==='FIRST')assert.match(body.error.message,/COLUMN \[schema:OK,count:OK,zero:ZERO,simple:OK,fields:OK,order:OK,exactAll:OK\]/);
+   if(phase==='FIRST')assert.match(body.error.message,/COLUMN \[schema:OK,params:OK,job:OK,like:OK,pair:OK,literalProvider:OK,three:OK,reordered:OK,exactAll:OK\]/);
   }
   assert.equal(calls,0);
  }finally{globalThis.fetch=old;f.db.close();}

@@ -101,12 +101,15 @@ async function approvalD1Probes(env,id,query){
  const probe=async fn=>{try{await fn();return 'OK';}catch{return 'ERR';}};
  const result={};
  result.schema=await probe(async()=>{const rows=(await env.DB.prepare("SELECT name FROM pragma_table_info('yta_operations') WHERE name IN ('id','job_id','provider','state','result_json')").all()).results||[];if(new Set(rows.map(row=>row.name)).size!==5)throw Error('schema mismatch');});
- result.count=await probe(async()=>{const row=await env.DB.prepare("SELECT count(*) AS n FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=?").bind(like,id,'groq-summary').first();result.zero=row?.n===0?'ZERO':'NONZERO';});
- result.simple=await probe(()=>env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? LIMIT 1").bind(like,id,'groq-summary').first());
- result.fields=await probe(()=>env.DB.prepare("SELECT state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? LIMIT 1").bind(like,id,'groq-summary').first());
- result.order=await probe(()=>env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? ORDER BY CAST(substr(id,length(?)+1) AS INTEGER) DESC LIMIT 1").bind(like,id,'groq-summary',prefix).first());
+ result.params=await probe(()=>env.DB.prepare('SELECT ? AS a, ? AS b, ? AS c').bind(like,id,'groq-summary').first());
+ result.job=await probe(()=>env.DB.prepare('SELECT count(*) AS n FROM yta_operations WHERE job_id=?').bind(id).first());
+ result.like=await probe(()=>env.DB.prepare('SELECT count(*) AS n FROM yta_operations WHERE id LIKE ?').bind(like).first());
+ result.pair=await probe(()=>env.DB.prepare('SELECT count(*) AS n FROM yta_operations WHERE id LIKE ? AND job_id=?').bind(like,id).first());
+ result.literalProvider=await probe(()=>env.DB.prepare("SELECT count(*) AS n FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider='groq-summary'").bind(like,id).first());
+ result.three=await probe(()=>env.DB.prepare('SELECT count(*) AS n FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=?').bind(like,id,'groq-summary').first());
+ result.reordered=await probe(()=>env.DB.prepare('SELECT count(*) AS n FROM yta_operations WHERE job_id=? AND provider=? AND id LIKE ?').bind(id,'groq-summary',like).first());
  result.exactAll=await probe(()=>env.DB.prepare(query).bind(like,id,'groq-summary',prefix).all());
- return ['schema','count','zero','simple','fields','order','exactAll'].map(key=>key+':'+(result[key]??'UNKNOWN')).join(',');
+ return ['schema','params','job','like','pair','literalProvider','three','reordered','exactAll'].map(key=>key+':'+result[key]).join(',');
 }
 async function readApproval(env,id,{reviewing=false}={}){
  const query="SELECT state,result_json FROM yta_operations WHERE id LIKE ? AND job_id=? AND provider=? ORDER BY CAST(substr(id,length(?)+1) AS INTEGER) DESC LIMIT 1";
