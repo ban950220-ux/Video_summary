@@ -8,8 +8,14 @@ export function assertLive(env,provider){
 }
 async function requestJson(url,options,fetchFn=fetch){
   const r=await fetchFn(url,{...options,signal:AbortSignal.timeout(120000)});
-  if(!r.ok) throw new ProviderError(String(r.status),`${new URL(url).hostname} HTTP ${r.status}`);
-  return await r.json();
+  if(!r.ok){const error=new ProviderError(String(r.status),`${new URL(url).hostname} HTTP ${r.status}`);if(new URL(url).hostname==='api.groq.com')error.safeRateLimit=safeGroqRateLimit(r.headers);throw error;}
+  const data=await r.json();
+  if(new URL(url).hostname==='api.groq.com'&&data&&typeof data==='object'&&!Array.isArray(data))data.safeRateLimit=safeGroqRateLimit(r.headers);
+  return data;
+}
+function safeGroqRateLimit(headers){
+ const number=(name,max)=>{const raw=headers.get(name);if(raw===null||!/^\d{1,8}$/.test(raw))return null;const value=Number(raw);return value<=max?value:null;};
+ return {retryAfterSeconds:number('retry-after',3600),remainingRequests:number('x-ratelimit-remaining-requests',1000000),remainingAudioSeconds:number('x-ratelimit-remaining-audio-seconds',86400)};
 }
 export async function fetchSupadataCaption(url,env,fetchFn=fetch){
   assertLive(env,'SUPADATA');
@@ -40,9 +46,9 @@ export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,
   // This upload path is intentionally only a building block; the route must reserve quota BEFORE invoking it.
   const data=new FormData();data.append('file',new Blob([bytes],{type:mime||'application/octet-stream'}),name);
   data.append('model','whisper-large-v3-turbo');data.append('response_format','verbose_json');data.append('temperature','0');data.append('timestamp_granularities[]','segment');
-  beforeFetch?.();
+  await beforeFetch?.();
   const result=await requestJson('https://api.groq.com/openai/v1/audio/transcriptions',{method:'POST',headers:{Authorization:`Bearer ${env.GROQ_API_KEY}`},body:data},fetchFn);
-  return {provider:'groq',model:'whisper-large-v3-turbo',text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION'};
+  return {provider:'groq',model:'whisper-large-v3-turbo',text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION',safeRateLimit:result.safeRateLimit};
 }
 function base64Audio(bytes){let out='';for(let i=0;i<bytes.length;i+=12288){const slice=bytes.subarray(i,i+12288);out+=btoa(String.fromCharCode(...slice));}return out;}
 function assertGeminiDeadlinesAtFetch(env){if(env.quotaExpiresAt===undefined&&env.capacityValidUntil===undefined)return;if(!Number.isFinite(env.quotaExpiresAt)||env.quotaExpiresAt<=Date.now()||!Number.isFinite(env.capacityValidUntil)||env.capacityValidUntil<=Date.now()){const error=new ProviderError('CAPACITY_WAIT','제공자 관측치 또는 무료 허가가 전송 직전에 만료됐습니다.');error.preDispatchBlocked=true;throw error;}}

@@ -20,7 +20,7 @@ export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,ch
    const candidates=(requested==='auto'?['groq','gemini']:[requested]).filter(provider=>['groq','gemini'].includes(provider)&&authorized.includes(provider)&&(provider!=='groq'||saved.groqAllowed!==false));
    if(!candidates.length)return {complete:false,reason:'NO_AUTHORIZED_PROVIDER',index:chunk.index};
    const [capacity,quota]=await Promise.all([getCapacity(),getQuota()]);const at=now();
-   const ready=candidates.filter(provider=>capacityReady(provider,chunk.end-chunk.start,capacity.snapshots,quota.grants,at));
+   const ready=candidates.filter(provider=>saved.unknownCapacityProbeApproved&&requested==='groq'&&provider==='groq'||capacityReady(provider,chunk.end-chunk.start,capacity.snapshots,quota.grants,at));
    if(!ready.length)return {complete:false,reason:requested==='auto'?'NO_AUTHORIZED_PROVIDER_WITH_VALID_CAPACITY':'CAPACITY_OR_GRANT_REOBSERVATION_REQUIRED',index:chunk.index};
    const idle=ready.filter(provider=>!progress.operationInFlight?.[provider]);
    if(!idle.length)return {complete:false,reason:'OPERATION_IN_FLIGHT',index:chunk.index};
@@ -28,13 +28,13 @@ export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,ch
    const eligible=progress.nextEligibleAt?.[provider];
    if(Number.isFinite(eligible)&&eligible>at){
     const expiry=capacity.snapshots.find(row=>row.provider===provider)?.valid_until;
-    if(eligible>=expiry||eligible-at>13000)return {complete:false,reason:'WAIT_FOR_PROVIDER_AND_REOBSERVE',index:chunk.index,nextEligibleAt:eligible};
+    if(eligible>=expiry||eligible-at>13000)return {complete:false,reason:saved.unknownCapacityProbeApproved?'WAIT_FOR_GROQ_EARLIEST_APP_RETRY':'WAIT_FOR_PROVIDER_AND_REOBSERVE',index:chunk.index,nextEligibleAt:eligible};
     onUpdate({index:chunk.index,provider,waitingUntil:eligible});await wait(eligible-at);continue;
    }
    let reviewedId=null;
    if(saved.reviewed429Required){reviewedId=await review429(chunk,saved,provider);if(reviewedId!==saved.reviewOperationId)return {complete:false,reason:'PROVIDER_429_REVIEW_REQUIRED',index:chunk.index};}
    onUpdate({index:chunk.index,provider,sending:true,coveragePercent:progress.coveragePercent});
-   try{const result=await sendChunk(chunk,provider,reviewedId);if(result?.state!=='DONE')return {complete:false,reason:result?.code||'AUDIO_RESULT_UNVERIFIED',index:chunk.index};}
+   try{const result=await sendChunk(chunk,provider,reviewedId,{unknownCapacityProbe:saved.unknownCapacityProbeApproved===true});if(result?.state!=='DONE')return {complete:false,reason:result?.code||'AUDIO_RESULT_UNVERIFIED',index:chunk.index};}
    catch(error){return {complete:false,reason:error?.code||'DISPATCH_OUTCOME_UNKNOWN_REVIEW_REQUIRED',index:chunk.index};}
    onUpdate({index:chunk.index,provider,done:true});break;
   }

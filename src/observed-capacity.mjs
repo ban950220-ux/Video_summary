@@ -4,7 +4,7 @@ const models={gemini:'gemini-2.5-flash',groq:'whisper-large-v3-turbo'};
 const sources={gemini:'AI_STUDIO_LIVE',groq:'GROQ_CONSOLE_LIVE'};
 const dimensions={gemini:['requestsMinute','tokensMinute','requestsDay'],groq:['requestsMinute','audioSecondsHour','audioSecondsDay']};
 const maxAgeMs=60_000;
-async function capacityIdentity(env,provider){
+export async function capacityIdentity(env,provider){
  const credential=await env.DB.prepare('SELECT cipher_version,iv_b64,ciphertext_b64,updated_at FROM provider_credentials WHERE owner_id=? AND provider=?').bind('owner',provider).first();
  const material=credential?JSON.stringify(credential):env[provider.toUpperCase()+'_API_KEY'];
  if(typeof material!=='string'||!material.length)throw new ProviderError('KEY_MISSING','관측 용량에 연결할 제공자 키가 없습니다.');

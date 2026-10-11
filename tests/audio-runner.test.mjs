@@ -46,6 +46,12 @@ test('reviewed uncertain chunk requires explicit Groq selection, never automatic
  assert.equal((await runAudioChunks({...shared,chooseProvider:()=> 'auto'})).reason,'OPERATION_REVIEW_REQUIRED');assert.equal(sent,0);
  assert.equal((await runAudioChunks({...shared,chooseProvider:()=> 'groq'})).complete,true);assert.equal(sent,1);
 });
+test('exact approved UNKNOWN Groq probe permits one foreground send without fabricated capacity',async()=>{
+ let sent=0,options=null;const progress=async()=>({chunks:[{index:0,state:sent?'DONE':'UNCERTAIN',reviewedFreeRetryApproved:true,unknownCapacityProbeApproved:true,groqAllowed:true}],complete:sent>0,nextEligibleAt:{groq:null},operationInFlight:{groq:false}});
+ const common={chunks:[chunks[0]],getProgress:progress,getCapacity:async()=>({snapshots:[]}),getQuota:async()=>({grants:[]}),authorizedProviders:()=>['groq'],now:()=>1000000,sendChunk:async(_chunk,provider,_review,settings)=>{assert.equal(provider,'groq');options=settings;sent++;return {state:'DONE'};}};
+ assert.equal((await runAudioChunks({...common,chooseProvider:()=> 'auto'})).reason,'OPERATION_REVIEW_REQUIRED');assert.equal(sent,0);
+ assert.equal((await runAudioChunks({...common,chooseProvider:()=> 'groq'})).complete,true);assert.equal(sent,1);assert.deepEqual(options,{unknownCapacityProbe:true});
+});
 test('three Gemini audio chunks flow into staged summary with shared safe cooldown',async()=>{
  const f=fixture();f.grant.request_limit=10;f.snapshot.remaining.requestsMinute=10;f.snapshot.remaining.requestsDay=10;
  const audio=await runAudioChunks({chunks,...f});assert.equal(audio.complete,true);

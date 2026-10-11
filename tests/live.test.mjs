@@ -12,7 +12,7 @@ import {planMp3,scanMp3,prepareMp3Chunk,mergeAudioSegments} from '../src/audio.m
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,SUMMARY_PROMPT_LIMIT,summaryUnits} from '../src/summary-plan.mjs';
 import {reportPrompt} from '../src/report.mjs';
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
-function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema){db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0003_observed_capacity.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0005_reviewed_free_recovery.sql',import.meta.url),'utf8'));const now=Date.now();for(const [provider,model,remaining] of [['gemini','gemini-2.5-flash',{requestsMinute:1000,tokensMinute:1000000000,requestsDay:1000}],['groq','whisper-large-v3-turbo',{requestsMinute:1000,audioSecondsHour:100000,audioSecondsDay:100000}]])db.prepare('INSERT INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES(?,?,?,?,?,?,?,?,1)').run(provider,(model),({gemini:'AI_STUDIO_LIVE',groq:'GROQ_CONSOLE_LIVE'})[provider]+':'+createHash('sha256').update(provider+':NOT_REAL_TEST_KEY').digest('hex'),now,now+60000,JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,now+3600000]))),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,0]))));}const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',GROQ_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
+function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema){db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0003_observed_capacity.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0005_reviewed_free_recovery.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0006_unknown_groq_probe.sql',import.meta.url),'utf8'));const now=Date.now();for(const [provider,model,remaining] of [['gemini','gemini-2.5-flash',{requestsMinute:1000,tokensMinute:1000000000,requestsDay:1000}],['groq','whisper-large-v3-turbo',{requestsMinute:1000,audioSecondsHour:100000,audioSecondsDay:100000}]])db.prepare('INSERT INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES(?,?,?,?,?,?,?,?,1)').run(provider,(model),({gemini:'AI_STUDIO_LIVE',groq:'GROQ_CONSOLE_LIVE'})[provider]+':'+createHash('sha256').update(provider+':NOT_REAL_TEST_KEY').digest('hex'),now,now+60000,JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,now+3600000]))),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,0]))));}const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',GROQ_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
 async function job(env){return (await(await routeApi(request('/api/jobs','POST',{sourceType:'text',title:'LOCAL MOCK TEST',filename:'x.srt',transcript:'1\n00:00:00,000 --> 00:01:00,000\n테스트 발언입니다.',durationSeconds:60,persistTranscript:true}),env)).json()).job;}
 async function grant(env,allowance=250000){const r=await routeApi(request('/api/live/quota','PUT',{provider:'gemini',allowance,requestLimit:5,billingDisabled:true,freeOnly:true}),env);assert.equal(r.status,200);}
 async function consent(env,id,sha){const r=await routeApi(request('/api/jobs/'+id+'/audio-consent','POST',{provider:'gemini',fileSha256:sha,consent:true}),env);assert.equal(r.status,200);}
@@ -259,6 +259,87 @@ test('reviewed Gemini 404 permits exactly one explicit free Groq retry while ret
   assert.equal((await routeApi(request(path+'/audio-finish','POST',{}),env)).status,200);
   assert.equal((await routeApi(request(path+'/audio-cleanup','POST',{confirmTemporaryTranscriptCleanup:true}),env)).status,409);
  }finally{globalThis.fetch=old;db.close();}
+});
+
+async function seededUnknownProbe({completed=0}={}){
+ const {db,env}=setup(),bytes=new Uint8Array(383*417);for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);
+ const seconds=scanMp3(bytes).durationSeconds,sha='c'.repeat(64),created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds*(completed+1)}),env)).json(),id=created.job.id,path='/api/jobs/'+id,index=completed;
+ assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:sha,chunks:Array.from({length:completed+1},(_,i)=>({index:i,start:i*seconds,end:(i+1)*seconds}))}),env)).status,200);
+ for(let i=0;i<completed;i++){db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=?").run(JSON.stringify({fileSha256:sha,provider:'groq',segments:[{start:1,end:2,text:'기존 '+i}],operationId:id+':audio:'+i}),id,i);db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').run(id+':audio:'+i,id,'groq',10,'DONE',new Date(Date.now()-7200000).toISOString());}
+ db.prepare("UPDATE yta_audio SET state='UNCERTAIN' WHERE job_id=? AND chunk_index=?").run(id,index);
+ const groq429=id+':audio:'+index,gemini404=groq429+':gemini:0';
+ db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code) VALUES(?,?,?,?,?,?,?)').run(groq429,id,'groq',10,'FAILED_UNCERTAIN',new Date(Date.now()-7200000).toISOString(),'429');
+ db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code) VALUES(?,?,?,?,?,?,?)').run(gemini404,id,'gemini',100,'FAILED_UNCERTAIN',new Date(Date.now()-600000).toISOString(),'404');
+ const approval={index,fileSha256:sha,geminiOperationId:gemini404,groq429OperationId:groq429,acknowledgePossibleGeminiUsage:true,acknowledgeDuplicateTranscriptionRisk:true,chooseGroqFree:true};
+ const probe={...approval,provider:'groq',model:'whisper-large-v3-turbo',freeTierConfirmed:true,billingDisabled:true,unknownCapacityAcknowledged:true,oneRequestOnly:true};
+ const upload=()=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index='+index+'&provider=groq&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream','x-groq-free-unknown-probe':'true'},body:bytes}),env);
+ return {db,env,id,path,index,sha,bytes,groq429,gemini404,approval,probe,upload};
+}
+
+test('UNKNOWN-capacity probe needs exact recovery and separate Free approval; paid gate stays closed',async()=>{
+ const f=await seededUnknownProbe(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not call');};
+ try{
+  assert.equal((await f.upload()).status,409);assert.equal(calls,0);
+  assert.equal((await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env)).status,200);
+  const other=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:10}),f.env)).json();
+  assert.equal((await routeApi(request('/api/jobs/'+other.job.id+'/audio-free-probe','POST',f.probe),f.env)).status,409);
+  assert.equal((await routeApi(request(f.path+'/audio-free-probe','POST',{...f.probe,fileSha256:'a'.repeat(64)}),f.env)).status,409);
+  assert.equal((await routeApi(request(f.path+'/audio-free-probe','POST',{...f.probe,provider:'gemini'}),f.env)).status,400);
+  assert.equal((await routeApi(request(f.path+'/audio-free-probe','POST',{...f.probe,unknownCapacityAcknowledged:false}),f.env)).status,400);
+  f.env.ALLOW_PAID_API='true';assert.equal((await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env)).status,409);f.env.ALLOW_PAID_API='false';
+  assert.equal((await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env)).status,200);
+  assert.equal((await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env)).status,409);
+  f.env.ALLOW_PAID_API='true';assert.equal((await f.upload()).status,409);f.env.ALLOW_PAID_API='false';assert.equal(calls,0);
+  f.env.GROQ_API_KEY='DIFFERENT_TEST_KEY';assert.equal((await f.upload()).status,409);f.env.GROQ_API_KEY='NOT_REAL_TEST_KEY';assert.equal(calls,0);
+  f.db.prepare('UPDATE yta_free_probe SET expires_at=0 WHERE job_id=?').run(f.id);assert.equal((await f.upload()).status,409);assert.equal(calls,0);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+
+test('UNKNOWN probe respects local rolling usage and never invents provider account balance',async()=>{
+ const f=await seededUnknownProbe(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not call');};
+ try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+  f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').run('other-recent',f.id,'groq',6500,'DONE',new Date().toISOString());
+  const response=await f.upload();assert.equal((await response.json()).error.code,'PROBE_LOCAL_LIMIT');assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT state FROM yta_free_probe WHERE job_id=?').get(f.id).state,'APPROVED');
+  assert.equal((await(await routeApi(request(f.path+'/audio-free-probe?index=0'),f.env)).json()).accountCapacity,'UNKNOWN');
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+
+test('UNKNOWN probe cancels before network when Free gate changes during key lookup, then permits the same unsent operation',async()=>{
+ const f=await seededUnknownProbe(),old=fetch;let calls=0,changed=false;globalThis.fetch=async()=>{calls++;return Response.json({text:'성공',segments:[{start:1,end:2,text:'성공'}]});};
+ try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+  const originalDB=f.env.DB;f.env.DB={prepare(sql){const stmt=originalDB.prepare(sql);if(!sql.startsWith('SELECT cipher_version,iv_b64,ciphertext_b64'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async first(){if(!changed){changed=true;f.env.ENABLE_LIVE_FREE='false';}return bound.first();}};}};}};
+  assert.equal((await f.upload()).status,409);assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT state FROM yta_free_probe WHERE job_id=?').get(f.id).state,'APPROVED');
+  assert.equal(f.db.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').get(f.id+':audio:0:reviewed404:1').error_code,'PROBE_PRE_DISPATCH_BLOCKED');
+  f.env.DB=originalDB;f.env.ENABLE_LIVE_FREE='true';assert.equal((await f.upload()).status,200);assert.equal(calls,1);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+
+test('one UNKNOWN probe success keeps earlier DONE and uncertain history; concurrency sends once',async()=>{
+ const f=await seededUnknownProbe({completed:5}),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({text:'마지막',segments:[{start:1,end:2,text:'마지막'}]},{headers:{'retry-after':'42','x-ratelimit-remaining-requests':'2'}});};
+ try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+  f.db.prepare("UPDATE yta_capacity SET valid_until=0 WHERE provider='groq'").run();
+  const progress=await(await routeApi(request(f.path+'/audio-progress'),f.env)).json();assert.equal(progress.chunks[f.index].unknownCapacityProbeApproved,true);
+  const results=await Promise.all([f.upload(),f.upload()]);assert.ok(results.some(response=>response.status===200));assert.equal(calls,1);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_audio WHERE job_id=? AND state='DONE'").get(f.id).n,6);
+  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(f.gemini404).state,'FAILED_UNCERTAIN');
+  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(f.groq429).state,'FAILED_UNCERTAIN');
+  const status=await(await routeApi(request(f.path+'/audio-free-probe?index='+f.index),f.env)).json();assert.equal(status.state,'USED');assert.equal(status.fullQuotaRestored,false);assert.equal(status.accountCapacity,'UNKNOWN');assert.deepEqual(status.safeRateLimit,{retryAfterSeconds:42,remainingRequests:2,remainingAudioSeconds:null});
+  assert.equal((await routeApi(request(f.path+'/audio-finish','POST',{}),f.env)).status,200);
+  assert.equal((await routeApi(request(f.path+'/audio-cleanup','POST',{confirmTemporaryTranscriptCleanup:true}),f.env)).status,409);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+
+test('provider 429 and timeout consume one UNKNOWN probe without automatic retry or secret metadata',async()=>{
+ for(const mode of ['429','timeout']){const f=await seededUnknownProbe(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;if(mode==='timeout')throw Error('timeout with secret');return Response.json({private:'do not expose'},{status:429,headers:{'retry-after':'120','x-ratelimit-remaining-requests':'0','authorization':'secret'}});};
+  try{await routeApi(request(f.path+'/audio-recovery','POST',f.approval),f.env);await routeApi(request(f.path+'/audio-free-probe','POST',f.probe),f.env);
+   const response=await f.upload();assert.equal(response.status,mode==='429'?409:500);assert.equal(calls,1);
+   const status=await(await routeApi(request(f.path+'/audio-free-probe?index=0'),f.env)).json();assert.equal(status.state,'USED');assert.doesNotMatch(JSON.stringify(status),/secret|private/);
+   if(mode==='429')assert.equal(status.safeRateLimit.retryAfterSeconds,120);else assert.equal(status.safeRateLimit,null);
+   assert.equal((await f.upload()).status,409);assert.equal(calls,1);
+   assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(f.gemini404).state,'FAILED_UNCERTAIN');
+  }finally{globalThis.fetch=old;f.db.close();}}
 });
 test('old in-flight Groq claim blocks new work regardless of rolling-window age',async()=>{
  const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);env.GROQ_API_KEY='NOT_REAL_TEST_KEY';for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);const seconds=scanMp3(bytes).durationSeconds;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not dispatch');};
