@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runAudioChunks,runSummaryStages,detailRequestIsCurrent} from '../web/site/audio-runner.mjs';
+import {runAudioChunks,runSummaryStages,detailRequestIsCurrent,beginDetailAction} from '../web/site/audio-runner.mjs';
 
 const chunks=[0,1,2].map(index=>({index,start:index*300,end:(index+1)*300}));
 function fixture(initialDone=0){let clock=1000000,done=initialDone,last=0;const sent=[],waits=[];const snapshot={provider:'gemini',model:'gemini-2.5-flash',valid_until:clock+60000,remaining:{requestsMinute:5,tokensMinute:100000,requestsDay:5},reserved:{requestsMinute:0,tokensMinute:0,requestsDay:0}};const grant={provider:'gemini',expires_at:clock+3600000,billing_disabled:1,request_count:0,request_limit:5,consumed:0,allowance:250000};return {
@@ -73,6 +73,14 @@ test('late job-A detail response or stale approval form cannot target job B',()=
  assert.equal(detailRequestIsCurrent({...base,visibleJobId:'job-b'}),false);
  assert.equal(detailRequestIsCurrent({...base,view:'settings'}),false);
  assert.equal(detailRequestIsCurrent({...base,hidden:true}),false);
+});
+test('job B action invalidates job A progress response before replacing shared panel',async()=>{
+ const panel={dataset:{jobId:'job-a'},hidden:false};let generation=beginDetailAction(panel,'job-a',0);
+ let release;const pending=new Promise(resolve=>{release=resolve;});
+ const stale=pending.then(()=>detailRequestIsCurrent({expectedRequestId:1,currentRequestId:generation,expectedJobId:'job-a',visibleJobId:panel.dataset.jobId,view:'library',hidden:panel.hidden}));
+ generation=beginDetailAction(panel,'job-b',generation);
+ release();assert.equal(await stale,false);
+ assert.equal(detailRequestIsCurrent({expectedRequestId:generation,currentRequestId:generation,expectedJobId:'job-b',visibleJobId:panel.dataset.jobId,view:'library',hidden:panel.hidden}),true);
 });
 test('three Gemini audio chunks flow into staged summary with shared safe cooldown',async()=>{
  const f=fixture();f.grant.request_limit=10;f.snapshot.remaining.requestsMinute=10;f.snapshot.remaining.requestsDay=10;

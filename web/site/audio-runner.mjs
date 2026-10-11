@@ -12,6 +12,10 @@ export function capacityReady(provider,seconds,snapshots,grants,at){
 export function detailRequestIsCurrent({expectedRequestId,currentRequestId,expectedJobId,visibleJobId,view,hidden}){
  return expectedRequestId===currentRequestId&&expectedJobId===visibleJobId&&view==='library'&&hidden===false;
 }
+export function beginDetailAction(target,jobId,currentRequestId){
+ target.dataset.jobId=jobId;
+ return currentRequestId+1;
+}
 export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,chooseProvider,authorizedProviders=()=>['groq','gemini'],sendChunk,review429,wait,now=Date.now,foreground=()=>true,onUpdate=()=>{}}){
  for(const chunk of chunks){
   for(;;){
