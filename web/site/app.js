@@ -1,5 +1,5 @@
 import {planMp3,prepareMp3Chunk} from '/audio.mjs';
-import {runAudioChunks} from '/audio-runner.mjs';
+import {runAudioChunks,runSummaryStages} from '/audio-runner.mjs';
 // Private owner-only site, no third-party scripts and no API keys in browser storage.
 const $=(sel)=>document.querySelector(sel);
 const state={view:'analyze',mode:'url',page:0,hasMore:false,provider:null,connections:[]};
@@ -23,9 +23,10 @@ async function api(path,{method='GET',body}={}){
   const ct=response.headers.get('content-type')||'';
   if(!ct.includes('application/json'))throw Error('로그인 세션 또는 서버 응답을 확인하세요.');
   const data=await response.json();
-  if(!response.ok)throw Error(data?.error?.message || data?.error?.code || `HTTP ${response.status}`);
+  if(!response.ok)throw Object.assign(Error(data?.error?.message || data?.error?.code || `HTTP ${response.status}`),{code:data?.error?.code});
   return data;
 }
+async function waitForeground(ms){if(document.hidden)throw Error('브라우저 화면이 비활성화됐습니다. 이력에서 다시 확인하세요.');await new Promise(resolve=>setTimeout(resolve,ms));if(document.hidden)throw Error('브라우저 화면이 비활성화됐습니다. 이력에서 다시 확인하세요.');}
 function switchView(view){
   if(!['analyze','library','usage','settings'].includes(view))view='analyze';
   state.view=view;
@@ -48,7 +49,7 @@ function showReport(job,container,persisted){empty(container);
     const list=el('ol');for(const sentence of report.summary??[])list.append(el('li',{text:sentence}));container.append(list);
     container.append(el('p',{className:'subtitle',text:report.warning??'실제 AI 모델 분석·번역은 수행되지 않았습니다.'}));}
   }else container.append(el('p',{className:'subtitle',text:'AI 요약은 아직 없습니다. 전사 완료 후 저장된 원문과 내보내기를 확인할 수 있습니다.'}));
-  if(job.id){const tools=el('div',{className:'library-actions'});for(const format of ['md','txt'])tools.append(el('a',{className:'btn secondary small',text:format.toUpperCase()+' 내보내기',attrs:{href:'/api/jobs/'+job.id+'/export?format='+format}}));const source=el('button',{className:'btn secondary small',text:'원문·근거 보기'});source.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/source');const pre=el('pre',{text:data.source?.segments?.length?(data.source.segments).map(x=>'#'+x.id+' ['+(x.startMs===null?'시각 미확인':Math.floor(x.startMs/1000)+'초')+'] '+x.text).join('\n'):'저장된 전체 전사가 아직 없습니다.'});container.append(pre);source.disabled=true;}catch(e){toast(safeError(e));}};tools.append(source);container.append(tools);}
+  if(job.id){const tools=el('div',{className:'library-actions'});for(const format of ['md','txt'])tools.append(el('a',{className:'btn secondary small',text:format.toUpperCase()+' 내보내기',attrs:{href:'/api/jobs/'+job.id+'/export?format='+format}}));const source=el('button',{className:'btn secondary small',text:'원문·근거 보기'});source.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/source');const pre=el('pre',{text:data.source?.segments?.length?(data.source.segments).map(x=>'#'+x.id+' ['+(x.startMs===null?'시각 미확인':Math.floor(x.startMs/1000)+'초')+'] '+x.text).join('\n'):'저장된 전체 전사가 아직 없습니다.'});container.append(pre);source.disabled=true;}catch(e){toast(safeError(e));}};tools.append(source);if(report?.kind!=='GEMINI_EVIDENCE_LINKED'){const review=el('button',{className:'btn secondary small',text:'요약 부분 출력 검토'});review.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/summary-review');container.append(el('pre',{text:data.partialText}));review.disabled=true;}catch(error){toast(safeError(error));}};tools.append(review);}container.append(tools);}
 }
 async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button'),progress=$('#analysis-progress');let data,bytes,plan;
  const live=$('#live-analysis').checked;const title=$('#video-title').value.trim();const duration=Number($('#duration-min').value);
@@ -67,9 +68,9 @@ async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button
     await api('/api/jobs/'+id+'/audio-plan',{method:'POST',body:{rightsConfirmed:true,fileSha256,chunks:plan.chunks.map(({index,start,end})=>({index,start,end}))}});
     if($('#audio-gemini-confirm').checked)await api('/api/jobs/'+id+'/audio-consent',{method:'POST',body:{provider:'gemini',fileSha256,consent:true}});
     const run=await runAudioChunks({chunks:plan.chunks,getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),getCapacity:()=>api('/api/live/capacity'),getQuota:()=>api('/api/live/quota'),now:Date.now,
-     chooseProvider:()=>{const provider=$('#audio-provider').value;return provider==='gemini'&&!$('#audio-gemini-confirm').checked?null:provider;},
+     chooseProvider:()=>$('#audio-provider').value,authorizedProviders:()=>['groq',...($('#audio-gemini-confirm').checked?['gemini']:[])],
      review429:async(c,saved)=>confirm('조각 '+(c.index+1)+'의 '+saved.reviewProvider+' 공식 요청 로그에서 429 거절과 출력 없음, 재시도 가능 시각을 확인했나요?')?saved.reviewOperationId:null,
-     wait:async(ms)=>{if(document.hidden)throw Error('브라우저 화면이 비활성화됐습니다. 이력에서 다시 확인하세요.');await new Promise(resolve=>setTimeout(resolve,ms));if(document.hidden)throw Error('브라우저 화면이 비활성화됐습니다. 이력에서 다시 확인하세요.');},
+     wait:waitForeground,
      onUpdate:status=>{progress.textContent=status.waitingUntil?'제공자 호출 간격 대기 중 · '+fmtDate(status.waitingUntil):'음성 전사 '+(status.index+1)+' / '+plan.chunks.length+' · 기록 '+id;},
      sendChunk:async(c,provider,reviewedId)=>{const prepared=prepareMp3Chunk(bytes.subarray(c.byteStart,c.byteEnd));const response=await fetch('/api/jobs/'+id+'/audio-chunk?index='+c.index+'&provider='+provider+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream',...(reviewedId?{'x-provider-log-429-no-output-confirmed':'true','x-provider-log-429-operation-id':reviewedId}:{})},credentials:'same-origin',body:prepared.bytes});const result=await response.json();return response.ok?result:{code:result.error?.code||'AUDIO_SEND_FAILED'};}});
     if(!run.complete)throw Error('음성 전사를 일시 중단했습니다: '+run.reason+' · 조각 '+((run.index??0)+1)+' · 기록 '+id+'. 제공자 관측치와 이력을 확인한 뒤 같은 파일로 재개하세요.');
@@ -78,8 +79,9 @@ async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button
    const summaryPlan=await api('/api/jobs/'+id+'/summary-plan');
    progress.textContent='원문 근거 연결 요약 '+summaryPlan.stages+'개 구간 작성 중… 첫 단계 예약 상한 '+summaryPlan.firstPassUnits+' 단위. 할당이 부족하면 완료 단계만 보관하고 중단합니다.';
    const staged=summaryPlan.firstPassUnits>250000;if(staged&&!confirm('이 원문은 첫 단계만 '+summaryPlan.firstPassUnits+' 단위가 필요합니다. 여러 차례 무료 할당 확인이 필요할 수 있고 최종 합성 비용은 아직 모릅니다. 단계별로 진행할까요?'))throw Error('단계별 요약을 시작하지 않았습니다.');
-   result=await api('/api/jobs/'+id+'/summary',{method:'POST',body:{allowStaged:staged}});
-   if(result.pending){showReport(result.job,$('#result-content'),true);progress.textContent='요약 단계가 저장됐습니다. 약 '+result.minimumWaitSeconds+'초 뒤 이력의 요약 생성으로 계속하세요. 완료된 단계는 다시 호출하지 않습니다.';return;}
+   const summary=await runSummaryStages({getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),getCapacity:()=>api('/api/live/capacity'),getQuota:()=>api('/api/live/quota'),sendSummary:()=>api('/api/jobs/'+id+'/summary',{method:'POST',body:{allowStaged:staged}}),wait:waitForeground,onUpdate:status=>{progress.textContent=status.waitingUntil?'Gemini 요약 호출 간격 대기 중 · '+fmtDate(status.waitingUntil):'요약 단계 '+(status.stage+1)+' 저장됨 · 기록 '+id;}});
+   if(!summary.complete)throw Error('요약을 일시 중단했습니다: '+summary.reason+' · 기록 '+id+'. 공급자 관측치와 사용량을 확인한 뒤 이력에서 계속하세요.');
+   result=summary.result;
   }
   showReport(result.job,$('#result-content'),result.persisted);progress.textContent='처리 결과를 저장했습니다. 완전 전사·외부 사실 검증 상태는 리포트를 확인하세요.';toast('분석 결과 저장 완료');
  }catch(e){progress.textContent=safeError(e)+' — 완료된 원문과 조각은 이력에 보관됩니다. 불명확한 API 요청은 자동 재시도하지 않습니다.';toast(safeError(e));}finally{button.disabled=false;}

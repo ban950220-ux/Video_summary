@@ -45,6 +45,7 @@ export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,
   return {provider:'groq',model:'whisper-large-v3-turbo',text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION'};
 }
 function base64Audio(bytes){let out='';for(let i=0;i<bytes.length;i+=12288){const slice=bytes.subarray(i,i+12288);out+=btoa(String.fromCharCode(...slice));}return out;}
+function assertGeminiDeadlinesAtFetch(env){if(env.quotaExpiresAt===undefined&&env.capacityValidUntil===undefined)return;if(!Number.isFinite(env.quotaExpiresAt)||env.quotaExpiresAt<=Date.now()||!Number.isFinite(env.capacityValidUntil)||env.capacityValidUntil<=Date.now()){const error=new ProviderError('CAPACITY_WAIT','제공자 관측치 또는 무료 허가가 전송 직전에 만료됐습니다.');error.preDispatchBlocked=true;throw error;}}
 export async function transcribeOwnedAudioWithGemini({bytes,durationSeconds,env,fetchFn=fetch,beforeFetch}){
   assertLive(env,'GEMINI');
   if(!env.GEMINI_API_KEY)throw new ProviderError('KEY_MISSING','Gemini API 키 미설정');
@@ -53,6 +54,7 @@ export async function transcribeOwnedAudioWithGemini({bytes,durationSeconds,env,
   const body={contents:[{role:'user',parts:[{text:prompt},{inlineData:{mimeType:'audio/mp3',data:base64Audio(bytes)}}]}],generationConfig:{temperature:0,responseMimeType:'application/json',maxOutputTokens:8192,thinkingConfig:{thinkingBudget:0}}};
   if(JSON.stringify(body).length>19_000_000)throw new InputError('Gemini 인라인 요청은 20MB 미만이어야 합니다.');
   await beforeFetch?.();
+  assertGeminiDeadlinesAtFetch(env);
   const data=await requestJson('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',{method:'POST',headers:{'x-goog-api-key':env.GEMINI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)},fetchFn);
   const candidate=data.candidates?.[0],raw=candidate?.content?.parts?.map(part=>part.text||'').join('')||'';
   const reviewResult={provider:'gemini',finishReason:candidate?.finishReason??null,partialText:raw.slice(0,12000),durationSeconds};
@@ -73,8 +75,11 @@ export async function summarizeTranscriptWithGemini(text,env,fetchFn=fetch,befor
   const instruction=env.SUMMARY_JSON==='true'?text:`아래 전사문에서만 근거를 찾아 한국어로 정확히 요약하라. 불확실한 숫자/발언은 명시하라. 입력에 없는 인용구를 생성하지 말라. 영어인 경우 한국어로 번역하라.\n\n${text}`;
   const body={contents:[{role:'user',parts:[{text:instruction}]}],generationConfig:{temperature:0.2,maxOutputTokens:env.SUMMARY_STAGE_OUTPUT_TOKENS==='2048'?2048:8192,thinkingConfig:{thinkingBudget:0},...(env.SUMMARY_JSON==='true'?{responseMimeType:'application/json'}:{})}};
   await beforeFetch?.();
+  assertGeminiDeadlinesAtFetch(env);
   const result=await requestJson(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:'POST',headers:{'x-goog-api-key':env.GEMINI_API_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)},fetchFn);
-  return {provider:'gemini',text:result.candidates?.[0]?.content?.parts?.map(x=>x.text||'').join('')||'',usage:result.usageMetadata??null};
+  const candidate=result.candidates?.[0],outputText=candidate?.content?.parts?.map(x=>x.text||'').join('')||'';
+  if(candidate?.finishReason!=='STOP'){const error=new ProviderError('SUMMARY_FINISH_UNVERIFIED','Gemini 요약 응답이 정상적으로 끝나지 않았습니다. 부분 출력을 검토하세요.');error.reviewResult={provider:'gemini',finishReason:candidate?.finishReason??null,partialText:outputText.slice(0,12000)};throw error;}
+  return {provider:'gemini',text:outputText,usage:result.usageMetadata??null};
 }
 
 export async function pollSupadataCaption(jobId,env,fetchFn=fetch){

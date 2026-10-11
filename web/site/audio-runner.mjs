@@ -9,18 +9,22 @@ export function capacityReady(provider,seconds,snapshots,grants,at){
  if(grant.consumed+units>grant.allowance)return false;
  return Object.entries(needed(provider,seconds)).every(([key,value])=>Number.isSafeInteger(snapshot.remaining?.[key])&&Number.isSafeInteger(snapshot.reserved?.[key])&&snapshot.remaining[key]-snapshot.reserved[key]>=value);
 }
-export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,chooseProvider,sendChunk,review429,wait,now=Date.now,onUpdate=()=>{}}){
+export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,chooseProvider,authorizedProviders=()=>['groq','gemini'],sendChunk,review429,wait,now=Date.now,onUpdate=()=>{}}){
  for(const chunk of chunks){
   for(;;){
    const progress=await getProgress(),saved=progress.chunks.find(row=>row.index===chunk.index);
    if(!saved)return {complete:false,reason:'PLAN_MISSING',index:chunk.index};
    if(saved.state==='DONE')break;
    if(saved.uncertainFailure||saved.state==='UNCERTAIN')return {complete:false,reason:'OPERATION_REVIEW_REQUIRED',index:chunk.index};
-   const provider=chooseProvider(chunk,saved);
-   if(!['gemini','groq'].includes(provider))return {complete:false,reason:'PROVIDER_NOT_AUTHORIZED',index:chunk.index};
+   const requested=chooseProvider(chunk,saved),authorized=authorizedProviders(chunk,saved);
+   const candidates=(requested==='auto'?['groq','gemini']:[requested]).filter(provider=>['groq','gemini'].includes(provider)&&authorized.includes(provider)&&(provider!=='groq'||saved.groqAllowed!==false));
+   if(!candidates.length)return {complete:false,reason:'NO_AUTHORIZED_PROVIDER',index:chunk.index};
    const [capacity,quota]=await Promise.all([getCapacity(),getQuota()]);const at=now();
-   if(!capacityReady(provider,chunk.end-chunk.start,capacity.snapshots,quota.grants,at))return {complete:false,reason:'CAPACITY_OR_GRANT_REOBSERVATION_REQUIRED',index:chunk.index};
-   if(progress.operationInFlight?.[provider])return {complete:false,reason:'OPERATION_IN_FLIGHT',index:chunk.index};
+   const ready=candidates.filter(provider=>capacityReady(provider,chunk.end-chunk.start,capacity.snapshots,quota.grants,at));
+   if(!ready.length)return {complete:false,reason:requested==='auto'?'NO_AUTHORIZED_PROVIDER_WITH_VALID_CAPACITY':'CAPACITY_OR_GRANT_REOBSERVATION_REQUIRED',index:chunk.index};
+   const idle=ready.filter(provider=>!progress.operationInFlight?.[provider]);
+   if(!idle.length)return {complete:false,reason:'OPERATION_IN_FLIGHT',index:chunk.index};
+   const provider=idle.find(provider=>!Number.isFinite(progress.nextEligibleAt?.[provider])||progress.nextEligibleAt[provider]<=at)||idle.sort((a,b)=>progress.nextEligibleAt[a]-progress.nextEligibleAt[b])[0];
    const eligible=progress.nextEligibleAt?.[provider];
    if(Number.isFinite(eligible)&&eligible>at){
     const expiry=capacity.snapshots.find(row=>row.provider===provider)?.valid_until;
@@ -36,4 +40,24 @@ export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,ch
   }
  }
  const progress=await getProgress();return {complete:progress.complete===true,reason:progress.complete?'COMPLETE':'COVERAGE_UNVERIFIED'};
+}
+export async function runSummaryStages({getProgress,getCapacity,getQuota,sendSummary,wait,now=Date.now,onUpdate=()=>{}}){
+ for(let stage=0;stage<160;stage++){
+  const [progress,capacity,quota]=await Promise.all([getProgress(),getCapacity(),getQuota()]);const at=now();
+  if(!capacityReady('gemini',0,capacity.snapshots,quota.grants,at))return {complete:false,reason:'GEMINI_SUMMARY_CAPACITY_REOBSERVATION_REQUIRED'};
+  if(progress.operationInFlight?.gemini)return {complete:false,reason:'GEMINI_OPERATION_IN_FLIGHT_REVIEW_REQUIRED'};
+  const eligible=progress.nextEligibleAt?.gemini;
+  if(Number.isFinite(eligible)&&eligible>at){
+   const expiry=capacity.snapshots.find(row=>row.provider==='gemini')?.valid_until;
+   if(eligible>=expiry||eligible-at>13000)return {complete:false,reason:'GEMINI_SUMMARY_WAIT_AND_REOBSERVE',nextEligibleAt:eligible};
+   onUpdate({stage,waitingUntil:eligible});await wait(eligible-at);stage--;continue;
+  }
+  let result;try{result=await sendSummary();}catch(error){
+   if(error?.code==='RATE_LIMIT_PENDING'){const refreshed=await getProgress();if(Number.isFinite(refreshed.nextEligibleAt?.gemini)&&refreshed.nextEligibleAt.gemini>now()){stage--;continue;}return {complete:false,reason:'GEMINI_SUMMARY_RATE_LIMIT_REVIEW_REQUIRED'};}
+   return {complete:false,reason:error?.code||'SUMMARY_OUTCOME_UNKNOWN_REVIEW_REQUIRED'};
+  }
+  if(!result?.pending)return result?.job?.report?.kind==='GEMINI_EVIDENCE_LINKED'?{complete:true,result}:{complete:false,reason:'SUMMARY_RESULT_UNVERIFIED'};
+  onUpdate({stage,stageComplete:true});
+ }
+ return {complete:false,reason:'SUMMARY_STAGE_LIMIT_REACHED'};
 }

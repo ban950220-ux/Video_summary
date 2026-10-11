@@ -28,7 +28,7 @@ test('free-tier gate blocks before decrypting or sending API traffic',async()=>{
 });
 test('Gemini transcript summary uses site-managed key transiently, never browser-visible',async()=>{
   await store('gemini');let apiKey,model;
-  const result=await runTranscriptSummary({env,text:'A documented English subtitle sample.',fetchFn:async(u,opts)=>{model=u;apiKey=opts.headers['x-goog-api-key'];return Response.json({candidates:[{content:{parts:[{text:'한국어 요약(모의 응답)'}]}}],usageMetadata:{promptTokenCount:12,candidatesTokenCount:4}});}});
+  const result=await runTranscriptSummary({env,text:'A documented English subtitle sample.',fetchFn:async(u,opts)=>{model=u;apiKey=opts.headers['x-goog-api-key'];return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'한국어 요약(모의 응답)'}]}}],usageMetadata:{promptTokenCount:12,candidatesTokenCount:4}});}});
   assert.equal(apiKey,mockKey.gemini);
   assert.match(model,/generateContent/);
   assert.equal(result.text,'한국어 요약(모의 응답)');

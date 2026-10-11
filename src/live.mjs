@@ -176,7 +176,7 @@ const audioProvenance=providers=>providers.length===1&&providers[0]==='groq'?'GR
 async function boundedBytes(req,max){const reader=req.body?.getReader();if(!reader)throw new InputError('빈 음성');let size=0;const arrays=[];while(true){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>max){await reader.cancel();throw new InputError('음성 조각은 8MB 이하');}arrays.push(value);}const bytes=new Uint8Array(size);let at=0;for(const arr of arrays){bytes.set(arr,at);at+=arr.length;}return bytes;}
 export async function routeLive(request,env){
  const url=new URL(request.url),path=url.pathname;
- if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-chunk|audio-finish|audio-cleanup)$/.test(path))return null;
+ if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-chunk|audio-finish|audio-cleanup)$/.test(path))return null;
  try{
  if(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path)){await ensureLiveSchema(env);const id=path.split('/').pop();await ownedJob(env,id);for(const table of ['yta_sources','yta_audio'])await env.DB.prepare('DELETE FROM '+table+' WHERE job_id=?').bind(id).run();const waitTable=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='yta_wait'").bind().first();if(waitTable)await env.DB.prepare('DELETE FROM yta_wait WHERE job_id=?').bind(id).run();await env.DB.prepare('UPDATE yta_operations SET result_json=NULL WHERE job_id=?').bind(id).run();await env.DB.prepare('DELETE FROM jobs WHERE id=? AND owner_id=?').bind(id,'owner').run();return json({deleted:true,id});}
   await ensureLiveSchema(env);
@@ -194,7 +194,7 @@ export async function routeLive(request,env){
    if(renewed.meta?.changes!==1){const inserted=await env.DB.prepare('INSERT OR IGNORE INTO yta_quota(provider,allowance,consumed,request_limit,request_count,expires_at,confirmed_at,billing_disabled) VALUES(?,?,0,?,0,?,?,1)').bind(provider,body.allowance,body.requestLimit,now+3600000,now).run();if(inserted.meta?.changes!==1)throw new ProviderError('ACTIVE_GRANT_EXISTS','현재 할당이 유효합니다. 중복 설정으로 사용량을 초기화할 수 없습니다.');}
    return json({configured:true,provider,expiresInSeconds:3600,verification:'OWNER_ATTESTED_NOT_INDEPENDENTLY_VERIFIED'});
   }
-  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-chunk|audio-finish|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
+  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-chunk|audio-finish|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
   const id=match[1],action=match[2],job=await ownedJob(env,id);
   if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id)});
   if(action==='export'&&request.method==='GET'){
@@ -220,6 +220,12 @@ export async function routeLive(request,env){
    const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
    const groups=partitionTranscript(source.segments,job.audit);
    return json({stages:groups.length,firstPassUnits:groups.reduce((sum,group)=>sum+summaryUnits(reportPrompt(group,job.audit)),0),additionalSynthesisUnits:'UNKNOWN_UNTIL_STAGE_OUTPUT',segmentCount:source.segments.length,completeSourceRequired:true});
+  }
+  if(action==='summary-review'&&request.method==='GET'){
+   const operations=(await env.DB.prepare("SELECT id,error_code,result_json FROM yta_operations WHERE job_id=? AND provider='gemini' AND state='FAILED_UNCERTAIN' AND id LIKE ? ORDER BY created_at DESC").bind(id,id+':summary:%').all()).results||[];
+   const reviewed=operations.find(row=>{try{return typeof JSON.parse(row.result_json)?.partialText==='string';}catch{return false;}});
+   if(!reviewed)throw new ProviderError('SUMMARY_REVIEW_NOT_FOUND','보존된 요약 부분 출력이 없습니다.');
+   return json({operationId:reviewed.id,errorCode:reviewed.error_code,...JSON.parse(reviewed.result_json),state:'FAILED_UNCERTAIN'});
   }
   if(action==='summary'&&request.method==='POST'){
    const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
@@ -285,7 +291,7 @@ export async function routeLive(request,env){
    const rows=(await env.DB.prepare('SELECT chunk_index,start_sec,end_sec,state FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];
    const waits=(await env.DB.prepare('SELECT operation_id,reason,reset_at FROM yta_wait WHERE job_id=?').bind(id).all()).results||[];
    const operations=(await env.DB.prepare("SELECT id,provider,state,error_code,created_at FROM yta_operations WHERE job_id=? AND provider IN ('groq','gemini') AND id LIKE ?").bind(id,id+':audio:%').all()).results||[];
-   const chunks=rows.map(c=>{const geminiAttempts=audioAttempts(operations,id,c.chunk_index,'gemini'),groqAttempts=audioAttempts(operations,id,c.chunk_index),latest=[...geminiAttempts,...groqAttempts].sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at)).at(-1),reviewed429Required=c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429';const wait=waits.find(item=>item.operation_id===latest?.id);return {index:c.chunk_index,start:c.start_sec,end:c.end_sec,state:c.state,reviewed429Required,reviewOperationId:reviewed429Required?latest.id:null,reviewProvider:reviewed429Required?latest.provider:null,uncertainFailure:c.state==='UNCERTAIN'||(c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code!=='429'),waitReason:wait?.reason??null,resetAt:wait?.reset_at??null};});
+   const chunks=rows.map(c=>{const geminiAttempts=audioAttempts(operations,id,c.chunk_index,'gemini'),groqAttempts=audioAttempts(operations,id,c.chunk_index),latest=[...geminiAttempts,...groqAttempts].sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at)).at(-1),reviewed429Required=c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429';const wait=waits.find(item=>item.operation_id===latest?.id);const groqAllowed=!geminiAttempts.some(operation=>operation.state!=='BLOCKED'||!['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED','CAPACITY_WAIT'].includes(operation.error_code));return {index:c.chunk_index,start:c.start_sec,end:c.end_sec,state:c.state,groqAllowed,reviewed429Required,reviewOperationId:reviewed429Required?latest.id:null,reviewProvider:reviewed429Required?latest.provider:null,uncertainFailure:c.state==='UNCERTAIN'||(c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code!=='429'),waitReason:wait?.reason??null,resetAt:wait?.reset_at??null};});
    const intervals=chunks.filter(c=>c.state==='DONE').map(c=>({start:c.start,end:c.end}));let covered=0,edge=0;
    for(const range of intervals){covered+=Math.max(0,range.end-Math.max(edge,range.start));edge=Math.max(edge,range.end);}
    let contiguous=0,prefixComplete=true;for(const c of chunks){if(c.state!=='DONE')prefixComplete=false;else if(prefixComplete)contiguous=c.end;}
