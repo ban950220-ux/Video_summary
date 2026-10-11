@@ -60,9 +60,17 @@ function completedAudio(rows,duration){
   edge=row.end_sec;
  }
  if(Math.abs(edge-duration)>2)throw new ProviderError('AUDIO_COVERAGE_INVALID','전체 음성 범위가 확인되지 않았습니다.');
- const merged=mergeAudioSegments(rows.map(row=>({index:row.chunk_index,start:row.start_sec,end:row.end_sec,segments:JSON.parse(row.result_json||'{}').segments})));
- if(merged.missingChunks.length||!merged.segments.length)throw new ProviderError('AUDIO_INCOMPLETE','빈 전사 조각 존재');
- return merged;
+ const hashes=new Set();
+ const chunks=rows.map(row=>{
+  const result=JSON.parse(row.result_json||'{}');
+  if(!Array.isArray(result.segments)||!/^[a-f0-9]{64}$/.test(result.fileSha256||''))throw new ProviderError('AUDIO_INCOMPLETE','조각 전사 또는 파일 지문이 없습니다.');
+  hashes.add(result.fileSha256);
+  return {index:row.chunk_index,start:row.start_sec,end:row.end_sec,segments:result.segments};
+ });
+ if(hashes.size!==1)throw new ProviderError('AUDIO_FILE_MISMATCH','음성 파일 지문이 일치하지 않습니다.');
+ const merged=mergeAudioSegments(chunks);
+ if(merged.missingChunks.length||!merged.segments.length||merged.rejectedSegments.some(item=>item.reason!=='OVERLAP_DUPLICATE'))throw new ProviderError('AUDIO_INCOMPLETE','누락되거나 범위를 벗어난 전사 조각이 있습니다.');
+ return {...merged,fileSha256:[...hashes][0]};
 }
 async function boundedBytes(req,max){const reader=req.body?.getReader();if(!reader)throw new InputError('빈 음성');let size=0;const arrays=[];while(true){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>max){await reader.cancel();throw new InputError('음성 조각은 8MB 이하');}arrays.push(value);}const bytes=new Uint8Array(size);let at=0;for(const arr of arrays){bytes.set(arr,at);at+=arr.length;}return bytes;}
 export async function routeLive(request,env){
@@ -177,19 +185,28 @@ export async function routeLive(request,env){
   }
   if(action==='audio-finish'&&request.method==='POST'){
    const rows=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];
-   if(!rows.length){const source=await sourceOf(env,id);if(source?.provenance==='GROQ_OWNED_AUDIO'&&job.audit?.audioProcessingCoverage===1)return json({job,source,persisted:true,cached:true});}
+   if(!rows.length){const source=await sourceOf(env,id);if(source?.provenance==='GROQ_OWNED_AUDIO'&&job.audit?.audioProcessingCoverage===1&&/^[a-f0-9]{64}$/.test(job.audit?.audioFileSha256||''))return json({job,source,persisted:true,cached:true});}
    const merged=completedAudio(rows,job.duration_seconds);
-   return json(await storeTranscriptResult(env,job,merged.segments,'GROQ_OWNED_AUDIO',{audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,independentVerification:false}));
+   const prior=await sourceOf(env,id);
+   if(prior){
+    if(prior.provenance!=='GROQ_OWNED_AUDIO'||prior.raw!==merged.segments.map(segment=>segment.text).join('\n')||JSON.stringify(prior.segments)!==JSON.stringify(normalizeSegments(merged.segments))||job.audit?.audioFileSha256!==merged.fileSha256||job.audit?.audioProcessingCoverage!==1)throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','기존 전사와 음성 계획이 일치하지 않습니다.');
+    return json({job,source:prior,persisted:true,cached:true});
+   }
+   return json(await storeTranscriptResult(env,job,merged.segments,'GROQ_OWNED_AUDIO',{audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:merged.fileSha256,independentVerification:false}));
   }
   if(action==='audio-cleanup'&&request.method==='POST'){
    const body=await readJson(request);
    if(body.confirmTemporaryTranscriptCleanup!==true)throw new InputError('임시 조각 전사 정리를 별도로 확인하세요.');
    const rows=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];
-   if(!rows.length){const source=await sourceOf(env,id);if(job.audit?.audioProcessingCoverage===1&&source?.provenance==='GROQ_OWNED_AUDIO')return json({cleaned:false,alreadyCleaned:true,job});throw new ProviderError('AUDIO_INCOMPLETE','전체 전사 완료 기록이 없습니다.');}
+   if(!rows.length){const source=await sourceOf(env,id);if(job.audit?.audioProcessingCoverage===1&&/^[a-f0-9]{64}$/.test(job.audit?.audioFileSha256||'')&&source?.provenance==='GROQ_OWNED_AUDIO')return json({cleaned:false,alreadyCleaned:true,job});throw new ProviderError('AUDIO_INCOMPLETE','전체 전사 완료 기록이 없습니다.');}
    if(job.source_type!=='audio'||job.audit?.audioProcessing!=='ALL_PLANNED_CHUNKS_PROCESSED'||job.audit?.audioProcessingCoverage!==1)throw new ProviderError('AUDIO_INCOMPLETE','전체 전사 완료 기록이 없습니다.');
    const merged=completedAudio(rows,job.duration_seconds),expected=normalizeSegments(merged.segments);
    const source=await sourceOf(env,id);
-   if(source?.provenance!=='GROQ_OWNED_AUDIO'||source.raw!==merged.segments.map(segment=>segment.text).join('\n')||JSON.stringify(source.segments)!==JSON.stringify(expected))throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 TXT와 전사 조각의 일치를 확인하지 못했습니다.');
+   if(source?.provenance!=='GROQ_OWNED_AUDIO'||job.audit?.audioFileSha256!==merged.fileSha256||source.raw!==merged.segments.map(segment=>segment.text).join('\n')||JSON.stringify(source.segments)!==JSON.stringify(expected))throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 TXT와 전사 조각의 일치를 확인하지 못했습니다.');
+   const operations=(await env.DB.prepare("SELECT id,state FROM yta_operations WHERE job_id=? AND provider='groq' AND id LIKE ?").bind(id,id+':audio:%').all()).results||[];
+   const completedIds=new Set(operations.filter(operation=>operation.state==='DONE').map(operation=>operation.id));
+   if(operations.length!==rows.length||completedIds.size!==rows.length||rows.some(row=>!completedIds.has(id+':audio:'+row.chunk_index)))throw new ProviderError('AUDIO_OPERATION_UNCERTAIN','음성 처리 기록이 완료 상태인지 확인할 수 없습니다.');
+   await env.DB.prepare("UPDATE yta_operations SET result_json=NULL WHERE job_id=? AND provider='groq' AND state='DONE' AND id LIKE ?").bind(id,id+':audio:%').run();
    await env.DB.prepare('DELETE FROM yta_audio WHERE job_id=?').bind(id).run();
    return json({cleaned:true,job:await ownedJob(env,id),transcriptRetained:true});
   }

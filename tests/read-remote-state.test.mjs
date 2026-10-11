@@ -25,7 +25,7 @@ function fakeApi({status=200,observability=approvedRemoteBaseline.observability,
     else if(path.endsWith('/subdomain'))result={enabled:true,previews_enabled:false};
     else if(path.endsWith('/routes'))result=[];
     else if(path.endsWith('/domains/records'))result=[];
-    else if(path.endsWith('/deployments'))result={deployments:[{versions:[{version_id:approvedRemoteBaseline.activeVersionId,percentage:100}]}]};
+    else if(path.endsWith('/deployments'))result={deployments:[{versions:[{version_id:approvedRemoteBaseline.activeVersionId,percentage:100}],annotations:{'workers/message':'old-deployment'}}]};
     else if(path.endsWith('/script-settings'))result=scriptSettings;
     else throw Error('Unexpected test API path');
     return {ok:true,async json(){return {success:true,result};}};

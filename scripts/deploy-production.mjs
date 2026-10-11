@@ -6,7 +6,7 @@ import {assertProductionBranch} from './production-branch.mjs';
 import {assertRemoteDeploymentBaseline} from './read-remote-state.mjs';
 import {readRemoteState} from './read-remote-state.mjs';
 import {approvedRemoteBaseline,assertRemoteState} from './remote-state-policy.mjs';
-import {deploymentEnvironment,runWranglerSafely} from './deployment-runtime.mjs';
+import {deploymentEnvironment,runWranglerSafely,assertDeployedVersion} from './deployment-runtime.mjs';
 
 const root=resolve(import.meta.dirname,'..');
 assertProductionTarget(readFileSync(resolve(root,'wrangler.toml'),'utf8'),process.env);
@@ -17,12 +17,10 @@ if(!process.env.WORKERS_CI)throw Error('Production deploy requires guarded Worke
 const childEnvironment=deploymentEnvironment(process.env);
 await assertRemoteDeploymentBaseline({token:process.env.CLOUDFLARE_API_TOKEN});
 const wrangler=resolve(root,'node_modules/wrangler/bin/wrangler.js');
-runWranglerSafely(process.execPath,wrangler,root,childEnvironment);
-let deployedVersionId;
+const deployed=runWranglerSafely(process.execPath,wrangler,root,childEnvironment,head);
 for(let i=0;i<2;i++){
   const after=await readRemoteState({token:process.env.CLOUDFLARE_API_TOKEN});
-  if(after.activeVersions?.[0]?.id===approvedRemoteBaseline.activeVersionId)throw Error('Production deploy: POST_DEPLOY_VERSION_UNCHANGED');
-  deployedVersionId??=after.activeVersions?.[0]?.id;
-  assertRemoteState(after,{...approvedRemoteBaseline,activeVersionId:deployedVersionId});
+  assertDeployedVersion(after,deployed);
+  assertRemoteState(after,{...approvedRemoteBaseline,activeVersionId:deployed.versionId});
 }
 console.log('Production deploy completed and remote metadata rechecked. Verify owner-only Access separately.');

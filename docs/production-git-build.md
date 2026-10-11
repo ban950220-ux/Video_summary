@@ -98,8 +98,14 @@ platform logs or unrelated Build commands private; never print raw responses
 or run an unguarded Wrangler deploy.
 
 Two pre-deploy GET rounds and two post-deploy GET rounds narrow and detect drift
-but are not an atomic lock. Another actor could change remote settings after
-the last precheck or replace the just-deployed version before the postcheck.
+but are not an atomic lock. The wrapper reads pinned Wrangler's private
+structured `WRANGLER_OUTPUT_FILE_PATH` deploy result, associates its exact
+version ID with the checked-out commit in a `source-commit:<SHA>` deployment
+message, and requires both that ID and message in the active remote deployment.
+The private output file is removed after parsing; Wrangler's raw stdout and
+stderr remain hidden. Missing output or message is an uncertain deployment,
+not success. Another actor could change remote settings after the last
+precheck or replace the just-deployed version after the postcheck.
 There is no verified compare-and-swap condition in the documented Wrangler path
 used here. A postcheck failure means upload may already have happened; stop and
 inspect the active version and Access policy before any further action. The
@@ -150,7 +156,11 @@ The retained TXT content is `yta_sources.raw`, with timed segments alongside
 it; summary and analysis stay in `jobs`. After every chunk succeeds and
 `audio-finish` saves the full transcript, the owner can separately confirm
 **임시 전사 조각 정리** in the library. The server checks planned time coverage,
-every chunk's result, completion audit, and D1 TXT readback before deleting
-only `yta_audio` rows for that job. Missing/failed chunks or mismatched saved
-text retain the rows for resume and review. This does not delete the PC or
+every chunk's *retained* result, completion audit, matching file hash and D1
+TXT readback before deleting `yta_audio` rows for that job. The duplicate
+Groq result JSON in completed `yta_operations` is cleared too, while the
+operation's `DONE` state and quota ledger remain to prevent duplicate calls.
+Missing/failed chunks, discarded speech or mismatched saved text retain the
+rows for resume and review. Repeating `audio-finish` on an identical completed
+source preserves the existing summary. This does not delete the PC or
 Library original. No production cleanup was run in this branch.

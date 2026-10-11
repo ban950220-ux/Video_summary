@@ -60,10 +60,13 @@ in-memory validation and log only field names and generic pass/fail codes.
 7. Fetch the active version and metadata twice immediately before upload to
    narrow the time-of-check gap. Any mismatch, API error, non-JSON response or
    insufficient token scope stops before Wrangler runs.
-8. Read the remote metadata twice after upload. A mismatch then is a failed
-   verification of a possibly completed deployment, not proof that no upload
-   happened. These reads do not atomically lock remote settings or establish
-   that a changed active version came solely from this process.
+8. Read pinned Wrangler's private structured deploy result to obtain the
+   exact uploaded version ID. The deployment message records the checked-out
+   source SHA. Require the post-deploy active version and message to match
+   both values on two reads. If the structured result or message is absent,
+   report uncertain deployment even if Wrangler exits zero. A mismatch is a
+   failed verification of a possibly completed deployment, not proof that no
+   upload happened. These reads do not atomically lock remote settings.
 
 The full active version ID has been independently supplied. Log persistence,
 invocation logs, 100% sampling, and disabled traces/Issues/exports are also

@@ -33,6 +33,7 @@ export async function readRemoteState({token,fetcher=fetch}={}){
   return {
     workerName,environment,
     activeVersions:latest.versions.map(version=>({id:version.version_id,percentage:version.percentage})),
+    deploymentMessage:latest.annotations?.['workers/message'],
     workersDev:subdomain?.enabled,previewUrls:subdomain?.previews_enabled,
     routes,domains,
     compatibilityDate:metadata?.script?.compatibility_date,
