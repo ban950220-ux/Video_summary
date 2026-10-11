@@ -95,6 +95,8 @@ test('owner-reviewed Groq 429 recovery preserves failed history, completed chunk
   assert.equal((await upload(path,1,true)).status,409);assert.equal(calls,2); // Expired grant still blocks even with confirmation.
   assert.equal((await grantGroq()).status,200);
   const denied=await upload(path,1);assert.equal((await denied.json()).error.code,'PROVIDER_429_REVIEW_REQUIRED');assert.equal(calls,2);
+  const cooling=await upload(path,1,true);assert.equal((await cooling.json()).error.code,'GROQ_COOLDOWN_PENDING');assert.equal(calls,2);
+  db.prepare("UPDATE yta_operations SET created_at=? WHERE provider='groq' AND error_code='429'").run(new Date(Date.now()-3601000).toISOString());
   assert.equal((await upload(path,1,true)).status,200);assert.equal(calls,3);
   const original=db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(id+':audio:1');assert.equal(original.state,'FAILED_UNCERTAIN');assert.equal(original.error_code,'429');assert.equal(original.result_json,null);
   assert.equal(db.prepare('SELECT state FROM yta_operations WHERE id=?').get(id+':audio:1:reviewed429:1').state,'DONE');
@@ -107,6 +109,14 @@ test('unknown Groq failure cannot use the 429 recovery confirmation',async()=>{
  globalThis.fetch=async()=>{calls++;throw Error('network outcome unknown');};
  try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),id=created.job.id,path='/api/jobs/'+id;await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'b'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);await routeApi(request('/api/live/quota','PUT',{provider:'groq',allowance:100,requestLimit:5,billingDisabled:true,freeOnly:true}),env);const upload=()=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream','x-provider-log-429-no-output-confirmed':'true'},body:bytes}),env);assert.equal((await upload()).status,500);assert.equal((await(await upload()).json()).error.code,'OPERATION_REVIEW_REQUIRED');assert.equal(calls,1);assert.equal(db.prepare('SELECT COUNT(*) n FROM yta_operations').get().n,1);}finally{globalThis.fetch=old;db.close();}
 });
+test('Groq app-only rolling hourly reservations stop before a provider request',async()=>{
+ const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);env.GROQ_API_KEY='NOT_REAL_TEST_KEY';for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);const seconds=scanMp3(bytes).durationSeconds;let calls=0;
+ globalThis.fetch=async()=>{calls++;return Response.json({text:'전사',segments:[{start:1,end:2,text:'재개'}]});};
+ try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),id=created.job.id,path='/api/jobs/'+id;await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'c'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);await routeApi(request('/api/live/quota','PUT',{provider:'groq',allowance:100,requestLimit:5,billingDisabled:true,freeOnly:true}),env);db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').run('other-job-reservation',id,'groq',6495,'DONE',new Date().toISOString());const upload=()=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},body:bytes}),env);const blocked=await upload();assert.equal((await blocked.json()).error.code,'GROQ_HOURLY_APP_LIMIT');assert.equal(calls,0);db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run(new Date(Date.now()-3601000).toISOString(),'other-job-reservation');assert.equal((await upload()).status,200);assert.equal(calls,1);}finally{globalThis.fetch=old;db.close();}
+});
+test.todo('provider-observed fresh account-wide hourly, daily, request and token remaining gates each audio dispatch');
+test.todo('unknown or stale provider remaining, overlap overhead, and external activity persist a pause until observed reset');
+test.todo('approved alternate audio provider preserves chunk provenance and blocks duplicate or uncertain cross-provider attempts');
 test('temporary audio results need completed coverage, durable TXT readback and separate confirmation before cleanup',async()=>{
  const {db,env}=setup();try{
   const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:120}),env)).json();

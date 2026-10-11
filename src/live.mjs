@@ -26,6 +26,8 @@ async function grantEnv(env,provider){
 }
 const GEMINI_SPACING_MS=13_000; // Conservatively space starts from the previous settled request.
 const GEMINI_STALE_CLAIM_MS=300_000;
+const GROQ_HOURLY_WINDOW_MS=3_600_000;
+const GROQ_APP_HOURLY_CAP_SECONDS=6_500; // Below the observed 7,200-second provider limit; app-only reservations.
 async function execute(env,{id,job,provider,units},fn,onNewCall){
  const prior=await env.DB.prepare('SELECT * FROM yta_operations WHERE id=?').bind(id).first();
  if(prior?.state==='DONE')return JSON.parse(prior.result_json);
@@ -33,17 +35,29 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
  const active=await grantEnv(env,provider);
  // Atomic unique claim and atomic quota decrement: concurrent calls cannot overspend this app's grant.
  const now=new Date().toISOString(),cutoff=new Date(Date.now()-GEMINI_SPACING_MS).toISOString();
+ const groqCutoff=new Date(Date.now()-GROQ_HOURLY_WINDOW_MS).toISOString();
  // CLAIMED remains blocking regardless of age: key resolution and network dispatch can be delayed.
  // Settled operations use created_at as their last state-transition timestamp for conservative pacing.
  const recent="SELECT state,created_at FROM yta_operations WHERE provider='gemini' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?)) ORDER BY CASE WHEN state='CLAIMED' THEN 0 ELSE 1 END LIMIT 1";
+ const groqPermit="NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider='groq' AND state='FAILED_UNCERTAIN' AND error_code='429' AND created_at>?) AND COALESCE((SELECT SUM(units) FROM yta_operations WHERE provider='groq' AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>?),0)+?<=?";
  const claim=prior
   ?provider==='gemini'
    ?await env.DB.prepare(`UPDATE yta_operations SET state=?,error_code=NULL,created_at=? WHERE id=? AND state=? AND error_code=? AND NOT EXISTS (${recent})`).bind('CLAIMED',now,id,'BLOCKED','QUOTA_EXHAUSTED',cutoff).run()
+   :provider==='groq'
+    ?await env.DB.prepare(`UPDATE yta_operations SET state=?,error_code=NULL,created_at=? WHERE id=? AND state=? AND error_code=? AND ${groqPermit}`).bind('CLAIMED',now,id,'BLOCKED','QUOTA_EXHAUSTED',groqCutoff,groqCutoff,units,GROQ_APP_HOURLY_CAP_SECONDS).run()
    :await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=NULL WHERE id=? AND state=? AND error_code=?').bind('CLAIMED',id,'BLOCKED','QUOTA_EXHAUSTED').run()
   :provider==='gemini'
    ?await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (${recent})`).bind(id,job,provider,units,'CLAIMED',now,cutoff).run()
+   :provider==='groq'
+    ?await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,?,?,?,? WHERE ${groqPermit}`).bind(id,job,provider,units,'CLAIMED',now,groqCutoff,groqCutoff,units,GROQ_APP_HOURLY_CAP_SECONDS).run()
    :await env.DB.prepare('INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').bind(id,job,provider,units,'CLAIMED',now).run();
  if(claim.meta?.changes!==1){
+  if(provider==='groq'){
+   const recent429=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='FAILED_UNCERTAIN' AND error_code='429' AND created_at>? LIMIT 1").bind(groqCutoff).first();
+   if(recent429)throw new ProviderError('GROQ_COOLDOWN_PENDING','Groq 429 이후 최소 1시간 대기 중입니다. 공식 요청 로그와 무료 한도를 다시 확인하세요.');
+   const spent=await env.DB.prepare("SELECT COALESCE(SUM(units),0) AS units FROM yta_operations WHERE provider='groq' AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>?").bind(groqCutoff).first();
+   if(Number(spent?.units||0)+units>GROQ_APP_HOURLY_CAP_SECONDS)throw new ProviderError('GROQ_HOURLY_APP_LIMIT','앱이 기록한 최근 1시간 음성 예약 상한에 도달했습니다. 제공자 계정의 실제 잔여량은 별도로 확인하세요.');
+  }
   const blocking=provider==='gemini'?await env.DB.prepare(recent).bind(cutoff).first():null;
   if(blocking?.state==='CLAIMED'){
    if(!Number.isFinite(Date.parse(blocking.created_at))||Date.now()-Date.parse(blocking.created_at)>GEMINI_STALE_CLAIM_MS)throw new ProviderError('OPERATION_REVIEW_REQUIRED','이전 요약 호출의 완료 여부가 불명확합니다. 사용량과 작업 기록을 확인한 뒤 진행하세요.');
