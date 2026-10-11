@@ -166,6 +166,7 @@ function audioAttempts(operations,jobId,index,provider='groq'){
  return operations.filter(operation=>operation.provider===provider).map(operation=>{
   if(provider==='groq'&&operation.id===base)return {operation,attempt:0};
   if(provider==='groq'&&operation.id===base+':reviewed404:1')return {operation,attempt:1000};
+  if(provider==='groq'&&operation.id===base+':freebatch:1')return {operation,attempt:2000};
   const prefix=provider==='groq'?base+':reviewed429:':base+':gemini:';
   const suffix=operation.id?.startsWith(prefix)?operation.id.slice(prefix.length):'';
   if(provider==='gemini'){
@@ -250,11 +251,77 @@ async function executeGroqProbe(env,{jobId,index,operationId,units,probe,bytes})
   throw error;
  }
 }
+async function ensureFreeBatchSchema(env){
+ const rows=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('yta_free_batches','yta_free_batch_chunks')").bind().all()).results||[];
+ if(rows.length!==2||typeof env.DB.batch!=='function')throw new ProviderError('FREE_BATCH_SCHEMA_REQUIRED','제한형 무료 배치 테이블과 원자적 저장이 필요합니다.');
+}
+async function freeBatchPlan(env,job){
+ if(job.source_type!=='audio'||!Number.isFinite(job.duration_seconds)||job.duration_seconds<=0)throw new ProviderError('FREE_BATCH_PLAN_INVALID','보유 음성 계획을 확인하세요.');
+ const rows=(await env.DB.prepare('SELECT chunk_index,start_sec,end_sec,state,result_json FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(job.id).all()).results||[];
+ if(!rows.length||rows.length>160)throw new ProviderError('FREE_BATCH_PLAN_INVALID','전체 조각 계획을 확인하세요.');
+ let edge=0,fileSha256=null;
+ for(let i=0;i<rows.length;i++){
+  const row=rows[i];let stored;try{stored=JSON.parse(row.result_json);}catch{throw new ProviderError('FREE_BATCH_PLAN_INVALID','조각의 원본 파일 기록을 확인하세요.');}
+  if(row.chunk_index!==i||!['DONE','PLANNED'].includes(row.state)||!Number.isFinite(row.start_sec)||!Number.isFinite(row.end_sec)||row.start_sec<Math.max(0,edge-5)||row.start_sec>edge+.01||row.end_sec<=row.start_sec||(i>0&&row.end_sec<=edge)||row.end_sec-row.start_sec>601||row.end_sec>job.duration_seconds+2||!(/^[a-f0-9]{64}$/.test(stored?.fileSha256??''))||(fileSha256&&stored.fileSha256!==fileSha256))throw new ProviderError('FREE_BATCH_PLAN_INVALID','전체 조각·파일 지문·완료 상태가 일치하지 않습니다.');
+  fileSha256=stored.fileSha256;edge=Math.max(edge,row.end_sec);
+ }
+ if(Math.abs(edge-job.duration_seconds)>2)throw new ProviderError('FREE_BATCH_PLAN_INVALID','전체 음성 시간축을 확인하세요.');
+ const planned=rows.filter(row=>row.state==='PLANNED');
+ if(!planned.length)throw new ProviderError('FREE_BATCH_NOT_NEEDED','남은 계획 조각이 없습니다.');
+ for(const row of planned){const operationBase=job.id+':audio:'+row.chunk_index,prior=await env.DB.prepare('SELECT 1 FROM yta_operations WHERE job_id=? AND (id=? OR id LIKE ?) LIMIT 1').bind(job.id,operationBase,operationBase+':%').first();if(prior)throw new ProviderError('FREE_BATCH_PLAN_INVALID','남은 조각의 기존 요청을 먼저 검토하세요.');}
+ const chunkIds=planned.map(row=>row.chunk_index),units=planned.map(row=>Math.max(10,Math.ceil(row.end_sec-row.start_sec)));
+ const maxAudioSeconds=units.reduce((sum,value)=>sum+value,0);
+ if(maxAudioSeconds>GROQ_APP_DAILY_CAP_SECONDS)throw new ProviderError('FREE_BATCH_PLAN_INVALID','요청 총량이 앱 일일 상한을 넘습니다.');
+ return {jobId:job.id,fileSha256,model:'whisper-large-v3-turbo',chunkIds,maxRequests:chunkIds.length,maxAudioSeconds,units,accountRemaining:'UNKNOWN',automaticDispatch:false,summaryIncluded:false};
+}
+async function assertFreeBatchReady(env,{jobId,index,operationId,keyIdentity,expiresAt,units,chunkIdsJson}){
+ const blocked=()=>{const error=new ProviderError('FREE_BATCH_REVIEW_REQUIRED','배치 승인·키·조각 또는 만료 상태가 바뀌었습니다.');error.preDispatchBlocked=true;throw error;};
+ if(env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true'||expiresAt<=Date.now())blocked();
+ const batch=await env.DB.prepare('SELECT * FROM yta_free_batches WHERE job_id=?').bind(jobId).first();
+ const row=await env.DB.prepare('SELECT state,units,operation_id FROM yta_free_batch_chunks WHERE job_id=? AND chunk_index=?').bind(jobId,index).first();
+ const audio=await env.DB.prepare('SELECT state,result_json FROM yta_audio WHERE job_id=? AND chunk_index=?').bind(jobId,index).first();
+ const op=await env.DB.prepare('SELECT state,provider,units FROM yta_operations WHERE id=? AND job_id=?').bind(operationId,jobId).first();
+ let stored;try{stored=JSON.parse(audio?.result_json);}catch{blocked();}
+ let ids;try{ids=JSON.parse(batch?.chunk_ids_json);}catch{blocked();}
+ const scopeRows=(await env.DB.prepare('SELECT chunk_index,units,state FROM yta_free_batch_chunks WHERE job_id=? ORDER BY chunk_index').bind(jobId).all()).results||[];
+ if(batch?.owner_id!=='owner'||batch.state!=='APPROVED'||batch.model!=='whisper-large-v3-turbo'||batch.free_tier_confirmed!==1||batch.billing_disabled!==1||batch.key_identity!==keyIdentity||batch.expires_at!==expiresAt||batch.chunk_ids_json!==chunkIdsJson||!Array.isArray(ids)||JSON.stringify(ids)!==JSON.stringify(scopeRows.map(item=>item.chunk_index))||scopeRows.some(item=>!Number.isSafeInteger(item.units)||item.units<10||item.units>601||!['APPROVED','CLAIMED','DONE'].includes(item.state))||scopeRows.length!==batch.max_requests||scopeRows.reduce((sum,item)=>sum+item.units,0)!==batch.max_audio_seconds||!ids.includes(index)||row?.state!=='CLAIMED'||row.units!==units||row.operation_id!==operationId||audio?.state!=='CLAIMED'||stored?.fileSha256!==batch.file_sha256||op?.state!=='CLAIMED'||op.provider!=='groq'||op.units!==units||await capacityIdentity(env,'groq')!==keyIdentity)blocked();
+ await validateGroqProbeLedger(env);
+ const cutoff=new Date(Date.now()-GROQ_HOURLY_WINDOW_MS).toISOString();
+ const other=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='CLAIMED' AND id<>? LIMIT 1").bind(operationId).first();
+ const cooldown=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='FAILED_UNCERTAIN' AND error_code='429' AND created_at>? LIMIT 1").bind(cutoff).first();
+ const used=await env.DB.prepare("SELECT COALESCE(SUM(units),0) AS units FROM yta_operations WHERE provider='groq' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?))").bind(cutoff).first();
+ const daily=await env.DB.prepare("SELECT COALESCE(SUM(units),0) AS units FROM yta_operations WHERE provider='groq' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?))").bind(new Date(Date.now()-86_400_000).toISOString()).first();
+ if(other||cooldown||Number(used?.units||0)>GROQ_APP_HOURLY_CAP_SECONDS||Number(daily?.units||0)>GROQ_APP_DAILY_CAP_SECONDS)blocked();
+ let final;try{final=await env.DB.prepare("SELECT 1 AS ok FROM yta_free_batches b JOIN yta_free_batch_chunks c ON c.job_id=b.job_id JOIN yta_audio a ON a.job_id=c.job_id AND a.chunk_index=c.chunk_index JOIN yta_operations o ON o.id=c.operation_id AND o.job_id=b.job_id WHERE b.job_id=? AND b.owner_id='owner' AND b.state='APPROVED' AND b.model='whisper-large-v3-turbo' AND b.free_tier_confirmed=1 AND b.billing_disabled=1 AND b.max_requests=(SELECT COUNT(*) FROM yta_free_batch_chunks WHERE job_id=b.job_id) AND b.max_audio_seconds=(SELECT COALESCE(SUM(units),0) FROM yta_free_batch_chunks WHERE job_id=b.job_id) AND b.file_sha256=json_extract(a.result_json,'$.fileSha256') AND b.chunk_ids_json=? AND b.key_identity=? AND b.expires_at=? AND c.chunk_index=? AND c.state='CLAIMED' AND c.units=? AND c.operation_id=? AND a.state='CLAIMED' AND o.state='CLAIMED'").bind(jobId,chunkIdsJson,keyIdentity,expiresAt,index,units,operationId).first();}catch{blocked();}
+ if(!final||Date.now()>=expiresAt||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')blocked();
+}
+async function executeFreeBatchChunk(env,{jobId,index,operationId,units,batch,bytes,duration}){
+ await validateGroqProbeLedger(env);
+ const now=new Date().toISOString(),cutoff=new Date(Date.now()-GROQ_HOURLY_WINDOW_MS).toISOString(),dailyCutoff=new Date(Date.now()-86_400_000).toISOString(),minuteCutoff=new Date(Date.now()-60_000).toISOString();
+ const prior=await env.DB.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').bind(operationId).first();
+ if(prior&&!(prior.state==='BLOCKED'&&prior.error_code==='FREE_BATCH_PRE_DISPATCH_BLOCKED'))throw new ProviderError('OPERATION_REVIEW_REQUIRED','기존 전송 기록을 검토하세요.');
+ const claim=prior?await env.DB.prepare(`UPDATE yta_operations SET state='CLAIMED',error_code=NULL,created_at=? WHERE id=? AND state='BLOCKED' AND error_code='FREE_BATCH_PRE_DISPATCH_BLOCKED' AND ${groqProbePermit}`).bind(now,operationId,cutoff,cutoff,units,GROQ_APP_HOURLY_CAP_SECONDS,dailyCutoff,units,GROQ_APP_DAILY_CAP_SECONDS,minuteCutoff).run():await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,'groq',?,'CLAIMED',? WHERE ${groqProbePermit}`).bind(operationId,jobId,units,now,cutoff,cutoff,units,GROQ_APP_HOURLY_CAP_SECONDS,dailyCutoff,units,GROQ_APP_DAILY_CAP_SECONDS,minuteCutoff).run();
+ if(claim.meta?.changes!==1)throw new ProviderError('FREE_BATCH_LOCAL_LIMIT','진행 중 요청, 429 대기 또는 앱 사용 상한을 확인하세요.');
+ const active={...env,GROQ_FREE_PLAN_CONFIRMED:'true'};
+ try{
+  const guard=()=>assertFreeBatchReady(env,{jobId,index,operationId,keyIdentity:batch.key_identity,expiresAt:batch.expires_at,units,chunkIdsJson:batch.chunk_ids_json});
+  await guard();
+  const result=await runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:guard,beforeFetch:guard});
+  if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','빈 전사는 완료로 기록하지 않습니다. 결과를 검토하세요.');
+  await env.DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),jobId,'owner','groq','LIVE_FREE_BATCH','audio_seconds',units,0,null,'APP_RESERVED_ACCOUNT_CAPACITY_UNKNOWN',new Date().toISOString()).run();
+  await env.DB.prepare("UPDATE yta_operations SET state='DONE',result_json=?,created_at=? WHERE id=? AND state='CLAIMED'").bind(JSON.stringify(result),new Date().toISOString(),operationId).run();
+  return result;
+ }catch(error){
+  const blocked=error.preDispatchBlocked===true;
+  await env.DB.prepare("UPDATE yta_operations SET state=?,error_code=?,created_at=? WHERE id=? AND state='CLAIMED'").bind(blocked?'BLOCKED':'FAILED_UNCERTAIN',blocked?'FREE_BATCH_PRE_DISPATCH_BLOCKED':String(error.code||'PROCESSING_FAILED'),new Date().toISOString(),operationId).run();
+  throw error;
+ }
+}
 export async function routeLive(request,env){
  const url=new URL(request.url),path=url.pathname;
- if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-chunk|audio-finish|audio-cleanup)$/.test(path))return null;
+ if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-cleanup)$/.test(path))return null;
  try{
- if(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path)){await ensureLiveSchema(env);const id=path.split('/').pop();await ownedJob(env,id);for(const table of ['yta_sources','yta_audio'])await env.DB.prepare('DELETE FROM '+table+' WHERE job_id=?').bind(id).run();for(const table of ['yta_wait','yta_free_recovery','yta_free_probe']){const exists=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").bind(table).first();if(exists)await env.DB.prepare('DELETE FROM '+table+' WHERE job_id=?').bind(id).run();}await env.DB.prepare('UPDATE yta_operations SET result_json=NULL WHERE job_id=?').bind(id).run();await env.DB.prepare('DELETE FROM jobs WHERE id=? AND owner_id=?').bind(id,'owner').run();return json({deleted:true,id});}
+ if(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path)){await ensureLiveSchema(env);const id=path.split('/').pop();await ownedJob(env,id);for(const table of ['yta_sources','yta_audio'])await env.DB.prepare('DELETE FROM '+table+' WHERE job_id=?').bind(id).run();for(const table of ['yta_wait','yta_free_recovery','yta_free_probe','yta_free_batch_chunks','yta_free_batches']){const exists=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").bind(table).first();if(exists)await env.DB.prepare('DELETE FROM '+table+' WHERE job_id=?').bind(id).run();}await env.DB.prepare('UPDATE yta_operations SET result_json=NULL WHERE job_id=?').bind(id).run();await env.DB.prepare('DELETE FROM jobs WHERE id=? AND owner_id=?').bind(id,'owner').run();return json({deleted:true,id});}
   await ensureLiveSchema(env);
   if(path==='/api/live/capacity'&&request.method==='PUT')return json(await recordCapacity(env,await readJson(request)));
   if(path==='/api/live/capacity'&&request.method==='GET'){await ensureCapacitySchema(env);const snapshots=(await env.DB.prepare('SELECT provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json FROM yta_capacity').bind().all()).results||[];return json({snapshots:await Promise.all(snapshots.map(async row=>({...row,source:row.source.split(':')[0],valid_until:await capacityIdentityMatches(env,row.provider,row.source)?row.valid_until:0,reset:JSON.parse(row.reset_json),remaining:JSON.parse(row.remaining_json),reserved:JSON.parse(row.reserved_json),reset_json:undefined,remaining_json:undefined,reserved_json:undefined})))});}
@@ -270,7 +337,7 @@ export async function routeLive(request,env){
    if(renewed.meta?.changes!==1){const inserted=await env.DB.prepare('INSERT OR IGNORE INTO yta_quota(provider,allowance,consumed,request_limit,request_count,expires_at,confirmed_at,billing_disabled) VALUES(?,?,0,?,0,?,?,1)').bind(provider,body.allowance,body.requestLimit,now+3600000,now).run();if(inserted.meta?.changes!==1)throw new ProviderError('ACTIVE_GRANT_EXISTS','현재 할당이 유효합니다. 중복 설정으로 사용량을 초기화할 수 없습니다.');}
    return json({configured:true,provider,expiresInSeconds:3600,verification:'OWNER_ATTESTED_NOT_INDEPENDENTLY_VERIFIED'});
   }
-  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-chunk|audio-finish|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
+  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
   const id=match[1],action=match[2],job=await ownedJob(env,id);
   if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id)});
   if(action==='export'&&request.method==='GET'){
@@ -400,6 +467,27 @@ export async function routeLive(request,env){
    if(inserted.meta?.changes!==1)throw new ProviderError('PROBE_ALREADY_RECORDED','탐침 승인은 다시 발급하거나 초기화할 수 없습니다.');
    return json({approved:true,index,provider:'groq',model:'whisper-large-v3-turbo',accountCapacity:'UNKNOWN',fullQuotaRestored:false,oneRequestOnly:true,expiresAt:now+3600000,automaticDispatch:false});
   }
+  if(action==='audio-free-batch'&&request.method==='GET'){
+   await ensureFreeBatchSchema(env);
+   const existing=await env.DB.prepare('SELECT job_id,file_sha256,model,chunk_ids_json,max_requests,max_audio_seconds,state,expires_at,stop_reason,retry_after_at FROM yta_free_batches WHERE job_id=? AND owner_id=?').bind(id,'owner').first();
+   if(existing){let chunkIds;try{chunkIds=JSON.parse(existing.chunk_ids_json);if(!Array.isArray(chunkIds))throw Error();}catch{throw new ProviderError('FREE_BATCH_LEDGER_INVALID','저장된 배치 범위를 검토하세요.');}
+    return json({approved:true,jobId:id,fileSha256:existing.file_sha256,model:existing.model,chunkIds,maxRequests:existing.max_requests,maxAudioSeconds:existing.max_audio_seconds,state:existing.state,expiresAt:existing.expires_at,stopReason:existing.stop_reason,retryAfterAt:existing.retry_after_at,accountRemaining:'UNKNOWN',summaryIncluded:false});}
+   return json({approved:false,...await freeBatchPlan(env,job),expiresInSeconds:3600});
+  }
+  if(action==='audio-free-batch'&&request.method==='POST'){
+   await ensureFreeBatchSchema(env);
+   const body=await readJson(request),plan=await freeBatchPlan(env,job);
+   if(env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true'||body?.provider!=='groq'||body.model!==plan.model||body.jobId!==id||body.fileSha256!==plan.fileSha256||JSON.stringify(body.chunkIds)!==JSON.stringify(plan.chunkIds)||body.maxRequests!==plan.maxRequests||body.maxAudioSeconds!==plan.maxAudioSeconds||body.freeTierConfirmed!==true||body.billingDisabled!==true||body.unknownCapacityAcknowledged!==true||body.oneBatchOnly!==true||body.noPaidFallback!==true||body.stopOnFirstError!==true||body.stopBeforeSummary!==true)throw new InputError('정확한 원본·조각·Groq Free 배치 상한과 중단 조건을 확인하세요.');
+   const keyIdentity=await capacityIdentity(env,'groq'),now=Date.now(),expiresAt=now+3600000;
+   const statements=[env.DB.prepare('INSERT INTO yta_free_batches(job_id,owner_id,file_sha256,key_identity,model,chunk_ids_json,max_requests,max_audio_seconds,free_tier_confirmed,billing_disabled,state,approved_at,expires_at) VALUES(?,?,?,?,?,?,?,?,1,1,?,?,?)').bind(id,'owner',plan.fileSha256,keyIdentity,plan.model,JSON.stringify(plan.chunkIds),plan.maxRequests,plan.maxAudioSeconds,'APPROVED',new Date(now).toISOString(),expiresAt),...plan.chunkIds.map((index,i)=>env.DB.prepare('INSERT INTO yta_free_batch_chunks(job_id,chunk_index,units,state,operation_id) VALUES(?,?,?,?,?)').bind(id,index,plan.units[i],'APPROVED',id+':audio:'+index+':freebatch:1'))];
+   try{await env.DB.batch(statements);}catch{throw new ProviderError('FREE_BATCH_ALREADY_RECORDED','배치 승인은 자동 갱신하거나 덮어쓸 수 없습니다.');}
+   return json({approved:true,jobId:id,fileSha256:plan.fileSha256,model:plan.model,chunkIds:plan.chunkIds,maxRequests:plan.maxRequests,maxAudioSeconds:plan.maxAudioSeconds,state:'APPROVED',expiresAt,accountRemaining:'UNKNOWN',automaticDispatch:false,summaryIncluded:false});
+  }
+  if(action==='audio-free-batch'&&request.method==='DELETE'){
+   await ensureFreeBatchSchema(env);
+   const stopped=await env.DB.prepare("UPDATE yta_free_batches SET state='CANCELLED' WHERE job_id=? AND owner_id=? AND state='APPROVED'").bind(id,'owner').run();
+   return json({cancelled:stopped.meta?.changes===1,accountRemaining:'UNKNOWN'});
+  }
   if(action==='audio-progress'&&request.method==='GET'){
    const rows=(await env.DB.prepare('SELECT chunk_index,start_sec,end_sec,state FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];
    const waits=(await env.DB.prepare('SELECT operation_id,reason,reset_at FROM yta_wait WHERE job_id=?').bind(id).all()).results||[];
@@ -429,6 +517,8 @@ export async function routeLive(request,env){
    const chunk=await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? AND chunk_index=?').bind(id,index).first();if(!chunk)throw new InputError('음성 조각 계획부터 저장하세요.');
    if(chunk.state==='DONE')return json({index,state:'DONE',cached:true});
    const useProbe=request.headers.get('x-groq-free-unknown-probe')==='true';
+   const useBatch=request.headers.get('x-groq-free-batch')==='true';
+   if(useBatch){await ensureFreeBatchSchema(env);if(provider!=='groq'||useProbe||!['PLANNED','PAUSED'].includes(chunk.state))throw new ProviderError('FREE_BATCH_REVIEW_REQUIRED','배치는 승인된 미처리 Groq 조각에만 허용됩니다.');}
    let recovery=null;
    if(chunk.state==='UNCERTAIN'){
     if(provider!=='groq')throw new ProviderError('OPERATION_REVIEW_REQUIRED','미확정 Gemini 시도는 자동 재시도할 수 없습니다.');
@@ -438,6 +528,7 @@ export async function routeLive(request,env){
     if(!recovery||recovery.file_sha256!==evidence.fileSha256||recovery.gemini_operation_id!==evidence.geminiOperationId||recovery.groq_429_operation_id!==evidence.groq429OperationId||recovery.retry_operation_id!==evidence.retryOperationId)throw new ProviderError('OPERATION_REVIEW_REQUIRED','이 조각의 정확한 실패 이력에 대한 소유자 승인이 필요합니다.');
    }
    if(useProbe&&!recovery)throw new ProviderError('PROBE_REVIEW_REQUIRED','무료 탐침은 승인된 미확정 조각에만 허용됩니다.');
+   if(useBatch&&recovery)throw new ProviderError('FREE_BATCH_REVIEW_REQUIRED','미확정 복구는 제한형 신규 조각 배치에 포함되지 않습니다.');
    let probe=null;
    if(useProbe){await ensureFreeProbeSchema(env);probe=await env.DB.prepare("SELECT * FROM yta_free_probe WHERE job_id=? AND chunk_index=? AND state='APPROVED'").bind(id,index).first();if(!probe||probe.retry_operation_id!==recovery.retry_operation_id||probe.file_sha256!==recovery.file_sha256||probe.expires_at<=Date.now()||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true'||await capacityIdentity(env,'groq')!==probe.key_identity)throw new ProviderError('PROBE_REVIEW_REQUIRED','현재 Groq Free 키의 유효한 1회 탐침 승인이 필요합니다.');}
    if(provider==='gemini'&&JSON.parse(chunk.result_json||'{}').geminiConsent!==1)throw new ProviderError('AUDIO_GEMINI_CONSENT_REQUIRED','이 작업과 원본 MP3에 대한 Gemini 음성 전송 동의를 저장하세요.');
@@ -448,7 +539,7 @@ export async function routeLive(request,env){
    let metadata;try{metadata=prepareMp3Chunk(bytes);}catch(error){throw new InputError('MP3 조각 메타데이터를 검증할 수 없습니다: '+error.message);}
    if(metadata.metadataCorrected)throw new InputError('MP3 전체 파일 길이 메타데이터가 조각에 남아 있습니다.');
    if(Math.abs(plannedDuration-duration)>.005)throw new InputError('음성 조각 길이와 계획이 다릅니다.');
-   const base=id+':audio:'+index,operations=(await env.DB.prepare("SELECT id,provider,state,error_code,created_at FROM yta_operations WHERE job_id=? AND provider IN ('groq','gemini') AND id LIKE ?").bind(id,base+'%').all()).results||[];
+   const base=id+':audio:'+index,operations=(await env.DB.prepare("SELECT id,provider,state,error_code,created_at FROM yta_operations WHERE job_id=? AND provider IN ('groq','gemini') AND (id=? OR id LIKE ?)").bind(id,base,base+':%').all()).results||[];
    const groqAttempts=audioAttempts(operations,id,index,'groq'),geminiAttempts=audioAttempts(operations,id,index,'gemini');
    const latest=[...geminiAttempts,...groqAttempts].sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at)).at(-1);
    if(latest?.state==='CLAIMED')throw new ProviderError('OPERATION_IN_FLIGHT','이 조각의 호출이 진행 중입니다.');
@@ -457,19 +548,29 @@ export async function routeLive(request,env){
     if(!recovery&&(request.headers.get('x-provider-log-429-no-output-confirmed')!=='true'||request.headers.get('x-provider-log-429-operation-id')!==latest.id))throw new ProviderError('PROVIDER_429_REVIEW_REQUIRED','현재 실패 작업의 공식 제공자 요청 로그에서 429 거절과 출력 없음을 확인한 뒤에만 재개하세요.');
    }
    if(provider==='groq'&&!recovery&&geminiAttempts.some(operation=>operation.state!=='BLOCKED'||!['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED','CAPACITY_WAIT'].includes(operation.error_code)))throw new ProviderError('AUDIO_PROVIDER_SWITCH_REVIEW','전송 여부가 불명확한 Gemini 시도가 있어 Groq로 전환할 수 없습니다.');
+   if(useBatch&&operations.some(operation=>operation.id!==base+':freebatch:1'||operation.state!=='BLOCKED'||operation.error_code!=='FREE_BATCH_PRE_DISPATCH_BLOCKED'))throw new ProviderError('FREE_BATCH_REVIEW_REQUIRED','이 조각에 전송 가능성이 있는 이전 호출이 있습니다. 배치로 재시도하지 않습니다.');
    const attempts=provider==='groq'?groqAttempts:geminiAttempts;
    if(attempts.length>=10)throw new ProviderError('RECOVERY_LIMIT_REACHED','이 조각의 재개 횟수가 한도에 도달했습니다.');
-   const operationId=recovery?recovery.retry_operation_id:latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429'&&latest.provider===provider?
+   const operationId=useBatch?base+':freebatch:1':recovery?recovery.retry_operation_id:latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429'&&latest.provider===provider?
     provider==='groq'?base+':reviewed429:'+groqAttempts.length:base+':gemini:0:reviewed429:'+geminiAttempts.length:
     attempts.at(-1)?.state==='BLOCKED'?attempts.at(-1).id:provider==='groq'?base:base+':gemini:0';
    if(recovery){const approved=await env.DB.prepare("UPDATE yta_free_recovery SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state='APPROVED' AND gemini_operation_id=?").bind(id,index,recovery.gemini_operation_id).run();if(approved.meta?.changes!==1)throw new ProviderError('OPERATION_IN_FLIGHT','이 재개 승인은 이미 사용 중입니다.');}
    if(probe){const approved=await env.DB.prepare("UPDATE yta_free_probe SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state='APPROVED' AND expires_at>?").bind(id,index,Date.now()).run();if(approved.meta?.changes!==1){await env.DB.prepare("UPDATE yta_free_recovery SET state='APPROVED' WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(id,index).run();throw new ProviderError('PROBE_REVIEW_REQUIRED','탐침 승인이 이미 사용됐거나 만료됐습니다.');}}
+   let batch=null;
+   if(useBatch){
+    batch=await env.DB.prepare('SELECT * FROM yta_free_batches WHERE job_id=? AND owner_id=?').bind(id,'owner').first();
+    const approval=await env.DB.prepare('SELECT units,state,operation_id FROM yta_free_batch_chunks WHERE job_id=? AND chunk_index=?').bind(id,index).first();
+    const fileSha=JSON.parse(chunk.result_json||'{}').fileSha256;
+    if(!batch||batch.state!=='APPROVED'||batch.model!=='whisper-large-v3-turbo'||batch.file_sha256!==fileSha||batch.expires_at<=Date.now()||batch.free_tier_confirmed!==1||batch.billing_disabled!==1||approval?.state!=='APPROVED'||approval.operation_id!==operationId||approval.units!==Math.max(10,Math.ceil(plannedDuration))||await capacityIdentity(env,'groq')!==batch.key_identity)throw new ProviderError('FREE_BATCH_REVIEW_REQUIRED','정확한 원본·키·조각의 유효한 Groq Free 배치 승인이 필요합니다.');
+    const claimed=await env.DB.prepare("UPDATE yta_free_batch_chunks SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state='APPROVED' AND EXISTS (SELECT 1 FROM yta_free_batches b WHERE b.job_id=? AND b.owner_id='owner' AND b.state='APPROVED' AND b.expires_at>?) AND NOT EXISTS (SELECT 1 FROM yta_free_batch_chunks c WHERE c.job_id=? AND c.state='CLAIMED') AND NOT EXISTS (SELECT 1 FROM yta_free_batch_chunks c WHERE c.job_id=? AND c.chunk_index<? AND c.state<>'DONE')").bind(id,index,id,Date.now(),id,id,index).run();
+    if(claimed.meta?.changes!==1)throw new ProviderError('FREE_BATCH_REVIEW_REQUIRED','승인 순서·진행 중 요청 또는 만료 상태를 확인하세요.');
+   }
    const locked=await env.DB.prepare(recovery?"UPDATE yta_audio SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state='UNCERTAIN'":"UPDATE yta_audio SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state IN ('PLANNED','PAUSED')").bind(id,index).run();
    if(locked.meta?.changes!==1&&recovery){await env.DB.prepare("UPDATE yta_free_recovery SET state='APPROVED' WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(id,index).run();if(probe)await env.DB.prepare("UPDATE yta_free_probe SET state='APPROVED' WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(id,index).run();}
-   if(locked.meta?.changes!==1)throw new ProviderError('OPERATION_IN_FLIGHT','같은 음성 조각이 이미 처리 중입니다.');
+   if(locked.meta?.changes!==1){if(batch)await env.DB.prepare("UPDATE yta_free_batch_chunks SET state='APPROVED' WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(id,index).run();throw new ProviderError('OPERATION_IN_FLIGHT','같은 음성 조각이 이미 처리 중입니다.');}
    try{
     const units=provider==='groq'?Math.max(10,Math.ceil(plannedDuration)):Math.ceil(duration*32)+8704;
-    const result=probe?await executeGroqProbe(env,{jobId:id,index,operationId,units,probe,bytes}):await execute(env,{id:operationId,job:id,provider,units},active=>provider==='groq'?
+    const result=probe?await executeGroqProbe(env,{jobId:id,index,operationId,units,probe,bytes}):batch?await executeFreeBatchChunk(env,{jobId:id,index,operationId,units,batch,bytes,duration}):await execute(env,{id:operationId,job:id,provider,units},active=>provider==='groq'?
      runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:()=>assertGroqBeforeDispatch(env,operationId,active),beforeFetch:()=>assertCapacityAtFetch(active)}):
      runOwnedGeminiAudio({env:active,bytes,durationSeconds:duration,beforeDispatch:()=>assertGeminiBeforeFetch(env,active),beforeFetch:()=>assertGeminiBeforeFetch(env,active)}));
     if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','음성 조각 전사가 비었습니다. 전체 전사로 처리하지 않습니다.');
@@ -477,12 +578,14 @@ export async function routeLive(request,env){
     if(updated.meta?.changes!==1)throw new ProviderError('AUDIO_RESULT_RACE','음성 조각 결과가 다른 요청과 충돌했습니다.');
     if(recovery)await env.DB.prepare("UPDATE yta_free_recovery SET state='USED' WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(id,index).run();
     if(probe)await env.DB.prepare("UPDATE yta_free_probe SET state='USED',response_meta_json=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(JSON.stringify(result.safeRateLimit??null),id,index).run();
+    if(batch){await env.DB.prepare("UPDATE yta_free_batch_chunks SET state='DONE' WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(id,index).run();await env.DB.prepare("UPDATE yta_free_batches SET state='COMPLETE' WHERE job_id=? AND state='APPROVED' AND NOT EXISTS (SELECT 1 FROM yta_free_batch_chunks WHERE job_id=? AND state<>'DONE')").bind(id,id).run();}
     return json({index,state:'DONE',provider,segmentCount:result.segments.length});
    }catch(error){
     const op=await env.DB.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').bind(operationId).first();
     const safe=!op||op.state==='BLOCKED'||(op?.state==='FAILED_UNCERTAIN'&&op.error_code==='429');
     if(recovery)await env.DB.prepare("UPDATE yta_free_recovery SET state=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(!op||op.state==='BLOCKED'?'APPROVED':'USED',id,index).run();
     if(probe)await env.DB.prepare("UPDATE yta_free_probe SET state=?,response_meta_json=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(!op||op.state==='BLOCKED'?'APPROVED':'USED',error.probeSafeMetadata?JSON.stringify(error.probeSafeMetadata):null,id,index).run();
+    if(batch){const unsent=!op||op.state==='BLOCKED';await env.DB.prepare("UPDATE yta_free_batch_chunks SET state=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(unsent?'APPROVED':'STOPPED',id,index).run();if(!unsent){const retrySeconds=error.code==='429'?Math.max(3600,Number.isSafeInteger(error.safeRateLimit?.retryAfterSeconds)?error.safeRateLimit.retryAfterSeconds:0):null;await env.DB.prepare("UPDATE yta_free_batches SET state='STOPPED',stop_reason=?,retry_after_at=? WHERE job_id=? AND state='APPROVED'").bind(error.code==='429'?'429':'UNCERTAIN',retrySeconds===null?null:Date.now()+retrySeconds*1000,id).run();}}
     await env.DB.prepare("UPDATE yta_audio SET state=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(recovery?'UNCERTAIN':safe?'PAUSED':'UNCERTAIN',id,index).run();
     throw error;
    }

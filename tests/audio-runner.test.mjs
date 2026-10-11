@@ -1,6 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runAudioChunks,runSummaryStages,detailRequestIsCurrent,beginDetailAction} from '../web/site/audio-runner.mjs';
+import {runAudioChunks,runSummaryStages,runApprovedFreeBatch,detailRequestIsCurrent,beginDetailAction} from '../web/site/audio-runner.mjs';
+
+test('approved Groq batch runs sequentially in foreground and stops before summary',async()=>{
+ const planned=[{index:6},{index:7}],sent=[],waits=[];let clock=1000;
+ const batch={jobId:'job-a',fileSha256:'a'.repeat(64),model:'whisper-large-v3-turbo',state:'APPROVED',expiresAt:200000,chunkIds:[6,7],maxRequests:2,maxAudioSeconds:600};
+ const result=await runApprovedFreeBatch({jobId:'job-a',fileSha256:batch.fileSha256,approvedChunkIds:[6,7],chunks:planned,getBatch:async()=>batch,getProgress:async()=>({chunks:planned.map(c=>({...c,state:sent.includes(c.index)?'DONE':'PLANNED'})),operationInFlight:{groq:false},nextEligibleAt:{groq:null}}),sendChunk:async c=>{sent.push(c.index);return {state:'DONE'};},wait:async ms=>{waits.push(ms);clock+=ms;},now:()=>clock,foreground:()=>true});
+ assert.deepEqual(sent,[6,7]);assert.deepEqual(waits,[61000]);assert.deepEqual(result,{complete:true,summaryStarted:false,reason:'BATCH_COMPLETE_BEFORE_SUMMARY'});
+});
+test('batch stops on first error, hidden tab, wrong job or changed approval',async()=>{
+ const chunks=[{index:6},{index:7}],base={jobId:'job-a',fileSha256:'a'.repeat(64),model:'whisper-large-v3-turbo',state:'APPROVED',expiresAt:200000,chunkIds:[6,7],maxRequests:2,maxAudioSeconds:600};let sent=0;
+ const args={jobId:base.jobId,fileSha256:base.fileSha256,approvedChunkIds:[6,7],chunks,getBatch:async()=>base,getProgress:async()=>({chunks:chunks.map(c=>({...c,state:'PLANNED'})),operationInFlight:{groq:false},nextEligibleAt:{groq:null}}),sendChunk:async()=>{sent++;return {code:'429'};},wait:async()=>{},now:()=>1000};
+ assert.equal((await runApprovedFreeBatch(args)).reason,'429');assert.equal(sent,1);
+ assert.equal((await runApprovedFreeBatch({...args,foreground:()=>false})).reason,'FOREGROUND_REQUIRED');assert.equal(sent,1);
+ assert.equal((await runApprovedFreeBatch({...args,getBatch:async()=>({...base,jobId:'job-b'})})).reason,'FREE_BATCH_APPROVAL_CHANGED');assert.equal(sent,1);
+});
+test('batch stops when foreground is lost or approval changes after one saved chunk',async()=>{
+ const chunks=[{index:6},{index:7}],scope={jobId:'job-a',fileSha256:'a'.repeat(64),model:'whisper-large-v3-turbo',state:'APPROVED',expiresAt:200000,chunkIds:[6,7],maxRequests:2,maxAudioSeconds:600};let visible=true,calls=0;
+ const args={jobId:scope.jobId,fileSha256:scope.fileSha256,approvedChunkIds:[6,7],chunks,getBatch:async()=>scope,getProgress:async()=>({chunks:chunks.map(c=>({...c,state:c.index===6&&calls?'DONE':'PLANNED'})),operationInFlight:{groq:false},nextEligibleAt:{groq:null}}),sendChunk:async()=>{calls++;return {state:'DONE'};},wait:async()=>{visible=false;},now:()=>1000,foreground:()=>visible};
+ assert.equal((await runApprovedFreeBatch(args)).reason,'FOREGROUND_REQUIRED');assert.equal(calls,1);
+ visible=true;calls=0;let reads=0;
+ const changed=await runApprovedFreeBatch({...args,getBatch:async()=>++reads===1?scope:{...scope,jobId:'job-b'},wait:async()=>{}});
+ assert.equal(changed.reason,'FREE_BATCH_APPROVAL_CHANGED');assert.equal(calls,1);
+});
 
 const chunks=[0,1,2].map(index=>({index,start:index*300,end:(index+1)*300}));
 function fixture(initialDone=0){let clock=1000000,done=initialDone,last=0;const sent=[],waits=[];const snapshot={provider:'gemini',model:'gemini-2.5-flash',valid_until:clock+60000,remaining:{requestsMinute:5,tokensMinute:100000,requestsDay:5},reserved:{requestsMinute:0,tokensMinute:0,requestsDay:0}};const grant={provider:'gemini',expires_at:clock+3600000,billing_disabled:1,request_count:0,request_limit:5,consumed:0,allowance:250000};return {

@@ -12,11 +12,96 @@ import {planMp3,scanMp3,prepareMp3Chunk,mergeAudioSegments} from '../src/audio.m
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,SUMMARY_PROMPT_LIMIT,summaryUnits} from '../src/summary-plan.mjs';
 import {reportPrompt} from '../src/report.mjs';
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
-function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema){db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0003_observed_capacity.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0005_reviewed_free_recovery.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0006_unknown_groq_probe.sql',import.meta.url),'utf8'));const now=Date.now();for(const [provider,model,remaining] of [['gemini','gemini-2.5-flash',{requestsMinute:1000,tokensMinute:1000000000,requestsDay:1000}],['groq','whisper-large-v3-turbo',{requestsMinute:1000,audioSecondsHour:100000,audioSecondsDay:100000}]])db.prepare('INSERT INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES(?,?,?,?,?,?,?,?,1)').run(provider,(model),({gemini:'AI_STUDIO_LIVE',groq:'GROQ_CONSOLE_LIVE'})[provider]+':'+createHash('sha256').update(provider+':NOT_REAL_TEST_KEY').digest('hex'),now,now+60000,JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,now+3600000]))),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,0]))));}const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',GROQ_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
+function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema){db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0003_observed_capacity.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0005_reviewed_free_recovery.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0006_unknown_groq_probe.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0007_bounded_free_batch.sql',import.meta.url),'utf8'));const now=Date.now();for(const [provider,model,remaining] of [['gemini','gemini-2.5-flash',{requestsMinute:1000,tokensMinute:1000000000,requestsDay:1000}],['groq','whisper-large-v3-turbo',{requestsMinute:1000,audioSecondsHour:100000,audioSecondsDay:100000}]])db.prepare('INSERT INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES(?,?,?,?,?,?,?,?,1)').run(provider,(model),({gemini:'AI_STUDIO_LIVE',groq:'GROQ_CONSOLE_LIVE'})[provider]+':'+createHash('sha256').update(provider+':NOT_REAL_TEST_KEY').digest('hex'),now,now+60000,JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,now+3600000]))),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,0]))));}const DB={prepare(sql){const make=args=>({sql,args,bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);},async batch(statements){db.exec('BEGIN');try{const results=statements.map(statement=>({meta:{changes:Number(db.prepare(statement.sql).run(...statement.args).changes)}}));db.exec('COMMIT');return results;}catch(error){db.exec('ROLLBACK');throw error;}}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',GROQ_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
 async function job(env){return (await(await routeApi(request('/api/jobs','POST',{sourceType:'text',title:'LOCAL MOCK TEST',filename:'x.srt',transcript:'1\n00:00:00,000 --> 00:01:00,000\n테스트 발언입니다.',durationSeconds:60,persistTranscript:true}),env)).json()).job;}
 async function grant(env,allowance=250000){const r=await routeApi(request('/api/live/quota','PUT',{provider:'gemini',allowance,requestLimit:5,billingDisabled:true,freeOnly:true}),env);assert.equal(r.status,200);}
 async function consent(env,id,sha){const r=await routeApi(request('/api/jobs/'+id+'/audio-consent','POST',{provider:'gemini',fileSha256:sha,consent:true}),env);assert.equal(r.status,200);}
 const valid=()=>({summary:[{text:'테스트 발언',evidenceIds:[1]}],chapters:[{text:'시작 발언',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실 미검증'});
+async function freeBatchFixture(){
+ const {db,env}=setup(),bytes=new Uint8Array(383*417);for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);
+ const seconds=scanMp3(bytes).durationSeconds,created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds*2}),env)).json(),id=created.job.id,path='/api/jobs/'+id,fileSha256='b'.repeat(64);
+ assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256,chunks:[{index:0,start:0,end:seconds},{index:1,start:seconds,end:seconds*2}]}),env)).status,200);
+ const scope=await(await routeApi(request(path+'/audio-free-batch'),env)).json();
+ const approval={provider:'groq',model:scope.model,jobId:id,fileSha256,chunkIds:scope.chunkIds,maxRequests:scope.maxRequests,maxAudioSeconds:scope.maxAudioSeconds,freeTierConfirmed:true,billingDisabled:true,unknownCapacityAcknowledged:true,oneBatchOnly:true,noPaidFallback:true,stopOnFirstError:true,stopBeforeSummary:true};
+ const upload=index=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index='+index+'&provider=groq&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream','x-groq-free-batch':'true'},body:bytes}),env);
+ return {db,env,bytes,id,path,scope,approval,upload};
+}
+test('bounded Groq Free approval binds exact remaining plan and sends no request on approval',async()=>{
+ const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not send');};
+ try{assert.deepEqual(f.scope.chunkIds,[0,1]);assert.equal(f.scope.accountRemaining,'UNKNOWN');assert.equal((await routeApi(request(f.path+'/audio-free-batch','POST',{...f.approval,chunkIds:[1,0]}),f.env)).status,400);assert.equal((await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env)).status,200);assert.equal(calls,0);assert.equal((await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env)).status,409);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM yta_free_batch_chunks WHERE job_id=?').get(f.id).n,2);}
+ finally{globalThis.fetch=old;f.db.close();}
+});
+test('bounded batch rejects a truncated or gapped persisted plan before approval',async()=>{
+ for(const mode of ['gap','tail']){const f=await freeBatchFixture();try{
+  if(mode==='gap')f.db.prepare('UPDATE yta_audio SET start_sec=start_sec+1 WHERE job_id=? AND chunk_index=1').run(f.id);
+  else f.db.prepare('DELETE FROM yta_audio WHERE job_id=? AND chunk_index=1').run(f.id);
+  const response=await routeApi(request(f.path+'/audio-free-batch'),f.env);assert.equal((await response.json()).error.code,'FREE_BATCH_PLAN_INVALID');
+ }finally{f.db.close();}}
+});
+test('batch scopes only remaining PLANNED chunks and preserves earlier DONE and uncertain attempts',async()=>{
+ const f=await freeBatchFixture();try{
+  f.db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=0").run(JSON.stringify({fileSha256:f.approval.fileSha256,provider:'groq',model:'whisper-large-v3-turbo',segments:[{start:1,end:2,text:'완료'}]}),f.id);
+  f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code) VALUES(?,?,?,?,?,?,?)').run(f.id+':audio:0',f.id,'groq',10,'FAILED_UNCERTAIN',new Date(Date.now()-7200000).toISOString(),'429');
+  const scope=await(await routeApi(request(f.path+'/audio-free-batch'),f.env)).json();assert.deepEqual(scope.chunkIds,[1]);
+  const approval={...f.approval,chunkIds:scope.chunkIds,maxRequests:scope.maxRequests,maxAudioSeconds:scope.maxAudioSeconds};
+  assert.equal((await routeApi(request(f.path+'/audio-free-batch','POST',approval),f.env)).status,200);
+  assert.equal(f.db.prepare('SELECT state FROM yta_audio WHERE job_id=? AND chunk_index=0').get(f.id).state,'DONE');
+  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(f.id+':audio:0').state,'FAILED_UNCERTAIN');
+ }finally{f.db.close();}
+});
+test('bounded Groq Free batch sends sequential chunks once and stops before summary',async()=>{
+ const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({text:'성공',segments:[{start:1,end:2,text:'성공'}]});};
+ try{assert.equal((await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env)).status,200);const first=await Promise.all([f.upload(0),f.upload(0)]);assert.ok(first.some(r=>r.status===200));assert.equal(calls,1);assert.equal((await f.upload(1)).status,409);f.db.prepare("UPDATE yta_operations SET created_at=? WHERE state='DONE' AND job_id=?").run(new Date(Date.now()-61000).toISOString(),f.id);assert.equal((await f.upload(1)).status,200);assert.equal(calls,2);assert.equal(f.db.prepare('SELECT state FROM yta_free_batches WHERE job_id=?').get(f.id).state,'COMPLETE');assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_audio WHERE job_id=? AND state='DONE'").get(f.id).n,2);assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE job_id=? AND provider='gemini'").get(f.id).n,0);}
+ finally{globalThis.fetch=old;f.db.close();}
+});
+test('bounded Groq Free batch stops on first 429, retains failed operation and untouched next chunk',async()=>{
+ const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({}, {status:429,headers:{'retry-after':'120'}});};
+ try{await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env);assert.equal((await f.upload(0)).status,409);assert.equal((await f.upload(1)).status,409);assert.equal(calls,1);assert.equal(f.db.prepare('SELECT state FROM yta_free_batches WHERE job_id=?').get(f.id).state,'STOPPED');assert.equal(f.db.prepare('SELECT state FROM yta_free_batch_chunks WHERE job_id=? AND chunk_index=1').get(f.id).state,'APPROVED');assert.equal(f.db.prepare("SELECT state,error_code FROM yta_operations WHERE job_id=?").get(f.id).error_code,'429');}
+ finally{globalThis.fetch=old;f.db.close();}
+});
+test('empty Groq transcription stops the batch without marking the operation DONE',async()=>{
+ const f=await freeBatchFixture(),old=fetch;globalThis.fetch=async()=>Response.json({text:'',segments:[]});
+ try{await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env);const response=await f.upload(0);assert.equal((await response.json()).error.code,'EMPTY_AUDIO_TRANSCRIPT');assert.equal(f.db.prepare('SELECT state FROM yta_free_batches WHERE job_id=?').get(f.id).state,'STOPPED');assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE job_id=?').get(f.id).state,'FAILED_UNCERTAIN');assert.equal(f.db.prepare('SELECT state FROM yta_audio WHERE job_id=? AND chunk_index=0').get(f.id).state,'UNCERTAIN');}
+ finally{globalThis.fetch=old;f.db.close();}
+});
+test('bounded batch cancellation, expiry, changed key and malformed scope block before provider fetch',async()=>{
+ for(const mode of ['cancel','expire','key','malformed','limit','units']){
+  const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not send');};
+  try{assert.equal((await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env)).status,200);
+   if(mode==='cancel')assert.equal((await routeApi(request(f.path+'/audio-free-batch','DELETE'),f.env)).status,200);
+   if(mode==='expire')f.db.prepare('UPDATE yta_free_batches SET expires_at=? WHERE job_id=?').run(Date.now()-1,f.id);
+   if(mode==='key')f.env.GROQ_API_KEY='OTHER_TEST_ONLY_KEY';
+   if(mode==='malformed')f.db.prepare('UPDATE yta_free_batches SET chunk_ids_json=? WHERE job_id=?').run('{',f.id);
+   if(mode==='limit')f.db.prepare('UPDATE yta_free_batches SET max_audio_seconds=max_audio_seconds+1 WHERE job_id=?').run(f.id);
+   if(mode==='units')f.db.prepare('UPDATE yta_free_batch_chunks SET units=units+1 WHERE job_id=? AND chunk_index=1').run(f.id);
+   assert.equal((await f.upload(0)).status,409);assert.equal(calls,0);
+  }finally{globalThis.fetch=old;f.db.close();}
+ }
+});
+test('batch cancellation during the last D1 read prevents dispatch and keeps unsent scope',async()=>{
+ const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not send');};
+ try{await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env);
+  const original=f.env.DB;let changed=false;f.env.DB={...original,prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('SELECT 1 AS ok FROM yta_free_batches'))return statement;return {bind(...args){const bound=statement.bind(...args);return {...bound,async first(){if(!changed){changed=true;f.db.prepare("UPDATE yta_free_batches SET state='CANCELLED' WHERE job_id=?").run(f.id);}return bound.first();}};}};}};
+  assert.equal((await f.upload(0)).status,409);assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT state FROM yta_free_batch_chunks WHERE job_id=? AND chunk_index=0').get(f.id).state,'APPROVED');
+  assert.equal(f.db.prepare('SELECT state,error_code FROM yta_operations WHERE job_id=?').get(f.id).error_code,'FREE_BATCH_PRE_DISPATCH_BLOCKED');
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('proven unsent batch attempt keeps one unused chunk available for a later manual resume',async()=>{
+ const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({text:'성공',segments:[{start:1,end:2,text:'성공'}]});};
+ try{await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env);
+  const original=f.env.DB;let changed=false;f.env.DB={...original,prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('SELECT 1 AS ok FROM yta_free_batches'))return statement;return {bind(...args){const bound=statement.bind(...args);return {...bound,async first(){const result=await bound.first();if(!changed){changed=true;f.env.ENABLE_LIVE_FREE='false';}return result;}};}};}};
+  assert.equal((await f.upload(0)).status,409);assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT state FROM yta_free_batches WHERE job_id=?').get(f.id).state,'APPROVED');
+  assert.equal(f.db.prepare('SELECT state FROM yta_audio WHERE job_id=? AND chunk_index=0').get(f.id).state,'PAUSED');
+  f.env.DB=original;f.env.ENABLE_LIVE_FREE='true';assert.equal((await f.upload(0)).status,200);assert.equal(calls,1);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('batch respects global Groq local reservation cap with unknown provider balance',async()=>{
+ const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not send');};
+ try{await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env);f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').run('OTHER_JOB:groq',f.id,'groq',6495,'DONE',new Date().toISOString());const response=await f.upload(0);assert.equal((await response.json()).error.code,'FREE_BATCH_LOCAL_LIMIT');assert.equal(calls,0);assert.equal(f.db.prepare('SELECT state FROM yta_free_batch_chunks WHERE job_id=? AND chunk_index=0').get(f.id).state,'APPROVED');}
+ finally{globalThis.fetch=old;f.db.close();}
+});
 test('GET quota and health do not create live tables; writes need explicit additive schema setup',async()=>{
  const {db,env}=setup({liveSchema:false});
  try{

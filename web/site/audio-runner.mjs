@@ -16,6 +16,27 @@ export function beginDetailAction(target,jobId,currentRequestId){
  target.dataset.jobId=jobId;
  return currentRequestId+1;
 }
+export async function runApprovedFreeBatch({jobId,fileSha256,approvedChunkIds,chunks,getBatch,getProgress,sendChunk,wait,foreground=()=>true,now=Date.now,onUpdate=()=>{}}){
+ const expected=approvedChunkIds;
+ if(!Array.isArray(expected)||!expected.length||expected.some((index,i)=>!Number.isInteger(index)||i&&index<=expected[i-1]||!chunks.some(c=>c.index===index)))return {complete:false,reason:'FREE_BATCH_SCOPE_INVALID'};
+ for(const index of expected){
+  if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED',index};
+  const [batch,progress]=await Promise.all([getBatch(),getProgress()]);
+  if(batch?.jobId!==jobId||batch.fileSha256!==fileSha256||batch.model!=='whisper-large-v3-turbo'||batch.state!=='APPROVED'||batch.expiresAt<=now()||JSON.stringify(batch.chunkIds)!==JSON.stringify(expected)||batch.maxRequests!==expected.length||!Number.isSafeInteger(batch.maxAudioSeconds))return {complete:false,reason:'FREE_BATCH_APPROVAL_CHANGED',index};
+  const saved=progress.chunks?.find(row=>row.index===index);
+  if(saved?.state==='DONE')continue;
+  if(!['PLANNED','PAUSED'].includes(saved?.state)||saved.uncertainFailure||saved.reviewed429Required)return {complete:false,reason:'FREE_BATCH_CHUNK_REVIEW_REQUIRED',index};
+  if(progress.operationInFlight?.groq)return {complete:false,reason:'OPERATION_IN_FLIGHT',index};
+  if(Number.isFinite(progress.nextEligibleAt?.groq)&&progress.nextEligibleAt.groq>now())return {complete:false,reason:'GROQ_COOLDOWN_PENDING',index,nextEligibleAt:progress.nextEligibleAt.groq};
+  if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED',index};
+  onUpdate({index,sending:true});
+  let result;try{result=await sendChunk(chunks.find(c=>c.index===index));}catch(error){return {complete:false,reason:error?.code||'DISPATCH_OUTCOME_UNKNOWN_REVIEW_REQUIRED',index};}
+  if(result?.state!=='DONE')return {complete:false,reason:result?.code||'AUDIO_RESULT_UNVERIFIED',index};
+  onUpdate({index,done:true});
+  if(index!==expected.at(-1)){try{await wait(61_000);}catch{return {complete:false,reason:'FOREGROUND_REQUIRED',index};}}
+ }
+ return {complete:true,summaryStarted:false,reason:'BATCH_COMPLETE_BEFORE_SUMMARY'};
+}
 export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,chooseProvider,authorizedProviders=()=>['groq','gemini'],sendChunk,review429,wait,now=Date.now,foreground=()=>true,onUpdate=()=>{}}){
  for(const chunk of chunks){
   for(;;){
