@@ -1,9 +1,8 @@
-# Deployment requires explicit approval, Cloudflare Access owner login and actual D1 provision.
-# Do NOT run wrangler deploy from this unconfigured template.
-name = "youtube-ai-analyzer-private"
+# Existing, Access-protected production Worker. Deploy only through npm run deploy:production.
+name = "holy-rice-b914"
 main = "src/site-worker.mjs"
 compatibility_date = "2026-10-10"
-workers_dev = false
+workers_dev = true
 
 [assets]
 directory = "./web/site"
@@ -13,11 +12,19 @@ run_worker_first = true
 [vars]
 ENABLE_LIVE_FREE = "false"
 ALLOW_PAID_API = "false"
+SITE_DEPLOYED = "true"
+# ACCESS_AUD and ACCESS_TEAM_DOMAIN stay in dashboard runtime variables.
+# ACCESS_OWNER_EMAIL and KEY_ENCRYPTION_KEY_B64 stay in existing Worker Secrets.
+# The deploy command must use --keep-vars; never put their values here.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "youtube-ai-analyzer-private-db"
+database_id = "d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34"
+
+# Previews must not receive the production D1 binding. Configure a separate
+# preview database and Access values before enabling preview deployments.
+[previews.vars]
+ENABLE_LIVE_FREE = "false"
+ALLOW_PAID_API = "false"
 SITE_DEPLOYED = "false"
-# Production setup must supply ACCESS_TEAM_DOMAIN, ACCESS_AUD, ACCESS_OWNER_EMAIL
-# and D1 binding DB. Keep every API key and KEY_ENCRYPTION_KEY_B64 in secrets.
-# Actual D1 binding example (add only after account setup):
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "youtube-ai-analyzer-private"
-# database_id = "<REAL_D1_ID>"

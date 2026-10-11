@@ -14,7 +14,11 @@ Owner-only Cloudflare Worker/D1 app. The current implementation and limitations 
 
 `npm run check` and `npm test` run dependency-free local checks under Node 24. Current suite: 50 tests. HTTP provider responses are mocked; local persistence tests use real SQLite. This does **not** prove real-provider quality, hosted runtime resource limits or successful Cloudflare deployment.
 
-`npm run build:dashboard` generates the single Worker bundle. The repository's `deploy/dashboard-worker.mjs` is the tested deployment candidate. Use it only in the existing protected holy-rice-b914 Worker, retaining its DB binding and Secrets. Do not deploy the unconfigured wrangler.toml template. The CI release gate remains blocked pending remote evidence.
+`npm run build:dashboard` generates the single Worker bundle used by local tests.
+The Wrangler configuration now targets the existing protected `holy-rice-b914`
+Worker and its existing D1 database. See [the Git Build handoff](docs/production-git-build.md)
+for the guarded production command and required Cloudflare settings. This branch
+does not deploy. The CI release gate remains blocked pending remote evidence.
 
 Remote v0.7 acceptance and a verified summary for 2hUkTmwYm3A remain NOT_RUN. No unverified capability is marked PASS. The example's provided full MP3 was only locally sliced and inspected, not transcribed by a real API.
 

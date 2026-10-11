@@ -17,7 +17,7 @@ Cloudflare GitHub integration을 사용자 일반 웹에서 새 Worker에 한 �
 연결 권한은 이 Video_summary 저장소 하나로 제한한다.
 기존 Worker, D1 또는 기존 앱의 GitHub 연결을 수정하지 않는다.
 
-현 단계의 자동 배포는 의도적으로 차단되어 있다:
+2026-10-10 당시의 자동 배포 상태(이력):
 
 - wrangler.toml은 workers_dev=false이고 D1 및 Access 설정도 아직 없다.
 - npm run release:gate는 원격 증거를 확인하지 못해 종료 코드 2를 반환한다.
@@ -39,8 +39,9 @@ Access 정책 관리, 계정 무료 플랜 확인, D1 초기 생성, Secret 등�
   가짜 제공자 키 등록/교체/삭제, 실제 3개 제공자 키 등록을 확인했다.
 - 위 원격 결과는 USER_REPORTED이며 에이전트 직접 원격 검증 PASS가 아니다.
 - 실제 AI 제공자 호출은 NOT RUN이고 ENABLE_LIVE_FREE=false를 유지한다.
-- 이 저장소의 wrangler.toml은 미설정 템플릿이다. 실제 운영 Worker를 가리키지 않는다.
-  따라서 저장소 업로드가 운영 사이트 업데이트를 의미하지 않는다.
+- 당시 이 저장소의 wrangler.toml은 미설정 템플릿이었다. 이후 운영 Worker/D1 식별자를
+  반영한 리뷰 브랜치를 준비했다. 최신 배포 설정과 차단 조건은
+  [production-git-build.md](production-git-build.md)를 따른다.
 
 다음 사용자 조치:
 
