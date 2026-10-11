@@ -103,6 +103,14 @@ function completedAudio(rows,duration){
  if(merged.missingChunks.length||!merged.segments.length||merged.rejectedSegments.some(item=>item.reason!=='OVERLAP_DUPLICATE'))throw new ProviderError('AUDIO_INCOMPLETE','누락되거나 범위를 벗어난 전사 조각이 있습니다.');
  return {...merged,fileSha256:[...hashes][0]};
 }
+function audioAttempts(operations,jobId,index){
+ const base=jobId+':audio:'+index;
+ return operations.map(operation=>{
+  if(operation.id===base)return {operation,attempt:0};
+  const prefix=base+':reviewed429:',suffix=operation.id?.startsWith(prefix)?operation.id.slice(prefix.length):'';
+  return /^[1-9][0-9]*$/.test(suffix)&&Number.isSafeInteger(Number(suffix))?{operation,attempt:Number(suffix)}:null;
+ }).filter(Boolean).sort((a,b)=>a.attempt-b.attempt).map(item=>item.operation);
+}
 async function boundedBytes(req,max){const reader=req.body?.getReader();if(!reader)throw new InputError('빈 음성');let size=0;const arrays=[];while(true){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>max){await reader.cancel();throw new InputError('음성 조각은 8MB 이하');}arrays.push(value);}const bytes=new Uint8Array(size);let at=0;for(const arr of arrays){bytes.set(arr,at);at+=arr.length;}return bytes;}
 export async function routeLive(request,env){
  const url=new URL(request.url),path=url.pathname;
@@ -205,7 +213,12 @@ export async function routeLive(request,env){
   }
   if(action==='audio-progress'&&request.method==='GET'){
    const rows=(await env.DB.prepare('SELECT chunk_index,start_sec,end_sec,state FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];
-   return json({chunks:rows.map(c=>({index:c.chunk_index,start:c.start_sec,end:c.end_sec,state:c.state})),complete:rows.length>0&&rows.every(c=>c.state==='DONE'),temporaryResultsCleaned:rows.length===0&&job.audit?.audioProcessingCoverage===1});
+   const operations=(await env.DB.prepare("SELECT id,state,error_code FROM yta_operations WHERE job_id=? AND provider='groq' AND id LIKE ?").bind(id,id+':audio:%').all()).results||[];
+   const chunks=rows.map(c=>{const attempts=audioAttempts(operations,id,c.chunk_index),latest=attempts.at(-1);return {index:c.chunk_index,start:c.start_sec,end:c.end_sec,state:c.state,reviewed429Required:c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429',uncertainFailure:c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code!=='429'};});
+   const intervals=chunks.filter(c=>c.state==='DONE').map(c=>({start:c.start,end:c.end}));let covered=0,edge=0;
+   for(const range of intervals){covered+=Math.max(0,range.end-Math.max(edge,range.start));edge=Math.max(edge,range.end);}
+   let contiguous=0,prefixComplete=true;for(const c of chunks){if(c.state!=='DONE')prefixComplete=false;else if(prefixComplete)contiguous=c.end;}
+   return json({chunks,complete:rows.length>0&&rows.every(c=>c.state==='DONE'),temporaryResultsCleaned:rows.length===0&&job.audit?.audioProcessingCoverage===1,confirmedAudioSeconds:Math.min(job.duration_seconds,covered),confirmedThroughSeconds:contiguous,coveragePercent:job.duration_seconds>0?Math.round(1000*Math.min(job.duration_seconds,covered)/job.duration_seconds)/10:0});
   }
   if(action==='audio-chunk'&&request.method==='POST'){
    const index=Number(url.searchParams.get('index'));if(!Number.isInteger(index)||index<0)throw new InputError('조각 번호 오류');
@@ -214,7 +227,16 @@ export async function routeLive(request,env){
    const bytes=await boundedBytes(request,8000000),name=url.searchParams.get('name')||'chunk.mp3';
    if(!/\.mp3$/i.test(name))throw new InputError('대용량 분할 전사는 MP3 입력을 사용하세요.');
    const duration=scanMp3(bytes).durationSeconds;if(Math.abs(duration-(chunk.end_sec-chunk.start_sec))>1)throw new InputError('음성 조각 길이와 계획이 다릅니다.');
-   const result=await execute(env,{id:id+':audio:'+index,job:id,provider:'groq',units:Math.max(10,Math.ceil(duration))},active=>runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration}));
+   const base=id+':audio:'+index,operations=(await env.DB.prepare("SELECT id,state,error_code FROM yta_operations WHERE job_id=? AND provider='groq' AND id LIKE ?").bind(id,base+'%').all()).results||[];
+   const attempts=audioAttempts(operations,id,index),latest=attempts.at(-1);
+   let operationId=latest?.id??base;
+   if(latest?.state==='FAILED_UNCERTAIN'){
+    if(latest.error_code!=='429')throw new ProviderError('OPERATION_REVIEW_REQUIRED','이전 음성 호출 결과가 불명확합니다. 제공자 사용량을 확인하세요.');
+    if(request.headers.get('x-provider-log-429-no-output-confirmed')!=='true')throw new ProviderError('PROVIDER_429_REVIEW_REQUIRED','공식 Groq 요청 로그에서 429 거절과 출력 없음이 확인된 뒤에만 명시적으로 재개하세요.');
+    if(attempts.length>=10)throw new ProviderError('RECOVERY_LIMIT_REACHED','이 조각의 재개 횟수가 한도에 도달했습니다. 작업 기록을 검토하세요.');
+    operationId=base+':reviewed429:'+attempts.length;
+   }
+   const result=await execute(env,{id:operationId,job:id,provider:'groq',units:Math.max(10,Math.ceil(duration))},active=>runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration}));
    if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','음성 조각 전사가 비었습니다. 전체 전사로 처리하지 않습니다.');
    await env.DB.prepare('UPDATE yta_audio SET state=?,result_json=? WHERE job_id=? AND chunk_index=?').bind('DONE',JSON.stringify({...result,fileSha256:JSON.parse(chunk.result_json).fileSha256}),id,index).run();return json({index,state:'DONE',segmentCount:result.segments.length});
   }
@@ -239,9 +261,10 @@ export async function routeLive(request,env){
    const merged=completedAudio(rows,job.duration_seconds),expected=normalizeSegments(merged.segments);
    const source=await sourceOf(env,id);
    if(source?.provenance!=='GROQ_OWNED_AUDIO'||job.audit?.audioFileSha256!==merged.fileSha256||source.raw!==merged.segments.map(segment=>segment.text).join('\n')||JSON.stringify(source.segments)!==JSON.stringify(expected))throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 TXT와 전사 조각의 일치를 확인하지 못했습니다.');
-   const operations=(await env.DB.prepare("SELECT id,state FROM yta_operations WHERE job_id=? AND provider='groq' AND id LIKE ?").bind(id,id+':audio:%').all()).results||[];
-   const completedIds=new Set(operations.filter(operation=>operation.state==='DONE').map(operation=>operation.id));
-   if(operations.length!==rows.length||completedIds.size!==rows.length||rows.some(row=>!completedIds.has(id+':audio:'+row.chunk_index)))throw new ProviderError('AUDIO_OPERATION_UNCERTAIN','음성 처리 기록이 완료 상태인지 확인할 수 없습니다.');
+   const operations=(await env.DB.prepare("SELECT id,state,error_code FROM yta_operations WHERE job_id=? AND provider='groq' AND id LIKE ?").bind(id,id+':audio:%').all()).results||[];
+   let accounted=0;
+   for(const row of rows){const attempts=audioAttempts(operations,id,row.chunk_index);accounted+=attempts.length;if(attempts.filter(operation=>operation.state==='DONE').length!==1||attempts.some(operation=>operation.state!=='DONE'&&!(operation.state==='FAILED_UNCERTAIN'&&operation.error_code==='429')&&!(operation.state==='BLOCKED'&&operation.error_code==='QUOTA_EXHAUSTED')))throw new ProviderError('AUDIO_OPERATION_UNCERTAIN','음성 처리 기록이 완료 상태인지 확인할 수 없습니다.');}
+   if(accounted!==operations.length)throw new ProviderError('AUDIO_OPERATION_UNCERTAIN','알 수 없는 음성 처리 기록이 있습니다.');
    await env.DB.prepare("UPDATE yta_operations SET result_json=NULL WHERE job_id=? AND provider='groq' AND state='DONE' AND id LIKE ?").bind(id,id+':audio:%').run();
    await env.DB.prepare('DELETE FROM yta_audio WHERE job_id=?').bind(id).run();
    return json({cleaned:true,job:await ownedJob(env,id),transcriptRetained:true});
