@@ -40,6 +40,12 @@ test('automatic mode never switches an unresolved sent attempt',async()=>{
  const f=fixture(),result=await runAudioChunks({chunks,...f,chooseProvider:()=> 'auto',getProgress:async()=>({chunks:[{index:0,state:'UNCERTAIN',uncertainFailure:true}],complete:false})});
  assert.equal(result.reason,'OPERATION_REVIEW_REQUIRED');assert.equal(f.sent.length,0);
 });
+test('reviewed uncertain chunk requires explicit Groq selection, never automatic fallback',async()=>{
+ let sent=0;const groq={provider:'groq',model:'whisper-large-v3-turbo',valid_until:1060000,remaining:{requestsMinute:2,audioSecondsHour:2000,audioSecondsDay:2000},reserved:{requestsMinute:0,audioSecondsHour:0,audioSecondsDay:0}},grant={provider:'groq',expires_at:4600000,billing_disabled:1,request_count:0,request_limit:2,consumed:0,allowance:1000};
+ const shared={chunks:[chunks[0]],getProgress:async()=>({chunks:[{index:0,state:sent?'DONE':'UNCERTAIN',reviewedFreeRetryApproved:true,groqAllowed:true}],complete:sent>0,nextEligibleAt:{groq:null},operationInFlight:{groq:false}}),getCapacity:async()=>({snapshots:[groq]}),getQuota:async()=>({grants:[grant]}),authorizedProviders:()=>['groq','gemini'],sendChunk:async()=>{sent++;return {state:'DONE'};},now:()=>1000000};
+ assert.equal((await runAudioChunks({...shared,chooseProvider:()=> 'auto'})).reason,'OPERATION_REVIEW_REQUIRED');assert.equal(sent,0);
+ assert.equal((await runAudioChunks({...shared,chooseProvider:()=> 'groq'})).complete,true);assert.equal(sent,1);
+});
 test('three Gemini audio chunks flow into staged summary with shared safe cooldown',async()=>{
  const f=fixture();f.grant.request_limit=10;f.snapshot.remaining.requestsMinute=10;f.snapshot.remaining.requestsDay=10;
  const audio=await runAudioChunks({chunks,...f});assert.equal(audio.complete,true);

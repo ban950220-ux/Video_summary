@@ -15,8 +15,8 @@ export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,ch
    const progress=await getProgress(),saved=progress.chunks.find(row=>row.index===chunk.index);
    if(!saved)return {complete:false,reason:'PLAN_MISSING',index:chunk.index};
    if(saved.state==='DONE')break;
-   if(saved.uncertainFailure||saved.state==='UNCERTAIN')return {complete:false,reason:'OPERATION_REVIEW_REQUIRED',index:chunk.index};
    const requested=chooseProvider(chunk,saved),authorized=authorizedProviders(chunk,saved);
+   if((saved.uncertainFailure||saved.state==='UNCERTAIN')&&!(saved.reviewedFreeRetryApproved&&requested==='groq'))return {complete:false,reason:'OPERATION_REVIEW_REQUIRED',index:chunk.index};
    const candidates=(requested==='auto'?['groq','gemini']:[requested]).filter(provider=>['groq','gemini'].includes(provider)&&authorized.includes(provider)&&(provider!=='groq'||saved.groqAllowed!==false));
    if(!candidates.length)return {complete:false,reason:'NO_AUTHORIZED_PROVIDER',index:chunk.index};
    const [capacity,quota]=await Promise.all([getCapacity(),getQuota()]);const at=now();

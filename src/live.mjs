@@ -163,6 +163,7 @@ function audioAttempts(operations,jobId,index,provider='groq'){
  const base=jobId+':audio:'+index;
  return operations.filter(operation=>operation.provider===provider).map(operation=>{
   if(provider==='groq'&&operation.id===base)return {operation,attempt:0};
+  if(provider==='groq'&&operation.id===base+':reviewed404:1')return {operation,attempt:1000};
   const prefix=provider==='groq'?base+':reviewed429:':base+':gemini:';
   const suffix=operation.id?.startsWith(prefix)?operation.id.slice(prefix.length):'';
   if(provider==='gemini'){
@@ -174,11 +175,29 @@ function audioAttempts(operations,jobId,index,provider='groq'){
 }
 const audioProvenance=providers=>providers.length===1&&providers[0]==='groq'?'GROQ_OWNED_AUDIO':providers.length===1&&providers[0]==='gemini'?'GEMINI_OWNED_AUDIO':'MIXED_OWNED_AUDIO';
 async function boundedBytes(req,max){const reader=req.body?.getReader();if(!reader)throw new InputError('빈 음성');let size=0;const arrays=[];while(true){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>max){await reader.cancel();throw new InputError('음성 조각은 8MB 이하');}arrays.push(value);}const bytes=new Uint8Array(size);let at=0;for(const arr of arrays){bytes.set(arr,at);at+=arr.length;}return bytes;}
+async function recoveryEvidence(env,id,index){
+ const chunk=await env.DB.prepare('SELECT state,result_json FROM yta_audio WHERE job_id=? AND chunk_index=?').bind(id,index).first();
+ if(!chunk||chunk.state!=='UNCERTAIN')throw new ProviderError('RECOVERY_NOT_ELIGIBLE','검토할 미확정 음성 조각이 없습니다.');
+ const fileSha256=JSON.parse(chunk.result_json||'{}').fileSha256;
+ if(!/^[a-f0-9]{64}$/.test(fileSha256||''))throw new ProviderError('AUDIO_FILE_MISMATCH','원본 파일 지문을 확인할 수 없습니다.');
+ const base=id+':audio:'+index;
+ const rows=(await env.DB.prepare("SELECT id,provider,state,error_code,created_at FROM yta_operations WHERE job_id=? AND provider IN ('groq','gemini') AND id LIKE ? ORDER BY created_at DESC").bind(id,base+'%').all()).results||[];
+ const retryOperationId=base+':reviewed404:1',retry=rows.find(row=>row.id===retryOperationId);
+ if(retry&&!(retry.state==='BLOCKED'&&['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED','CAPACITY_WAIT'].includes(retry.error_code)))throw new ProviderError('RECOVERY_NOT_ELIGIBLE','재개 시도가 이미 전송됐거나 결과가 불명확합니다.');
+ const attempts=[...audioAttempts(rows,id,index,'groq'),...audioAttempts(rows,id,index,'gemini')].filter(row=>row.id!==retryOperationId).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at));
+ const latest=attempts[0],groq=attempts.find(row=>row.provider==='groq'&&row.state==='FAILED_UNCERTAIN'&&row.error_code==='429');
+ if(attempts.length!==2||latest?.id!==base+':gemini:0'||latest.provider!=='gemini'||latest.state!=='FAILED_UNCERTAIN'||latest.error_code!=='404'||groq?.id!==base||attempts.some(row=>row.state==='CLAIMED'||row.state==='DONE'))throw new ProviderError('RECOVERY_NOT_ELIGIBLE','Groq 429 뒤 Gemini 404인 미확정 조각만 수동 검토할 수 있습니다.');
+ return {jobId:id,index,fileSha256,geminiOperationId:latest.id,groq429OperationId:groq.id,retryOperationId};
+}
+async function ensureFreeRecoverySchema(env){
+ const row=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='yta_free_recovery'").bind().first();
+ if(!row)throw new ProviderError('RECOVERY_SCHEMA_REQUIRED','검토형 무료 재개 테이블이 필요합니다.');
+}
 export async function routeLive(request,env){
  const url=new URL(request.url),path=url.pathname;
- if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-chunk|audio-finish|audio-cleanup)$/.test(path))return null;
+ if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-chunk|audio-finish|audio-cleanup)$/.test(path))return null;
  try{
- if(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path)){await ensureLiveSchema(env);const id=path.split('/').pop();await ownedJob(env,id);for(const table of ['yta_sources','yta_audio'])await env.DB.prepare('DELETE FROM '+table+' WHERE job_id=?').bind(id).run();const waitTable=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='yta_wait'").bind().first();if(waitTable)await env.DB.prepare('DELETE FROM yta_wait WHERE job_id=?').bind(id).run();await env.DB.prepare('UPDATE yta_operations SET result_json=NULL WHERE job_id=?').bind(id).run();await env.DB.prepare('DELETE FROM jobs WHERE id=? AND owner_id=?').bind(id,'owner').run();return json({deleted:true,id});}
+ if(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path)){await ensureLiveSchema(env);const id=path.split('/').pop();await ownedJob(env,id);for(const table of ['yta_sources','yta_audio'])await env.DB.prepare('DELETE FROM '+table+' WHERE job_id=?').bind(id).run();for(const table of ['yta_wait','yta_free_recovery']){const exists=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").bind(table).first();if(exists)await env.DB.prepare('DELETE FROM '+table+' WHERE job_id=?').bind(id).run();}await env.DB.prepare('UPDATE yta_operations SET result_json=NULL WHERE job_id=?').bind(id).run();await env.DB.prepare('DELETE FROM jobs WHERE id=? AND owner_id=?').bind(id,'owner').run();return json({deleted:true,id});}
   await ensureLiveSchema(env);
   if(path==='/api/live/capacity'&&request.method==='PUT')return json(await recordCapacity(env,await readJson(request)));
   if(path==='/api/live/capacity'&&request.method==='GET'){await ensureCapacitySchema(env);const snapshots=(await env.DB.prepare('SELECT provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json FROM yta_capacity').bind().all()).results||[];return json({snapshots:await Promise.all(snapshots.map(async row=>({...row,source:row.source.split(':')[0],valid_until:await capacityIdentityMatches(env,row.provider,row.source)?row.valid_until:0,reset:JSON.parse(row.reset_json),remaining:JSON.parse(row.remaining_json),reserved:JSON.parse(row.reserved_json),reset_json:undefined,remaining_json:undefined,reserved_json:undefined})))});}
@@ -194,7 +213,7 @@ export async function routeLive(request,env){
    if(renewed.meta?.changes!==1){const inserted=await env.DB.prepare('INSERT OR IGNORE INTO yta_quota(provider,allowance,consumed,request_limit,request_count,expires_at,confirmed_at,billing_disabled) VALUES(?,?,0,?,0,?,?,1)').bind(provider,body.allowance,body.requestLimit,now+3600000,now).run();if(inserted.meta?.changes!==1)throw new ProviderError('ACTIVE_GRANT_EXISTS','현재 할당이 유효합니다. 중복 설정으로 사용량을 초기화할 수 없습니다.');}
    return json({configured:true,provider,expiresInSeconds:3600,verification:'OWNER_ATTESTED_NOT_INDEPENDENTLY_VERIFIED'});
   }
-  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-chunk|audio-finish|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
+  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-chunk|audio-finish|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
   const id=match[1],action=match[2],job=await ownedJob(env,id);
   if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id)});
   if(action==='export'&&request.method==='GET'){
@@ -287,11 +306,30 @@ export async function routeLive(request,env){
    await env.DB.prepare("UPDATE yta_audio SET result_json=json_set(result_json,'$.geminiConsent',1,'$.geminiConsentAt',?) WHERE job_id=? AND state IN ('PLANNED','PAUSED')").bind(new Date().toISOString(),id).run();
    return json({recorded:true,provider:'gemini',fileSha256:body.fileSha256});
   }
+  if(action==='audio-recovery'&&request.method==='GET'){
+   const index=Number(url.searchParams.get('index'));if(!Number.isInteger(index)||index<0)throw new InputError('검토할 조각 번호 오류');
+   await ensureFreeRecoverySchema(env);
+   const evidence=await recoveryEvidence(env,id,index);
+   const approval=await env.DB.prepare('SELECT state FROM yta_free_recovery WHERE job_id=? AND chunk_index=?').bind(id,index).first();
+   return json({...evidence,approvalState:approval?.state??null,possiblePriorGeminiUsage:true,duplicateTranscriptionRisk:true,freeGroqCapacityRequiresFreshVerification:true});
+  }
+  if(action==='audio-recovery'&&request.method==='POST'){
+   const body=await readJson(request),index=body?.index;
+   if(!Number.isInteger(index)||index<0||body?.acknowledgePossibleGeminiUsage!==true||body?.acknowledgeDuplicateTranscriptionRisk!==true||body?.chooseGroqFree!==true)throw new InputError('이전 Gemini 사용 가능성과 중복 전사 위험을 인정하고 Groq 무료 재개를 직접 선택하세요.');
+   await ensureFreeRecoverySchema(env);
+   const evidence=await recoveryEvidence(env,id,index);
+   if(body.fileSha256!==evidence.fileSha256||body.geminiOperationId!==evidence.geminiOperationId||body.groq429OperationId!==evidence.groq429OperationId)throw new ProviderError('RECOVERY_EVIDENCE_CHANGED','원본 파일 또는 실패 작업이 검토한 대상과 다릅니다.');
+   const inserted=await env.DB.prepare('INSERT OR IGNORE INTO yta_free_recovery(job_id,chunk_index,file_sha256,gemini_operation_id,groq_429_operation_id,retry_operation_id,state,approved_at) VALUES(?,?,?,?,?,?,?,?)').bind(id,index,evidence.fileSha256,evidence.geminiOperationId,evidence.groq429OperationId,evidence.retryOperationId,'APPROVED',new Date().toISOString()).run();
+   if(inserted.meta?.changes!==1)throw new ProviderError('RECOVERY_ALREADY_RECORDED','기존 재개 승인은 초기화하거나 재사용할 수 없습니다.');
+   return json({approved:true,index,retryOperationId:evidence.retryOperationId,provider:'groq',automaticDispatch:false,possiblePriorGeminiUsage:true});
+  }
   if(action==='audio-progress'&&request.method==='GET'){
    const rows=(await env.DB.prepare('SELECT chunk_index,start_sec,end_sec,state FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];
    const waits=(await env.DB.prepare('SELECT operation_id,reason,reset_at FROM yta_wait WHERE job_id=?').bind(id).all()).results||[];
    const operations=(await env.DB.prepare("SELECT id,provider,state,error_code,created_at FROM yta_operations WHERE job_id=? AND provider IN ('groq','gemini') AND id LIKE ?").bind(id,id+':audio:%').all()).results||[];
-   const chunks=rows.map(c=>{const geminiAttempts=audioAttempts(operations,id,c.chunk_index,'gemini'),groqAttempts=audioAttempts(operations,id,c.chunk_index),latest=[...geminiAttempts,...groqAttempts].sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at)).at(-1),reviewed429Required=c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429';const wait=waits.find(item=>item.operation_id===latest?.id);const groqAllowed=!geminiAttempts.some(operation=>operation.state!=='BLOCKED'||!['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED','CAPACITY_WAIT'].includes(operation.error_code));return {index:c.chunk_index,start:c.start_sec,end:c.end_sec,state:c.state,groqAllowed,reviewed429Required,reviewOperationId:reviewed429Required?latest.id:null,reviewProvider:reviewed429Required?latest.provider:null,uncertainFailure:c.state==='UNCERTAIN'||(c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code!=='429'),waitReason:wait?.reason??null,resetAt:wait?.reset_at??null};});
+   const recoveryTable=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='yta_free_recovery'").bind().first();
+   const recoveries=recoveryTable?(await env.DB.prepare('SELECT chunk_index,gemini_operation_id,retry_operation_id,state FROM yta_free_recovery WHERE job_id=?').bind(id).all()).results||[]:[];
+   const chunks=rows.map(c=>{const geminiAttempts=audioAttempts(operations,id,c.chunk_index,'gemini'),groqAttempts=audioAttempts(operations,id,c.chunk_index),review=recoveries.find(row=>row.chunk_index===c.chunk_index&&row.state==='APPROVED'),latest=[...geminiAttempts,...groqAttempts].filter(row=>row.id!==review?.retry_operation_id||row.state!=='BLOCKED').sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at)).at(-1),reviewed429Required=c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429',approval=review?.gemini_operation_id===latest?.id?review:null,reviewedFreeRetryApproved=c.state==='UNCERTAIN'&&Boolean(approval);const wait=waits.find(item=>item.operation_id===latest?.id);const groqAllowed=reviewedFreeRetryApproved||!geminiAttempts.some(operation=>operation.state!=='BLOCKED'||!['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED','CAPACITY_WAIT'].includes(operation.error_code));return {index:c.chunk_index,start:c.start_sec,end:c.end_sec,state:c.state,groqAllowed,reviewedFreeRetryApproved,reviewed429Required,reviewOperationId:reviewed429Required?latest.id:null,reviewProvider:reviewed429Required?latest.provider:null,uncertainFailure:!reviewedFreeRetryApproved&&(c.state==='UNCERTAIN'||(c.state!=='DONE'&&latest?.state==='FAILED_UNCERTAIN'&&latest.error_code!=='429')),waitReason:wait?.reason??null,resetAt:wait?.reset_at??null};});
    const intervals=chunks.filter(c=>c.state==='DONE').map(c=>({start:c.start,end:c.end}));let covered=0,edge=0;
    for(const range of intervals){covered+=Math.max(0,range.end-Math.max(edge,range.start));edge=Math.max(edge,range.end);}
    let contiguous=0,prefixComplete=true;for(const c of chunks){if(c.state!=='DONE')prefixComplete=false;else if(prefixComplete)contiguous=c.end;}
@@ -311,8 +349,16 @@ export async function routeLive(request,env){
    const index=Number(url.searchParams.get('index')),provider=url.searchParams.get('provider')||'groq';if(!Number.isInteger(index)||index<0||!['groq','gemini'].includes(provider))throw new InputError('조각 번호 또는 전사 제공자 오류');
    const chunk=await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? AND chunk_index=?').bind(id,index).first();if(!chunk)throw new InputError('음성 조각 계획부터 저장하세요.');
    if(chunk.state==='DONE')return json({index,state:'DONE',cached:true});
+   let recovery=null;
+   if(chunk.state==='UNCERTAIN'){
+    if(provider!=='groq')throw new ProviderError('OPERATION_REVIEW_REQUIRED','미확정 Gemini 시도는 자동 재시도할 수 없습니다.');
+    await ensureFreeRecoverySchema(env);
+    let evidence;try{evidence=await recoveryEvidence(env,id,index);}catch{throw new ProviderError('OPERATION_REVIEW_REQUIRED','이 조각의 이전 호출 상태를 먼저 확인하세요.');}
+    recovery=await env.DB.prepare('SELECT * FROM yta_free_recovery WHERE job_id=? AND chunk_index=? AND state=?').bind(id,index,'APPROVED').first();
+    if(!recovery||recovery.file_sha256!==evidence.fileSha256||recovery.gemini_operation_id!==evidence.geminiOperationId||recovery.groq_429_operation_id!==evidence.groq429OperationId||recovery.retry_operation_id!==evidence.retryOperationId)throw new ProviderError('OPERATION_REVIEW_REQUIRED','이 조각의 정확한 실패 이력에 대한 소유자 승인이 필요합니다.');
+   }
    if(provider==='gemini'&&JSON.parse(chunk.result_json||'{}').geminiConsent!==1)throw new ProviderError('AUDIO_GEMINI_CONSENT_REQUIRED','이 작업과 원본 MP3에 대한 Gemini 음성 전송 동의를 저장하세요.');
-   if(!['PLANNED','PAUSED'].includes(chunk.state))throw new ProviderError('OPERATION_REVIEW_REQUIRED','이 조각의 이전 호출 상태를 먼저 확인하세요.');
+   if(!['PLANNED','PAUSED'].includes(chunk.state)&&!recovery)throw new ProviderError('OPERATION_REVIEW_REQUIRED','이 조각의 이전 호출 상태를 먼저 확인하세요.');
    const bytes=await boundedBytes(request,8000000),name=url.searchParams.get('name')||'chunk.mp3';
    if(!/\.mp3$/i.test(name))throw new InputError('대용량 분할 전사는 MP3 입력을 사용하세요.');
    const duration=scanMp3(bytes).durationSeconds,plannedDuration=chunk.end_sec-chunk.start_sec;
@@ -324,16 +370,18 @@ export async function routeLive(request,env){
    const latest=[...geminiAttempts,...groqAttempts].sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at)).at(-1);
    if(latest?.state==='CLAIMED')throw new ProviderError('OPERATION_IN_FLIGHT','이 조각의 호출이 진행 중입니다.');
    if(latest?.state==='FAILED_UNCERTAIN'){
-    if(latest.error_code!=='429')throw new ProviderError('OPERATION_REVIEW_REQUIRED','이전 음성 호출 결과가 불명확합니다. 제공자 사용량을 확인하세요.');
-    if(request.headers.get('x-provider-log-429-no-output-confirmed')!=='true'||request.headers.get('x-provider-log-429-operation-id')!==latest.id)throw new ProviderError('PROVIDER_429_REVIEW_REQUIRED','현재 실패 작업의 공식 제공자 요청 로그에서 429 거절과 출력 없음을 확인한 뒤에만 재개하세요.');
+    if(latest.error_code!=='429'&&!recovery)throw new ProviderError('OPERATION_REVIEW_REQUIRED','이전 음성 호출 결과가 불명확합니다. 제공자 사용량을 확인하세요.');
+    if(!recovery&&(request.headers.get('x-provider-log-429-no-output-confirmed')!=='true'||request.headers.get('x-provider-log-429-operation-id')!==latest.id))throw new ProviderError('PROVIDER_429_REVIEW_REQUIRED','현재 실패 작업의 공식 제공자 요청 로그에서 429 거절과 출력 없음을 확인한 뒤에만 재개하세요.');
    }
-   if(provider==='groq'&&geminiAttempts.some(operation=>operation.state!=='BLOCKED'||!['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED','CAPACITY_WAIT'].includes(operation.error_code)))throw new ProviderError('AUDIO_PROVIDER_SWITCH_REVIEW','전송 여부가 불명확한 Gemini 시도가 있어 Groq로 전환할 수 없습니다.');
+   if(provider==='groq'&&!recovery&&geminiAttempts.some(operation=>operation.state!=='BLOCKED'||!['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED','CAPACITY_WAIT'].includes(operation.error_code)))throw new ProviderError('AUDIO_PROVIDER_SWITCH_REVIEW','전송 여부가 불명확한 Gemini 시도가 있어 Groq로 전환할 수 없습니다.');
    const attempts=provider==='groq'?groqAttempts:geminiAttempts;
    if(attempts.length>=10)throw new ProviderError('RECOVERY_LIMIT_REACHED','이 조각의 재개 횟수가 한도에 도달했습니다.');
-   const operationId=latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429'&&latest.provider===provider?
+   const operationId=recovery?recovery.retry_operation_id:latest?.state==='FAILED_UNCERTAIN'&&latest.error_code==='429'&&latest.provider===provider?
     provider==='groq'?base+':reviewed429:'+groqAttempts.length:base+':gemini:0:reviewed429:'+geminiAttempts.length:
     attempts.at(-1)?.state==='BLOCKED'?attempts.at(-1).id:provider==='groq'?base:base+':gemini:0';
-   const locked=await env.DB.prepare("UPDATE yta_audio SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state IN ('PLANNED','PAUSED')").bind(id,index).run();
+   if(recovery){const approved=await env.DB.prepare("UPDATE yta_free_recovery SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state='APPROVED' AND gemini_operation_id=?").bind(id,index,recovery.gemini_operation_id).run();if(approved.meta?.changes!==1)throw new ProviderError('OPERATION_IN_FLIGHT','이 재개 승인은 이미 사용 중입니다.');}
+   const locked=await env.DB.prepare(recovery?"UPDATE yta_audio SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state='UNCERTAIN'":"UPDATE yta_audio SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state IN ('PLANNED','PAUSED')").bind(id,index).run();
+   if(locked.meta?.changes!==1&&recovery)await env.DB.prepare("UPDATE yta_free_recovery SET state='APPROVED' WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(id,index).run();
    if(locked.meta?.changes!==1)throw new ProviderError('OPERATION_IN_FLIGHT','같은 음성 조각이 이미 처리 중입니다.');
    try{
     const units=provider==='groq'?Math.max(10,Math.ceil(plannedDuration)):Math.ceil(duration*32)+8704;
@@ -343,11 +391,13 @@ export async function routeLive(request,env){
     if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','음성 조각 전사가 비었습니다. 전체 전사로 처리하지 않습니다.');
     const updated=await env.DB.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(JSON.stringify({...result,operationId,fileSha256:JSON.parse(chunk.result_json).fileSha256}),id,index).run();
     if(updated.meta?.changes!==1)throw new ProviderError('AUDIO_RESULT_RACE','음성 조각 결과가 다른 요청과 충돌했습니다.');
+    if(recovery)await env.DB.prepare("UPDATE yta_free_recovery SET state='USED' WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(id,index).run();
     return json({index,state:'DONE',provider,segmentCount:result.segments.length});
    }catch(error){
     const op=await env.DB.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').bind(operationId).first();
     const safe=!op||op.state==='BLOCKED'||(op?.state==='FAILED_UNCERTAIN'&&op.error_code==='429');
-    await env.DB.prepare("UPDATE yta_audio SET state=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(safe?'PAUSED':'UNCERTAIN',id,index).run();
+    if(recovery)await env.DB.prepare("UPDATE yta_free_recovery SET state=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(!op||op.state==='BLOCKED'?'APPROVED':'USED',id,index).run();
+    await env.DB.prepare("UPDATE yta_audio SET state=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(recovery?'UNCERTAIN':safe?'PAUSED':'UNCERTAIN',id,index).run();
     throw error;
    }
 
