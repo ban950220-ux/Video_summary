@@ -5,7 +5,7 @@ import {join} from 'node:path';
 
 const accountId='fe9d7e2a164274b1ff6cef150a75cb0b';
 const workerName='holy-rice-b914';
-const allowedOverrides=new Set(['CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','WRANGLER_CI_OVERRIDE_NAME','WRANGLER_CI_MATCH_TAG']);
+const allowedOverrides=new Set(['CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','WRANGLER_CI_OVERRIDE_NAME','WRANGLER_CI_MATCH_TAG','WRANGLER_CI_GENERATE_PREVIEW_ALIAS']);
 
 export function deploymentEnvironment(input,verifiedWorkerTag){
   for(const key of Object.keys(input)){
@@ -15,6 +15,7 @@ export function deploymentEnvironment(input,verifiedWorkerTag){
   if(input.CLOUDFLARE_ACCOUNT_ID&&input.CLOUDFLARE_ACCOUNT_ID!==accountId)throw Error('Production deploy: ACCOUNT_MISMATCH');
   if(input.WRANGLER_CI_OVERRIDE_NAME&&input.WRANGLER_CI_OVERRIDE_NAME!==workerName)throw Error('Production deploy: WORKER_NAME_MISMATCH');
   if(input.WRANGLER_CI_MATCH_TAG&&(typeof verifiedWorkerTag!=='string'||!verifiedWorkerTag||input.WRANGLER_CI_MATCH_TAG!==verifiedWorkerTag))throw Error('Production deploy: WORKER_TAG_MISMATCH');
+  if(Object.hasOwn(input,'WRANGLER_CI_GENERATE_PREVIEW_ALIAS')&&!['true','false'].includes(input.WRANGLER_CI_GENERATE_PREVIEW_ALIAS))throw Error('Production deploy: PREVIEW_ALIAS_FLAG_INVALID');
   return {
     PATH:input.PATH||'/usr/bin:/bin',
     HOME:input.HOME||'/tmp',
@@ -26,6 +27,7 @@ export function deploymentEnvironment(input,verifiedWorkerTag){
     CLOUDFLARE_ACCOUNT_ID:accountId,
     WRANGLER_CI_OVERRIDE_NAME:input.WRANGLER_CI_OVERRIDE_NAME,
     WRANGLER_CI_MATCH_TAG:input.WRANGLER_CI_MATCH_TAG,
+    WRANGLER_CI_GENERATE_PREVIEW_ALIAS:'false',
     WRANGLER_LOG:'error',WRANGLER_LOG_SANITIZE:'true',
     WRANGLER_WRITE_LOGS:'false',WRANGLER_SEND_METRICS:'false',
   };

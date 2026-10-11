@@ -10,10 +10,13 @@ test('Wrangler child target and log controls are fixed',()=>{
  assert.equal(env.WRANGLER_WRITE_LOGS,'false');
  assert.equal(env.WRANGLER_LOG,'error');
  assert.equal(env.WRANGLER_CI_OVERRIDE_NAME,'holy-rice-b914');
+ assert.equal(env.WRANGLER_CI_GENERATE_PREVIEW_ALIAS,'false');
  assert.equal(env.CLOUDFLARE_API_BASE_URL,undefined);
- for(const [key,value] of Object.entries({CLOUDFLARE_API_BASE_URL:'https://example.test',CF_API_BASE_URL:'https://example.test',CF_ACCOUNT_ID:'other',CLOUDFLARE_ENV:'preview',WRANGLER_LOG_PATH:'/tmp/leak',WRANGLER_WRITE_LOGS:'true',WRANGLER_CI_GENERATE_PREVIEW_ALIAS:'true'})){
+ for(const [key,value] of Object.entries({CLOUDFLARE_API_BASE_URL:'https://example.test',CF_API_BASE_URL:'https://example.test',CF_ACCOUNT_ID:'other',CLOUDFLARE_ENV:'preview',WRANGLER_LOG_PATH:'/tmp/leak',WRANGLER_WRITE_LOGS:'true'})){
   assert.throws(()=>deploymentEnvironment({...base,[key]:value}),/ENV_OVERRIDE_BLOCKED/);
  }
+ for(const value of ['true','false'])assert.equal(deploymentEnvironment({...base,WRANGLER_CI_GENERATE_PREVIEW_ALIAS:value}).WRANGLER_CI_GENERATE_PREVIEW_ALIAS,'false');
+ for(const value of ['', 'TRUE', '1', 'unexpected', null])assert.throws(()=>deploymentEnvironment({...base,WRANGLER_CI_GENERATE_PREVIEW_ALIAS:value}),/PREVIEW_ALIAS_FLAG_INVALID/);
  assert.throws(()=>deploymentEnvironment({...base,WRANGLER_CI_OVERRIDE_NAME:'other'}),/WORKER_NAME_MISMATCH/);
  assert.equal(deploymentEnvironment({...base,WRANGLER_CI_MATCH_TAG:'REVIEWED_TAG'},'REVIEWED_TAG').WRANGLER_CI_MATCH_TAG,'REVIEWED_TAG');
  assert.throws(()=>deploymentEnvironment({...base,WRANGLER_CI_MATCH_TAG:'OTHER'},'REVIEWED_TAG'),/WORKER_TAG_MISMATCH/);

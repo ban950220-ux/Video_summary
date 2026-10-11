@@ -161,6 +161,19 @@ fixed account and reviewed CI Worker name, with unsupported `CF_`,
 `CLOUDFLARE_`, and `WRANGLER_` overrides rejected. Its stdout and stderr are
 captured but never relayed to Build output, and pinned Wrangler 4.149.0 receives
 `WRANGLER_WRITE_LOGS=false`. The wrapper emits only a generic failure message.
+Build `f4d2066e-5cbd-4bab-a4b0-46f64d6a4108` at source `38c88c2` stopped
+before any remote precheck or upload because Workers Builds supplied
+`WRANGLER_CI_GENERATE_PREVIEW_ALIAS`. Pinned Wrangler 4.149.0 accepts only
+`true` or `false` for that flag (default `false`) and uses `true` when forming
+an alias for `versions upload`. The wrapper now accepts only those exact input
+strings and always passes `false` to its child Wrangler; invalid values and
+all other unreviewed overrides still fail before the child starts. The guarded
+command is `wrangler deploy`, with no preview-alias argument. This flag does
+not enable a separate preview environment. A version alias, if created by an
+upload path, would name the same Worker version; `preview_urls=false` remains
+explicit in config and is checked against remote before and after upload.
+[Cloudflare's Version URLs documentation](https://developers.cloudflare.com/workers/versions-and-deployments/version-urls/)
+states that disabling Version URLs disables routing to aliased Version URLs.
 This protects against Wrangler's raw dashboard diff appearing in its console
 or Wrangler debug files under this pinned version. It does not make Cloudflare
 platform logs or unrelated Build commands private; never print raw responses
