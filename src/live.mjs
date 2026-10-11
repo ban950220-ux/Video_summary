@@ -255,6 +255,14 @@ async function ensureFreeBatchSchema(env){
  const rows=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('yta_free_batches','yta_free_batch_chunks')").bind().all()).results||[];
  if(rows.length!==2||typeof env.DB.batch!=='function')throw new ProviderError('FREE_BATCH_SCHEMA_REQUIRED','제한형 무료 배치 테이블과 원자적 저장이 필요합니다.');
 }
+function validFreeBatchExpiry(batch,now=Date.now()){
+ const approvedAt=Date.parse(batch?.approved_at);
+ return Number.isSafeInteger(batch?.expires_at)&&Number.isSafeInteger(approvedAt)&&approvedAt<=now&&batch.expires_at>now&&batch.expires_at>approvedAt&&batch.expires_at<=approvedAt+3_600_000;
+}
+function assertUsableFreeBatchTranscript(result,duration){
+ const segments=result?.segments;
+ if(result?.provider!=='groq'||result.model!=='whisper-large-v3-turbo'||typeof result.text!=='string'||!result.text.trim()||!Array.isArray(segments)||!segments.length||segments.length>1000||segments.some((part,i)=>!part||typeof part.text!=='string'||!part.text.trim()||part.text.length>2000||typeof part.start!=='number'||typeof part.end!=='number'||!Number.isFinite(part.start)||!Number.isFinite(part.end)||part.start<0||part.end<=part.start||part.end>duration+1||(i>0&&(part.start<segments[i-1].start||part.end<segments[i-1].end))))throw new ProviderError('AUDIO_RESPONSE_INVALID','Groq 전사 구간과 원문 형식이 유효하지 않습니다. 요청 이력을 검토하세요.');
+}
 async function freeBatchPlan(env,job){
  if(job.source_type!=='audio'||!Number.isFinite(job.duration_seconds)||job.duration_seconds<=0)throw new ProviderError('FREE_BATCH_PLAN_INVALID','보유 음성 계획을 확인하세요.');
  const rows=(await env.DB.prepare('SELECT chunk_index,start_sec,end_sec,state,result_json FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(job.id).all()).results||[];
@@ -276,7 +284,7 @@ async function freeBatchPlan(env,job){
 }
 async function assertFreeBatchReady(env,{jobId,index,operationId,keyIdentity,expiresAt,units,chunkIdsJson}){
  const blocked=()=>{const error=new ProviderError('FREE_BATCH_REVIEW_REQUIRED','배치 승인·키·조각 또는 만료 상태가 바뀌었습니다.');error.preDispatchBlocked=true;throw error;};
- if(env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true'||expiresAt<=Date.now())blocked();
+ if(env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true'||!Number.isSafeInteger(expiresAt)||expiresAt<=Date.now())blocked();
  const batch=await env.DB.prepare('SELECT * FROM yta_free_batches WHERE job_id=?').bind(jobId).first();
  const row=await env.DB.prepare('SELECT state,units,operation_id FROM yta_free_batch_chunks WHERE job_id=? AND chunk_index=?').bind(jobId,index).first();
  const audio=await env.DB.prepare('SELECT state,result_json FROM yta_audio WHERE job_id=? AND chunk_index=?').bind(jobId,index).first();
@@ -284,7 +292,7 @@ async function assertFreeBatchReady(env,{jobId,index,operationId,keyIdentity,exp
  let stored;try{stored=JSON.parse(audio?.result_json);}catch{blocked();}
  let ids;try{ids=JSON.parse(batch?.chunk_ids_json);}catch{blocked();}
  const scopeRows=(await env.DB.prepare('SELECT chunk_index,units,state FROM yta_free_batch_chunks WHERE job_id=? ORDER BY chunk_index').bind(jobId).all()).results||[];
- if(batch?.owner_id!=='owner'||batch.state!=='APPROVED'||batch.model!=='whisper-large-v3-turbo'||batch.free_tier_confirmed!==1||batch.billing_disabled!==1||batch.key_identity!==keyIdentity||batch.expires_at!==expiresAt||batch.chunk_ids_json!==chunkIdsJson||!Array.isArray(ids)||JSON.stringify(ids)!==JSON.stringify(scopeRows.map(item=>item.chunk_index))||scopeRows.some(item=>!Number.isSafeInteger(item.units)||item.units<10||item.units>601||!['APPROVED','CLAIMED','DONE'].includes(item.state))||scopeRows.length!==batch.max_requests||scopeRows.reduce((sum,item)=>sum+item.units,0)!==batch.max_audio_seconds||!ids.includes(index)||row?.state!=='CLAIMED'||row.units!==units||row.operation_id!==operationId||audio?.state!=='CLAIMED'||stored?.fileSha256!==batch.file_sha256||op?.state!=='CLAIMED'||op.provider!=='groq'||op.units!==units||await capacityIdentity(env,'groq')!==keyIdentity)blocked();
+ if(batch?.owner_id!=='owner'||batch.state!=='APPROVED'||!validFreeBatchExpiry(batch)||batch.model!=='whisper-large-v3-turbo'||batch.free_tier_confirmed!==1||batch.billing_disabled!==1||batch.key_identity!==keyIdentity||batch.expires_at!==expiresAt||batch.chunk_ids_json!==chunkIdsJson||!Array.isArray(ids)||JSON.stringify(ids)!==JSON.stringify(scopeRows.map(item=>item.chunk_index))||scopeRows.some(item=>!Number.isSafeInteger(item.units)||item.units<10||item.units>601||!['APPROVED','CLAIMED','DONE'].includes(item.state))||scopeRows.length!==batch.max_requests||scopeRows.reduce((sum,item)=>sum+item.units,0)!==batch.max_audio_seconds||!ids.includes(index)||row?.state!=='CLAIMED'||row.units!==units||row.operation_id!==operationId||audio?.state!=='CLAIMED'||stored?.fileSha256!==batch.file_sha256||op?.state!=='CLAIMED'||op.provider!=='groq'||op.units!==units||await capacityIdentity(env,'groq')!==keyIdentity)blocked();
  await validateGroqProbeLedger(env);
  const cutoff=new Date(Date.now()-GROQ_HOURLY_WINDOW_MS).toISOString();
  const other=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='CLAIMED' AND id<>? LIMIT 1").bind(operationId).first();
@@ -292,7 +300,7 @@ async function assertFreeBatchReady(env,{jobId,index,operationId,keyIdentity,exp
  const used=await env.DB.prepare("SELECT COALESCE(SUM(units),0) AS units FROM yta_operations WHERE provider='groq' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?))").bind(cutoff).first();
  const daily=await env.DB.prepare("SELECT COALESCE(SUM(units),0) AS units FROM yta_operations WHERE provider='groq' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?))").bind(new Date(Date.now()-86_400_000).toISOString()).first();
  if(other||cooldown||Number(used?.units||0)>GROQ_APP_HOURLY_CAP_SECONDS||Number(daily?.units||0)>GROQ_APP_DAILY_CAP_SECONDS)blocked();
- let final;try{final=await env.DB.prepare("SELECT 1 AS ok FROM yta_free_batches b JOIN yta_free_batch_chunks c ON c.job_id=b.job_id JOIN yta_audio a ON a.job_id=c.job_id AND a.chunk_index=c.chunk_index JOIN yta_operations o ON o.id=c.operation_id AND o.job_id=b.job_id WHERE b.job_id=? AND b.owner_id='owner' AND b.state='APPROVED' AND b.model='whisper-large-v3-turbo' AND b.free_tier_confirmed=1 AND b.billing_disabled=1 AND b.max_requests=(SELECT COUNT(*) FROM yta_free_batch_chunks WHERE job_id=b.job_id) AND b.max_audio_seconds=(SELECT COALESCE(SUM(units),0) FROM yta_free_batch_chunks WHERE job_id=b.job_id) AND b.file_sha256=json_extract(a.result_json,'$.fileSha256') AND b.chunk_ids_json=? AND b.key_identity=? AND b.expires_at=? AND c.chunk_index=? AND c.state='CLAIMED' AND c.units=? AND c.operation_id=? AND a.state='CLAIMED' AND o.state='CLAIMED'").bind(jobId,chunkIdsJson,keyIdentity,expiresAt,index,units,operationId).first();}catch{blocked();}
+ let final;try{final=await env.DB.prepare("SELECT 1 AS ok FROM yta_free_batches b JOIN yta_free_batch_chunks c ON c.job_id=b.job_id JOIN yta_audio a ON a.job_id=c.job_id AND a.chunk_index=c.chunk_index JOIN yta_operations o ON o.id=c.operation_id AND o.job_id=b.job_id WHERE b.job_id=? AND b.owner_id='owner' AND b.state='APPROVED' AND b.model='whisper-large-v3-turbo' AND b.free_tier_confirmed=1 AND b.billing_disabled=1 AND typeof(b.expires_at)='integer' AND b.approved_at=? AND b.expires_at>? AND b.max_requests=(SELECT COUNT(*) FROM yta_free_batch_chunks WHERE job_id=b.job_id) AND b.max_audio_seconds=(SELECT COALESCE(SUM(units),0) FROM yta_free_batch_chunks WHERE job_id=b.job_id) AND b.file_sha256=json_extract(a.result_json,'$.fileSha256') AND b.chunk_ids_json=? AND b.key_identity=? AND b.expires_at=? AND c.chunk_index=? AND c.state='CLAIMED' AND c.units=? AND c.operation_id=? AND a.state='CLAIMED' AND o.state='CLAIMED'").bind(jobId,batch.approved_at,Date.now(),chunkIdsJson,keyIdentity,expiresAt,index,units,operationId).first();}catch{blocked();}
  if(!final||Date.now()>=expiresAt||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')blocked();
 }
 async function executeFreeBatchChunk(env,{jobId,index,operationId,units,batch,bytes,duration}){
@@ -307,7 +315,7 @@ async function executeFreeBatchChunk(env,{jobId,index,operationId,units,batch,by
   const guard=()=>assertFreeBatchReady(env,{jobId,index,operationId,keyIdentity:batch.key_identity,expiresAt:batch.expires_at,units,chunkIdsJson:batch.chunk_ids_json});
   await guard();
   const result=await runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:guard,beforeFetch:guard});
-  if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','빈 전사는 완료로 기록하지 않습니다. 결과를 검토하세요.');
+  assertUsableFreeBatchTranscript(result,duration);
   await env.DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),jobId,'owner','groq','LIVE_FREE_BATCH','audio_seconds',units,0,null,'APP_RESERVED_ACCOUNT_CAPACITY_UNKNOWN',new Date().toISOString()).run();
   await env.DB.prepare("UPDATE yta_operations SET state='DONE',result_json=?,created_at=? WHERE id=? AND state='CLAIMED'").bind(JSON.stringify(result),new Date().toISOString(),operationId).run();
   return result;
@@ -561,7 +569,7 @@ export async function routeLive(request,env){
     batch=await env.DB.prepare('SELECT * FROM yta_free_batches WHERE job_id=? AND owner_id=?').bind(id,'owner').first();
     const approval=await env.DB.prepare('SELECT units,state,operation_id FROM yta_free_batch_chunks WHERE job_id=? AND chunk_index=?').bind(id,index).first();
     const fileSha=JSON.parse(chunk.result_json||'{}').fileSha256;
-    if(!batch||batch.state!=='APPROVED'||batch.model!=='whisper-large-v3-turbo'||batch.file_sha256!==fileSha||batch.expires_at<=Date.now()||batch.free_tier_confirmed!==1||batch.billing_disabled!==1||approval?.state!=='APPROVED'||approval.operation_id!==operationId||approval.units!==Math.max(10,Math.ceil(plannedDuration))||await capacityIdentity(env,'groq')!==batch.key_identity)throw new ProviderError('FREE_BATCH_REVIEW_REQUIRED','정확한 원본·키·조각의 유효한 Groq Free 배치 승인이 필요합니다.');
+    if(!batch||batch.state!=='APPROVED'||batch.model!=='whisper-large-v3-turbo'||batch.file_sha256!==fileSha||!validFreeBatchExpiry(batch)||batch.free_tier_confirmed!==1||batch.billing_disabled!==1||approval?.state!=='APPROVED'||approval.operation_id!==operationId||approval.units!==Math.max(10,Math.ceil(plannedDuration))||await capacityIdentity(env,'groq')!==batch.key_identity)throw new ProviderError('FREE_BATCH_REVIEW_REQUIRED','정확한 원본·키·조각의 유효한 Groq Free 배치 승인이 필요합니다.');
     const claimed=await env.DB.prepare("UPDATE yta_free_batch_chunks SET state='CLAIMED' WHERE job_id=? AND chunk_index=? AND state='APPROVED' AND EXISTS (SELECT 1 FROM yta_free_batches b WHERE b.job_id=? AND b.owner_id='owner' AND b.state='APPROVED' AND b.expires_at>?) AND NOT EXISTS (SELECT 1 FROM yta_free_batch_chunks c WHERE c.job_id=? AND c.state='CLAIMED') AND NOT EXISTS (SELECT 1 FROM yta_free_batch_chunks c WHERE c.job_id=? AND c.chunk_index<? AND c.state<>'DONE')").bind(id,index,id,Date.now(),id,id,index).run();
     if(claimed.meta?.changes!==1)throw new ProviderError('FREE_BATCH_REVIEW_REQUIRED','승인 순서·진행 중 요청 또는 만료 상태를 확인하세요.');
    }

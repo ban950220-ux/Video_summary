@@ -61,15 +61,38 @@ test('bounded Groq Free batch stops on first 429, retains failed operation and u
 });
 test('empty Groq transcription stops the batch without marking the operation DONE',async()=>{
  const f=await freeBatchFixture(),old=fetch;globalThis.fetch=async()=>Response.json({text:'',segments:[]});
- try{await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env);const response=await f.upload(0);assert.equal((await response.json()).error.code,'EMPTY_AUDIO_TRANSCRIPT');assert.equal(f.db.prepare('SELECT state FROM yta_free_batches WHERE job_id=?').get(f.id).state,'STOPPED');assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE job_id=?').get(f.id).state,'FAILED_UNCERTAIN');assert.equal(f.db.prepare('SELECT state FROM yta_audio WHERE job_id=? AND chunk_index=0').get(f.id).state,'UNCERTAIN');}
+ try{await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env);const response=await f.upload(0);assert.equal((await response.json()).error.code,'AUDIO_RESPONSE_INVALID');assert.equal(f.db.prepare('SELECT state FROM yta_free_batches WHERE job_id=?').get(f.id).state,'STOPPED');assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE job_id=?').get(f.id).state,'FAILED_UNCERTAIN');assert.equal(f.db.prepare('SELECT state FROM yta_audio WHERE job_id=? AND chunk_index=0').get(f.id).state,'UNCERTAIN');}
  finally{globalThis.fetch=old;f.db.close();}
 });
+test('malformed Groq 200 transcripts stop before DONE and never release the next batch chunk',async()=>{
+ for(const body of [
+  {text:'성공',segments:[{}]},
+  {text:' ',segments:[{start:0,end:1,text:'성공'}]},
+  {text:'성공',segments:[{start:0,end:1,text:' '}]},
+  {text:'성공',segments:[{start:'0',end:1,text:'성공'}]},
+  {text:'성공',segments:[{start:0,end:9999,text:'성공'}]},
+  {text:'성공',segments:[{start:2,end:3,text:'둘'},{start:1,end:2,text:'하나'}]},
+ ]){
+  const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json(body);};
+  try{await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env);
+   assert.equal((await(await f.upload(0)).json()).error.code,'AUDIO_RESPONSE_INVALID');
+   assert.equal((await f.upload(1)).status,409);assert.equal(calls,1);
+   assert.equal(f.db.prepare('SELECT state FROM yta_free_batches WHERE job_id=?').get(f.id).state,'STOPPED');
+   assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE job_id=?').get(f.id).state,'FAILED_UNCERTAIN');
+   assert.equal(f.db.prepare('SELECT state FROM yta_free_batch_chunks WHERE job_id=? AND chunk_index=1').get(f.id).state,'APPROVED');
+  }finally{globalThis.fetch=old;f.db.close();}
+ }
+});
 test('bounded batch cancellation, expiry, changed key and malformed scope block before provider fetch',async()=>{
- for(const mode of ['cancel','expire','key','malformed','limit','units']){
+ for(const mode of ['cancel','expire','expiry-text','expiry-real','expiry-overlong','approval-time','key','malformed','limit','units']){
   const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not send');};
   try{assert.equal((await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env)).status,200);
    if(mode==='cancel')assert.equal((await routeApi(request(f.path+'/audio-free-batch','DELETE'),f.env)).status,200);
    if(mode==='expire')f.db.prepare('UPDATE yta_free_batches SET expires_at=? WHERE job_id=?').run(Date.now()-1,f.id);
+   if(mode==='expiry-text')f.db.prepare('UPDATE yta_free_batches SET expires_at=? WHERE job_id=?').run('not-a-time',f.id);
+   if(mode==='expiry-real')f.db.prepare('UPDATE yta_free_batches SET expires_at=? WHERE job_id=?').run(Date.now()+500.5,f.id);
+   if(mode==='expiry-overlong')f.db.prepare('UPDATE yta_free_batches SET expires_at=? WHERE job_id=?').run(Date.now()+7_200_000,f.id);
+   if(mode==='approval-time')f.db.prepare('UPDATE yta_free_batches SET approved_at=? WHERE job_id=?').run('not-a-time',f.id);
    if(mode==='key')f.env.GROQ_API_KEY='OTHER_TEST_ONLY_KEY';
    if(mode==='malformed')f.db.prepare('UPDATE yta_free_batches SET chunk_ids_json=? WHERE job_id=?').run('{',f.id);
    if(mode==='limit')f.db.prepare('UPDATE yta_free_batches SET max_audio_seconds=max_audio_seconds+1 WHERE job_id=?').run(f.id);
@@ -77,6 +100,14 @@ test('bounded batch cancellation, expiry, changed key and malformed scope block 
    assert.equal((await f.upload(0)).status,409);assert.equal(calls,0);
   }finally{globalThis.fetch=old;f.db.close();}
  }
+});
+test('batch expiry corrupted during the final D1 read blocks the provider fetch',async()=>{
+ const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not send');};
+ try{await routeApi(request(f.path+'/audio-free-batch','POST',f.approval),f.env);
+  const original=f.env.DB;let changed=false;f.env.DB={...original,prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('SELECT 1 AS ok FROM yta_free_batches'))return statement;return {bind(...args){const bound=statement.bind(...args);return {...bound,async first(){if(!changed){changed=true;f.db.prepare('UPDATE yta_free_batches SET expires_at=? WHERE job_id=?').run('not-a-time',f.id);}return bound.first();}};}};}};
+  assert.equal((await f.upload(0)).status,409);assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT state FROM yta_free_batch_chunks WHERE job_id=? AND chunk_index=0').get(f.id).state,'APPROVED');
+ }finally{globalThis.fetch=old;f.db.close();}
 });
 test('batch cancellation during the last D1 read prevents dispatch and keeps unsent scope',async()=>{
  const f=await freeBatchFixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not send');};

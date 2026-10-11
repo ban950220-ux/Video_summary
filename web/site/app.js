@@ -73,30 +73,34 @@ function showReport(job,container,persisted){empty(container);
   if(job.id){const tools=el('div',{className:'library-actions'});for(const format of ['md','txt'])tools.append(el('a',{className:'btn secondary small',text:format.toUpperCase()+' 내보내기',attrs:{href:'/api/jobs/'+job.id+'/export?format='+format}}));const source=el('button',{className:'btn secondary small',text:'원문·근거 보기'});source.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/source');const pre=el('pre',{text:data.source?.segments?.length?(data.source.segments).map(x=>'#'+x.id+' ['+(x.startMs===null?'시각 미확인':Math.floor(x.startMs/1000)+'초')+'] '+x.text).join('\n'):'저장된 전체 전사가 아직 없습니다.'});container.append(pre);source.disabled=true;}catch(e){toast(safeError(e));}};tools.append(source);if(report?.kind!=='GEMINI_EVIDENCE_LINKED'){const review=el('button',{className:'btn secondary small',text:'요약 부분 출력 검토'});review.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/summary-review');container.append(el('pre',{text:data.partialText}));review.disabled=true;}catch(error){toast(safeError(error));}};tools.append(review);}container.append(tools);}
 }
 async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button'),progress=$('#analysis-progress');let data,bytes,plan;
+ const mode=state.mode,execution=Object.freeze({batch:$('#audio-free-batch-run').checked,provider:$('#audio-provider').value,geminiConsent:$('#audio-gemini-confirm').checked,resume:$('#resume-job').value.trim(),file:$('#audio-file').files[0],rights:$('#audio-rights').checked});
  const live=$('#live-analysis').checked;const title=$('#video-title').value.trim();const duration=Number($('#duration-min').value);
  if(!Number.isInteger(duration)||duration<1||duration>120){toast('영상 길이는 1~120분입니다.');return;}
  button.disabled=true;
  try{
-  if(state.mode==='url')data={sourceType:'url',url:$('#youtube-url').value.trim(),durationSeconds:duration*60,title};
-  else if(state.mode==='text'){const file=$('#caption-file').files[0];if(!file||!/\.(srt|vtt|txt)$/i.test(file.name)||file.size>2000000)throw Error('2MB 이하 SRT/VTT/TXT를 선택하세요.');data={sourceType:'text',filename:file.name,transcript:await file.text(),durationSeconds:duration*60,title:title||file.name,persistTranscript:true};}
-  else{const file=$('#audio-file').files[0];if(!file||!/\.mp3$/i.test(file.name)||file.size>200000000)throw Error('200MB 이하 MP3를 선택하세요.');if(!live||!$('#audio-rights').checked)throw Error('무료 API 처리와 적법한 보유 음성 업로드 동의가 필요합니다.');progress.textContent='MP3 시간축 및 조각 계획 확인 중…';bytes=new Uint8Array(await file.arrayBuffer());plan=planMp3(bytes);data={sourceType:'audio',durationSeconds:plan.durationSeconds,title:title||file.name};}
-  await api('/api/preflight',{method:'POST',body:data});progress.textContent='분석 기록 생성 중…';let result;const resume=state.mode==='audio'?$('#resume-job').value.trim():'';if(resume){result=await api('/api/jobs/'+encodeURIComponent(resume));if(result.job.source_type!=='audio'||Math.abs(result.job.duration_seconds-plan.durationSeconds)>1)throw Error('선택한 음성과 이전 분석이 다릅니다.');result.persisted=true;}else result=await api('/api/jobs',{method:'POST',body:data});const id=result.job.id;
+  if(execution.batch&&(mode!=='audio'||!live||!execution.resume||execution.provider!=='groq'||execution.geminiConsent))throw Error('제한 배치는 기존 분석 ID와 Groq만 사용하며 Gemini 동의는 선택하지 마세요.');
+  const submittedScope=execution.batch?await api('/api/jobs/'+encodeURIComponent(execution.resume)+'/audio-free-batch'):null;
+  if(execution.batch&&(!submittedScope?.approved||submittedScope.jobId!==execution.resume||submittedScope.state!=='APPROVED'))throw Error('제출 시점의 유효한 Groq Free 배치 승인을 확인하세요.');
+  if(mode==='url')data={sourceType:'url',url:$('#youtube-url').value.trim(),durationSeconds:duration*60,title};
+  else if(mode==='text'){const file=$('#caption-file').files[0];if(!file||!/\.(srt|vtt|txt)$/i.test(file.name)||file.size>2000000)throw Error('2MB 이하 SRT/VTT/TXT를 선택하세요.');data={sourceType:'text',filename:file.name,transcript:await file.text(),durationSeconds:duration*60,title:title||file.name,persistTranscript:true};}
+  else{const file=execution.file;if(!file||!/\.mp3$/i.test(file.name)||file.size>200000000)throw Error('200MB 이하 MP3를 선택하세요.');if(!live||!execution.rights)throw Error('무료 API 처리와 적법한 보유 음성 업로드 동의가 필요합니다.');progress.textContent='MP3 시간축 및 조각 계획 확인 중…';bytes=new Uint8Array(await file.arrayBuffer());plan=planMp3(bytes);data={sourceType:'audio',durationSeconds:plan.durationSeconds,title:title||file.name};}
+  await api('/api/preflight',{method:'POST',body:data});progress.textContent='분석 기록 생성 중…';let result;const resume=mode==='audio'?execution.resume:'';if(resume){result=await api('/api/jobs/'+encodeURIComponent(resume));if(result.job.source_type!=='audio'||Math.abs(result.job.duration_seconds-plan.durationSeconds)>1)throw Error('선택한 음성과 이전 분석이 다릅니다.');result.persisted=true;}else result=await api('/api/jobs',{method:'POST',body:data});const id=result.job.id;
   $('#result-panel').hidden=false;showReport(result.job,$('#result-content'),result.persisted);
   if(live){
-   if(state.mode==='url'){progress.textContent='기존 자막 조회 중…';result=await api('/api/jobs/'+id+'/native',{method:'POST',body:{}});if(['NEED_UPLOAD','NATIVE_PENDING'].includes(result.job.status)){showReport(result.job,$('#result-content'),true);throw Error(result.job.status==='NATIVE_PENDING'?'제공자 처리 대기: 이력에서 자막 결과 조회를 사용하세요.':'기존 자막이 없습니다. 보유 음성/자막을 사용하세요.');}}
-   if(state.mode==='audio'){
+   if(mode==='url'){progress.textContent='기존 자막 조회 중…';result=await api('/api/jobs/'+id+'/native',{method:'POST',body:{}});if(['NEED_UPLOAD','NATIVE_PENDING'].includes(result.job.status)){showReport(result.job,$('#result-content'),true);throw Error(result.job.status==='NATIVE_PENDING'?'제공자 처리 대기: 이력에서 자막 결과 조회를 사용하세요.':'기존 자막이 없습니다. 보유 음성/자막을 사용하세요.');}}
+   if(mode==='audio'){
     const fileSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
+    if(execution.batch&&submittedScope.fileSha256!==fileSha256)throw Error('제출 시점에 승인된 MP3와 선택한 파일이 다릅니다.');
     await api('/api/jobs/'+id+'/audio-plan',{method:'POST',body:{rightsConfirmed:true,fileSha256,chunks:plan.chunks.map(({index,start,end})=>({index,start,end}))}});
-    if($('#audio-free-batch-run').checked){
-     if(!resume||$('#audio-provider').value!=='groq'||$('#audio-gemini-confirm').checked)throw Error('제한 배치는 기존 분석 ID와 Groq만 사용하며 Gemini 동의는 선택하지 마세요.');
-     const scope=await api('/api/jobs/'+id+'/audio-free-batch');
+    if(execution.batch){
+     const scope=submittedScope;
      const run=await runApprovedFreeBatch({jobId:id,fileSha256,approvedChunkIds:scope.chunkIds,chunks:plan.chunks,getBatch:()=>api('/api/jobs/'+id+'/audio-free-batch'),getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),foreground:()=>!document.hidden,now:Date.now,wait:waitForeground,onUpdate:status=>{progress.textContent='Groq Free 제한 배치 · 조각 '+(status.index+1)+(status.done?' 저장됨':' 전송 중')+' · 분석 '+id;},sendChunk:async c=>{const prepared=prepareMp3Chunk(bytes.subarray(c.byteStart,c.byteEnd));const response=await fetch('/api/jobs/'+id+'/audio-chunk?index='+c.index+'&provider=groq&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream','x-groq-free-batch':'true'},credentials:'same-origin',body:prepared.bytes});const data=await response.json();return response.ok?data:{code:data.error?.code||'AUDIO_SEND_FAILED'};}});
      if(!run.complete)throw Error('Groq Free 제한 배치 중단: '+run.reason+' · 조각 '+((run.index??scope.chunkIds?.[0]??0)+1)+' · 분석 '+id+'. 이력과 제공자 상태를 확인하세요.');
      progress.textContent='승인된 Groq Free 조각 전송이 끝났습니다. 전사 병합·요약은 별도 검토 후 진행하세요. 분석 '+id;toast('제한 배치 전송이 끝났습니다.');return;
     }
-    if($('#audio-gemini-confirm').checked)await api('/api/jobs/'+id+'/audio-consent',{method:'POST',body:{provider:'gemini',fileSha256,consent:true}});
+    if(execution.geminiConsent)await api('/api/jobs/'+id+'/audio-consent',{method:'POST',body:{provider:'gemini',fileSha256,consent:true}});
     const run=await runAudioChunks({chunks:plan.chunks,getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),getCapacity:()=>api('/api/live/capacity'),getQuota:()=>api('/api/live/quota'),now:Date.now,foreground:()=>!document.hidden,
-     chooseProvider:()=>$('#audio-provider').value,authorizedProviders:()=>['groq',...($('#audio-gemini-confirm').checked?['gemini']:[])],
+     chooseProvider:()=>execution.provider,authorizedProviders:()=>['groq',...(execution.geminiConsent?['gemini']:[])],
      review429:async(c,saved)=>confirm('조각 '+(c.index+1)+'의 '+saved.reviewProvider+' 공식 요청 로그에서 429 거절과 출력 없음, 재시도 가능 시각을 확인했나요?')?saved.reviewOperationId:null,
      wait:waitForeground,
      onUpdate:status=>{progress.textContent=status.waitingUntil?'제공자 호출 간격 대기 중 · '+fmtDate(status.waitingUntil):'음성 전사 '+(status.index+1)+' / '+plan.chunks.length+' · 기록 '+id;},
