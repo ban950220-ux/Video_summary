@@ -22,7 +22,7 @@ async function grantEnv(env,provider){
  if(!quota||quota.billing_disabled!==1||quota.expires_at<=Date.now())throw new ProviderError('QUOTA_UNVERIFIED','설정에서 결제 비활성·무료 잔여량을 먼저 확인하세요.');
  const credential=await env.DB.prepare('SELECT updated_at FROM provider_credentials WHERE owner_id=? AND provider=?').bind('owner',provider).first();
  if(credential&&Date.parse(credential.updated_at)>quota.confirmed_at)throw new ProviderError('KEY_CHANGED','키 변경 뒤 무료 계정 확인을 다시 해야 합니다.');
- return {...env,[provider.toUpperCase()+'_FREE_PLAN_CONFIRMED']:'true'};
+ return {...env,[provider.toUpperCase()+'_FREE_PLAN_CONFIRMED']:'true',quotaExpiresAt:quota.expires_at};
 }
 const GEMINI_SPACING_MS=13_000; // Conservatively space starts from the previous settled request.
 const GEMINI_STALE_CLAIM_MS=300_000;
@@ -84,7 +84,7 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
 }
 async function assertGroqBeforeDispatch(env,id){
  try{
-  await grantEnv(env,'groq');
+  const {quotaExpiresAt}=await grantEnv(env,'groq');
   const own=await env.DB.prepare("SELECT state FROM yta_operations WHERE id=? AND provider='groq'").bind(id).first();
   if(own?.state!=='CLAIMED')throw new ProviderError('OPERATION_REVIEW_REQUIRED','음성 호출 예약 상태를 확인할 수 없습니다.');
   const cutoff=new Date(Date.now()-GROQ_HOURLY_WINDOW_MS).toISOString();
@@ -92,6 +92,7 @@ async function assertGroqBeforeDispatch(env,id){
   if(recent429)throw new ProviderError('GROQ_COOLDOWN_PENDING','Groq 429 이후 최소 1시간 대기 중입니다.');
   const other=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider='groq' AND state='CLAIMED' AND id<>? LIMIT 1").bind(id).first();
   if(other)throw new ProviderError('OPERATION_IN_FLIGHT','다른 음성 호출이 진행 중입니다.');
+  if(!Number.isFinite(quotaExpiresAt)||quotaExpiresAt<=Date.now())throw new ProviderError('QUOTA_UNVERIFIED','호출 직전 무료 허가가 만료됐습니다.');
  }catch(error){error.preDispatchBlocked=true;throw error;}
 }
 async function storeTranscriptResult(env,job,segments,provenance,extra={}){

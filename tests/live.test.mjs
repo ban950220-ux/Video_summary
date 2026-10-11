@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
-import {readFileSync} from 'node:fs';
+import {readFileSync,mkdtempSync,rmSync,writeFileSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {routeApi} from '../src/worker.mjs';
 import {validateAnalysis} from '../src/report.mjs';
 import {planMp3,scanMp3,prepareMp3Chunk,mergeAudioSegments} from '../src/audio.mjs';
@@ -96,6 +99,35 @@ test('LAME Xing correction keeps Buffer input immutable and updates tag CRC and 
  assert.equal(new DataView(clean.bytes.buffer).getUint16(190),crc(clean.bytes.subarray(0,190)));
  assert.deepEqual(Buffer.from(clean.bytes.subarray(417)),first.subarray(417));assert.equal(prepareMp3Chunk(clean.bytes).metadataCorrected,false);
 });
+test('CRC-protected Xing location and mono FFmpeg fixed-span CRC are recognized',()=>{
+ const frameSize=417,frames=383,bytes=new Uint8Array(frames*frameSize);for(let i=0;i<frames;i++)bytes.set([255,250,144,0],i*frameSize);
+ bytes.set(new TextEncoder().encode('Xing'),36);bytes.set([0,0,0,3],40);new DataView(bytes.buffer).setUint32(44,1000);new DataView(bytes.buffer).setUint32(48,500000);
+ assert.equal(prepareMp3Chunk(bytes).metadataCorrected,true);
+ const mono=new Uint8Array(frames*frameSize);for(let i=0;i<frames;i++)mono.set([255,251,144,192],i*frameSize);
+ mono.set(new TextEncoder().encode('Info'),21);new DataView(mono.buffer).setUint32(25,15);new DataView(mono.buffer).setUint32(29,1000);new DataView(mono.buffer).setUint32(33,500000);mono.set(new TextEncoder().encode('Lavf'),141);
+ const crc=data=>{let value=0;for(const byte of data){value^=byte;for(let bit=0;bit<8;bit++)value=(value>>1)^((value&1)?0xa001:0);}return value;};
+ const tag=mono.slice(0,190);tag.fill(0,175,177);new DataView(mono.buffer).setUint16(175,crc(tag));
+ const fixed=prepareMp3Chunk(mono);assert.equal(fixed.metadataCorrected,true);const corrected=fixed.bytes.slice(0,190);corrected.fill(0,175,177);assert.equal(new DataView(fixed.bytes.buffer).getUint16(175),crc(corrected));
+});
+test('flags=3 encoder extension with nonzero end padding fails closed',()=>{
+ const bytes=new Uint8Array(383*417);for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);
+ bytes.set(new TextEncoder().encode('Xing'),36);new DataView(bytes.buffer).setUint32(40,3);new DataView(bytes.buffer).setUint32(44,1000);new DataView(bytes.buffer).setUint32(48,500000);
+ bytes.set(new TextEncoder().encode('LAME'),52);bytes[73]=0x24;bytes[74]=0x32;bytes[75]=0x10;const original=bytes.slice();
+ assert.throws(()=>prepareMp3Chunk(bytes),/MP3_XING_EXTENSION_UNSUPPORTED/);assert.deepEqual(bytes,original);
+});
+test('FFmpeg flags=3 encoder extension fixture retains decoded samples and is rejected for slicing',t=>{
+ if(spawnSync('ffmpeg',['-version'],{stdio:'ignore'}).status!==0){t.skip('FFmpeg unavailable');return;}
+ const dir=mkdtempSync(join(tmpdir(),'yta-flags3-'));
+ try{const original=join(dir,'original.mp3'),altered=join(dir,'flags3.mp3');assert.equal(spawnSync('ffmpeg',['-v','error','-f','lavfi','-i','sine=frequency=440:duration=12','-ac','1','-ar','44100','-c:a','libmp3lame','-b:a','64k','-y',original]).status,0);
+  const input=readFileSync(original),output=Buffer.from(input),base=scanMp3(input).frames[0].byteStart,xing=base+21,extension=Buffer.from(input.subarray(xing+120,xing+156));
+  assert.equal(output.toString('ascii',xing,xing+4),'Info');assert.ok((extension[21]<<16|extension[22]<<8|extension[23]&4095)!==0);
+  output.writeUInt32BE(3,xing+4);extension.copy(output,xing+16);writeFileSync(altered,output);
+  const decode=path=>{const result=spawnSync('ffmpeg',['-v','error','-i',path,'-f','s16le','-'],{maxBuffer:2000000});assert.equal(result.status,0);return result.stdout;};
+  assert.equal(decode(original).length,decode(altered).length);
+  const first=planMp3(output,{chunkSeconds:10}).chunks[0],slice=output.subarray(first.byteStart,first.byteEnd),before=Buffer.from(slice);
+  assert.throws(()=>prepareMp3Chunk(slice),/MP3_XING_EXTENSION_UNSUPPORTED/);assert.deepEqual(slice,before);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
 test('MP3 scan rejects an unparsed tail instead of treating a partial file as complete',()=>{const bytes=new Uint8Array(417*3+4096);for(let i=0;i<3;i++)bytes.set([255,251,144,0],i*417);assert.throws(()=>planMp3(bytes),/MP3_UNPARSED_AUDIO/);});
 test('audio merge offsets timestamps, identifies missing chunk and cannot certify completeness',()=>{const r=mergeAudioSegments([{index:0,start:0,end:300,segments:[{start:0,end:2,text:'시작'}]},{index:1,start:297,end:597,segments:[{start:10,end:12,text:'두번째'}]},{index:2,start:594,end:600,segments:[]}]);assert.equal(r.segments[1].startMs,307000);assert.deepEqual(r.missingChunks,[2]);});
 test('audio merge reports a chunk whose segments are all discarded and unexplained overlap',()=>{
@@ -159,6 +191,12 @@ test('Groq delayed key lookup cannot dispatch after quota expiry or a concurrent
  let enter,release;const entered=new Promise(resolve=>enter=resolve),gate=new Promise(resolve=>release=resolve);let slow=true;
  const delayedDB={prepare(sql){const stmt=env.DB.prepare(sql);if(!sql.startsWith('SELECT cipher_version,iv_b64,ciphertext_b64'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async first(){if(slow){slow=false;enter();await gate;}return bound.first();}};}};}};
  try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),id=created.job.id,path='/api/jobs/'+id,secondJob=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),otherPath='/api/jobs/'+secondJob.job.id;for(const target of [path,otherPath])await routeApi(request(target+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'1'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);await routeApi(request('/api/live/quota','PUT',{provider:'groq',allowance:100,requestLimit:5,billingDisabled:true,freeOnly:true}),env);const upload=(target,activeEnv)=>routeApi(new Request('https://test.invalid'+target+'/audio-chunk?index=0&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},body:bytes}),activeEnv);const first=upload(path,{...env,DB:delayedDB});await Promise.race([entered,new Promise((_,reject)=>setTimeout(()=>reject(Error('key lookup did not start')),1000))]);const concurrent=await upload(otherPath,env);assert.equal((await concurrent.json()).error.code,'OPERATION_IN_FLIGHT');assert.equal(calls,0);db.prepare('UPDATE yta_quota SET expires_at=0 WHERE provider=?').run('groq');release();const blocked=await first;assert.equal((await blocked.json()).error.code,'QUOTA_UNVERIFIED');assert.equal(calls,0);assert.equal(db.prepare('SELECT state FROM yta_operations WHERE job_id=?').get(id).state,'BLOCKED');assert.equal(db.prepare('SELECT error_code FROM yta_operations WHERE job_id=?').get(id).error_code,'PRE_DISPATCH_BLOCKED');await routeApi(request('/api/live/quota','PUT',{provider:'groq',allowance:100,requestLimit:5,billingDisabled:true,freeOnly:true}),env);globalThis.fetch=async()=>{calls++;return Response.json({text:'전사',segments:[{start:1,end:2,text:'재개'}]});};assert.equal((await upload(path,env)).status,200);assert.equal(calls,1);}finally{release();globalThis.fetch=old;db.close();}
+});
+test('Groq grant expiry during the last D1 read blocks the provider fetch',async()=>{
+ const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);env.GROQ_API_KEY='NOT_REAL_TEST_KEY';for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);
+ const seconds=scanMp3(bytes).durationSeconds;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('provider must not run');};
+ const delayedDB={prepare(sql){const stmt=env.DB.prepare(sql);if(!sql.includes("state='CLAIMED' AND id<>?"))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async first(){const result=await bound.first();await new Promise(resolve=>setTimeout(resolve,350));return result;}};}};}};
+ try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds}),env)).json(),id=created.job.id,path='/api/jobs/'+id;await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'e'.repeat(64),chunks:[{index:0,start:0,end:seconds}]}),env);await routeApi(request('/api/live/quota','PUT',{provider:'groq',allowance:100,requestLimit:5,billingDisabled:true,freeOnly:true}),env);db.prepare('UPDATE yta_quota SET expires_at=? WHERE provider=?').run(Date.now()+300,'groq');const response=await routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index=0&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream'},body:bytes}),{...env,DB:delayedDB});assert.equal((await response.json()).error.code,'QUOTA_UNVERIFIED');assert.equal(calls,0);assert.equal(db.prepare('SELECT error_code FROM yta_operations WHERE job_id=?').get(id).error_code,'PRE_DISPATCH_BLOCKED');}finally{globalThis.fetch=old;db.close();}
 });
 test('Groq app-only rolling hourly reservations stop before a provider request',async()=>{
  const {db,env}=setup(),old=fetch,bytes=new Uint8Array(383*417);env.GROQ_API_KEY='NOT_REAL_TEST_KEY';for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);const seconds=scanMp3(bytes).durationSeconds;let calls=0;
