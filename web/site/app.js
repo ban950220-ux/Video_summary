@@ -181,12 +181,13 @@ function showBoundaryReconcileChoice(job,target,requestId){
  if(job.source_type!=='audio'||job.audit?.audioProcessingCoverage!==1||job.report)return;
  const path='/api/jobs/'+encodeURIComponent(job.id)+'/audio-boundary-reconcile';
  const review=el('button',{className:'btn secondary small',text:'전사 겹침 경계 표시 검토'});
+ const isCurrent=()=>{const valid=detailCurrent(job.id,requestId,target);if(!valid)review.disabled=false;return valid;};
  review.onclick=async()=>{
-  if(review.disabled||!detailCurrent(job.id,requestId,target))return;
+  if(review.disabled||!isCurrent())return;
   review.disabled=true;
   try{
    const preview=await api(path);
-   if(!detailCurrent(job.id,requestId,target))return;
+   if(!isCurrent())return;
    const panel=el('div',{className:'fields'});
    panel.append(el('p',{text:`분석 ${preview.jobId} · 원본 SHA-256 ${preview.audioFileSha256} · 보존된 발언 ${preview.sourceSegmentCount}개 · 현재 경계 표시 ${preview.currentMarkerIds.length}개 → 재검토 표시 ${preview.revisedMarkerIds.length}개.`}));
    if(preview.changed)panel.append(el('p',{text:'추가로 검토할 원문 ID: '+preview.revisedMarkerIds.filter(id=>!preview.currentMarkerIds.includes(id)).map(id=>'#'+id).join(', ')}));
@@ -197,27 +198,30 @@ function showBoundaryReconcileChoice(job,target,requestId){
    let pending=false;
    cancel.onclick=()=>{if(pending)return;panel.remove();review.disabled=false;};
    save.onclick=async()=>{
-    if(pending||!acknowledge.checked||!detailCurrent(job.id,requestId,target))return;
+    if(pending||!acknowledge.checked||!isCurrent())return;
     pending=true;save.disabled=true;cancel.disabled=true;
     try{
      const saved=await api(path,{method:'POST',body:{jobId:preview.jobId,audioFileSha256:preview.audioFileSha256,currentMarkerIds:preview.currentMarkerIds,revisedMarkerIds:preview.revisedMarkerIds,confirmBoundaryMetadataReconcile:true}});
-     if(!detailCurrent(job.id,requestId,target))return;
-     empty(target);showReport(saved.job,target,true);
+     if(!isCurrent())return;
+     const current=await api('/api/jobs/'+encodeURIComponent(job.id));
+     if(!isCurrent())return;
+     if(current.job?.id!==job.id||current.job?.audit?.audioProcessingCoverage!==1)throw Error('저장된 작업 상태를 다시 확인하세요.');
+     empty(target);showReport(current.job,target,true);
      target.append(el('p',{text:saved.reconciled?'경계 검토 표시를 저장했습니다. 전사 발언과 TXT는 유지됩니다.':'경계 검토 표시가 이미 저장돼 있습니다.'}));
      try{
       const verified=await api(path);
-      if(!detailCurrent(job.id,requestId,target))return;
+      if(!isCurrent())return;
       if(verified.changed||verified.audioFileSha256!==preview.audioFileSha256||verified.sourceSegmentCount!==preview.sourceSegmentCount||JSON.stringify(verified.currentMarkerIds)!==JSON.stringify(preview.revisedMarkerIds))throw Error('저장된 경계 표시를 다시 확인하세요.');
       resultLine(target,'저장된 경계 표시',`${verified.currentMarkerIds.length}개 · 발언 ${verified.sourceSegmentCount}개`);
       const plan=await api('/api/jobs/'+encodeURIComponent(job.id)+'/groq-summary-plan');
-      if(!detailCurrent(job.id,requestId,target))return;
+      if(!isCurrent())return;
       resultLine(target,'새 요약 계획',`원문 ${plan.rawStages}단계 · 전체 최대 ${plan.totalRequests}요청 · 원본 범위 ${plan.transcriptHash}`);
       target.append(el('p',{className:'tip',text:'요약 계획은 읽기 전용으로 확인했습니다. 모델 호출과 요약 승인은 시작되지 않았습니다.'}));
-     }catch(error){if(detailCurrent(job.id,requestId,target))target.append(el('p',{className:'tip',text:'경계 표시는 저장됐습니다. 후속 조회를 다시 확인하세요: '+safeError(error)}));}
-    }catch(error){if(detailCurrent(job.id,requestId,target)){toast(safeError(error));panel.append(el('p',{text:'저장 여부를 이력에서 새로 확인한 뒤 다시 검토하세요.'}));review.disabled=false;}}
+     }catch(error){if(isCurrent())target.append(el('p',{className:'tip',text:'경계 표시는 저장됐습니다. 후속 조회를 다시 확인하세요: '+safeError(error)}));}
+    }catch(error){if(isCurrent()){toast(safeError(error));panel.append(el('p',{text:'저장 여부를 이력에서 새로 확인한 뒤 다시 검토하세요.'}));review.disabled=false;}}
    };
    panel.append(label,save,cancel);target.append(panel);
-  }catch(error){if(detailCurrent(job.id,requestId,target)){toast(safeError(error));review.disabled=false;}}
+  }catch(error){review.disabled=false;if(isCurrent())toast(safeError(error));}
  };
  target.append(review);
 }

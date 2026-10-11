@@ -21,6 +21,7 @@ test('boundary review UI confirms exact metadata only and reads the new plan wit
   calls.push({path,method:options.method,body:options.body&&JSON.parse(options.body)});
   if(path.endsWith('/groq-summary-plan'))return response({rawStages:50,totalRequests:99,transcriptHash:'b'.repeat(64)});
   if(options.method==='POST')return response({reconciled:true,job});
+  if(path==='/api/jobs/'+job.id)return response({job});
   return response(calls.filter(call=>call.path.endsWith('/audio-boundary-reconcile')&&call.method==='GET').length===1?preview:{...preview,currentMarkerIds:[1,2],changed:false});
  };
  const {target,show}=harness(fetcher);show(job,target,0);
@@ -28,7 +29,7 @@ test('boundary review UI confirms exact metadata only and reads the new plan wit
  const panel=target.children[1],label=panel.children.find(child=>child.tag==='label'),save=panel.children.find(child=>child.textContent==='경계 표시만 저장');
  assert.equal(save.disabled,true);assert.equal(calls.length,1);label.children[0].checked=true;label.children[0].onchange();
  await Promise.all([save.onclick(),save.onclick()]);
- assert.deepEqual(calls.map(call=>[call.method,call.path.split('/').at(-1)]),[['GET','audio-boundary-reconcile'],['POST','audio-boundary-reconcile'],['GET','audio-boundary-reconcile'],['GET','groq-summary-plan']]);
+ assert.deepEqual(calls.map(call=>[call.method,call.path.split('/').at(-1)]),[['GET','audio-boundary-reconcile'],['POST','audio-boundary-reconcile'],['GET',job.id],['GET','audio-boundary-reconcile'],['GET','groq-summary-plan']]);
  assert.deepEqual(calls[1].body,{jobId:job.id,audioFileSha256:preview.audioFileSha256,currentMarkerIds:[2],revisedMarkerIds:[1,2],confirmBoundaryMetadataReconcile:true});
  assert.match(target.children.map(child=>child.textContent||child.children?.map(item=>item.textContent).join(' ')).join(' '),/99요청/);
 });
@@ -38,8 +39,23 @@ test('boundary review cancel and newer navigation cannot post stale preview',asy
  const fetcher=async(path,options)=>{calls.push({path,method:options.method});return response(await wait);};
  const {target,state,show}=harness(fetcher);show(job,target,0);
  const review=target.children[0],pending=review.onclick();state.view='usage';resolvePreview(preview);await pending;
- assert.equal(target.children.length,1);assert.deepEqual(calls.map(call=>call.method),['GET']);
- state.view='library';review.disabled=false;await review.onclick();
+ assert.equal(target.children.length,1);assert.equal(review.disabled,false);assert.deepEqual(calls.map(call=>call.method),['GET']);
+ state.view='library';await review.onclick();
  const panel=target.children[1],cancel=panel.children.find(child=>child.textContent==='취소');cancel.onclick();
  assert.equal(target.children.length,1);assert.equal(review.disabled,false);assert.deepEqual(calls.map(call=>call.method),['GET','GET']);
+});
+
+test('cached cross-tab reconciliation reopens the current job before rendering',async()=>{
+ const calls=[],fetcher=async(path,options)=>{
+  calls.push({path,method:options.method});
+  if(options.method==='POST')return response({reconciled:false,cached:true});
+  if(path==='/api/jobs/'+job.id)return response({job});
+  if(path.endsWith('/groq-summary-plan'))return response({rawStages:50,totalRequests:99,transcriptHash:'b'.repeat(64)});
+  return response(calls.filter(call=>call.path.endsWith('/audio-boundary-reconcile')&&call.method==='GET').length===1?preview:{...preview,currentMarkerIds:[1,2],changed:false});
+ };
+ const {target,show}=harness(fetcher);show(job,target,0);await target.children[0].onclick();
+ const panel=target.children[1],label=panel.children.find(child=>child.tag==='label'),save=panel.children.find(child=>child.textContent==='경계 표시만 저장');
+ label.children[0].checked=true;label.children[0].onchange();await save.onclick();
+ assert.deepEqual(calls.map(call=>[call.method,call.path.split('/').at(-1)]),[['GET','audio-boundary-reconcile'],['POST','audio-boundary-reconcile'],['GET',job.id],['GET','audio-boundary-reconcile'],['GET','groq-summary-plan']]);
+ assert.match(target.children.map(child=>child.textContent||child.children?.map(item=>item.textContent).join(' ')).join(' '),/99요청/);
 });
