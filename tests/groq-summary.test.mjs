@@ -139,18 +139,18 @@ test('read-only summary review reports safe failure stage without leaking backen
   assert.doesNotMatch(JSON.stringify(credentialError),/PRIVATE_BACKEND_DETAIL/);
  }finally{f.db.close();}
 });
-test('summary plan accepts preserved TXT spacing but still rejects changed spoken text',async()=>{
- const f=await fixture();
+test('1,226-segment audio source produces a read-only summary scope without provider calls',async()=>{
+ const f=await fixture({complete:false});
  try{
-  const original=f.db.prepare('SELECT raw FROM yta_sources WHERE job_id=?').get(f.id).raw;
-  f.db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(original.replace('원문 1','원문  1'),f.id);
-  const plan=await routeApi(request(f.path+'/groq-summary-plan'),f.env);
-  assert.equal(plan.status,200,await plan.clone().text());
-  assert.ok((await plan.json()).rawStages>0);
-  f.db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(original.replace('원문 1','변조 1'),f.id);
-  const altered=await routeApi(request(f.path+'/groq-summary-plan'),f.env);
-  assert.equal(altered.status,409);
-  assert.equal((await altered.json()).error.code,'TRANSCRIPT_PERSISTENCE_UNVERIFIED');
+  const segments=Array.from({length:1226},(_,i)=>({id:i+1,startMs:Math.round(i*5892888/1226),endMs:Math.round((i+1)*5892888/1226),text:'가나다라마바사아자차'.repeat(4)}));
+  const audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64),audioBoundaryAmbiguities:Array.from({length:14},(_,i)=>({segmentId:2+33*i,chunkIndex:i+1,startMs:0,endMs:1}))};
+  f.db.prepare('UPDATE jobs SET duration_seconds=?,audit_json=? WHERE id=?').run(5892.888000011206,JSON.stringify(audit),f.id);
+  f.db.prepare('UPDATE yta_sources SET raw=?,segments_json=? WHERE job_id=?').run(segments.map(segment=>segment.text).join('\n'),JSON.stringify(segments),f.id);
+  const plan=await routeApi(request(f.path+'/groq-summary-plan'),f.env);assert.equal(plan.status,200,await plan.clone().text());
+  const scope=await plan.json();assert.ok(scope.rawStages>1&&scope.rawStages<=120);assert.ok(scope.totalRequests>scope.rawStages);
+  const approval=await routeApi(request(f.path+'/groq-summary-approval'),f.env);assert.equal(approval.status,200,await approval.clone().text());
+  assert.equal((await approval.json()).maxRequests,29);
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE provider='groq-summary'").get().n,0);
  }finally{f.db.close();}
 });
 test('one approved Groq stage saves usage and report once; cached reopen needs no second provider call',async()=>{
