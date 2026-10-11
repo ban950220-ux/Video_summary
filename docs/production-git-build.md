@@ -91,8 +91,13 @@ trace destinations, and issues. Script-settings tail consumers was explicitly
 omission as `[]` or `false`. Wrangler config omits destinations and issues to
 match the observed state. A new active version and `ASSETS` binding are the
 only intentional post-deploy differences; other drift fails the check.
-`remoteSettingsReviewed=false` still blocks deployment until the proposed
-comparison and upload behavior are separately reviewed. A post-deploy API
+Read-only Build `e9c72f29-3051-4685-a16c-c5b2fdf2381e` at source
+`ec69db7be3f7a328c078fa9c924619da07a6549b` reported
+`diagnosticReadSucceeded=true`, `matchesProposedBaseline=true`,
+`mismatchCode=null`, and `reviewGateEnabled=false`; active version
+`a33b9720-c167-4998-b8cb-3b065439b0d0` remained at 100% with no upload.
+After independent review of that response, `remoteSettingsReviewed=true` was
+set without changing any expected field or the active version. A post-deploy API
 shape change fails the postcheck rather than being silently accepted.
 Pinned Wrangler 4.149.0 normalizes an omitted `compatibility_flags` config
 entry to `[]` in its upload metadata. It is not yet known whether Cloudflare
@@ -112,7 +117,8 @@ reuses the guard's fixed Cloudflare GET endpoints, and never calls Wrangler,
 uploads code, deploys, or writes D1. The actual deploy command remains disabled.
 Exit code 0 and `diagnosticReadSucceeded=true` mean only that the read succeeded.
 `matchesProposedBaseline` and a fixed `mismatchCode` separately report the
-guard's diagnostic comparison; `reviewGateEnabled=false` still blocks deploy.
+guard's diagnostic comparison. The reviewed gate is true in the source, while
+the current Build command still runs only this read-only preflight.
 The `bindings` result reports availability, unique names, and complete
 expected names/types without listing them. Object key order does not affect
 comparisons. The JSON output contains only comparison booleans, observability
@@ -121,8 +127,8 @@ tokens, Access values, raw bindings/responses, account/DB/version IDs, Worker
 tags, routes, domains and consumer names. Unexpected objects are classified
 without printing their contents. A failed read emits only a fixed error code.
 An empty/absent field shown by this command is evidence to review, not
-automatic approval: `remoteSettingsReviewed` stays false until its exact
-production response shape is independently reconciled.
+automatic approval. The exact observed production response shape was
+independently reconciled before the gate changed.
 
 Its approved baseline currently identifies active version
 `a33b9720-c167-4998-b8cb-3b065439b0d0`. A later deployment must update the

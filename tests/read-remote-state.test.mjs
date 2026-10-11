@@ -45,7 +45,7 @@ test('guard fails closed when token, API read or observability fields are unavai
   const incomplete=structuredClone(approvedRemoteBaseline.observability);
   delete incomplete.logs.invocation_logs;
   const baseline={...approvedRemoteBaseline,remoteSettingsReviewed:true};
-  await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi().fetcher}),/REMOTE_SETTINGS_BASELINE_UNVERIFIED/);
+  await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi().fetcher,baseline:{...approvedRemoteBaseline,remoteSettingsReviewed:false}}),/REMOTE_SETTINGS_BASELINE_UNVERIFIED/);
   await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({observability:incomplete}).fetcher,baseline}),/OBSERVABILITY_INCOMPLETE/);
   await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({scriptSettings:{tail_consumers:[]}}).fetcher,baseline}),/SCRIPT_SETTINGS_INCOMPLETE/);
   await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi({scriptSettings:{...approvedRemoteBaseline.scriptSettings,observability:{enabled:false}}}).fetcher,baseline}),/SCRIPT_SETTINGS_OBSERVABILITY_INCOMPLETE/);

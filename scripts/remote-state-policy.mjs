@@ -41,8 +41,8 @@ export const approvedRemoteBaseline={
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:false,
-  // Observed by read-only production preflight 603ce3f5; approval remains separate.
-  remoteSettingsReviewed:false,
+  // Read-only preflight e9c72f29 confirmed the exact observed baseline at ec69db7.
+  remoteSettingsReviewed:true,
   optionalScriptFields:{limits:{present:false},placement_mode:{present:false},streaming_tail_consumers:{present:false}},
   scriptSettings:{logpush:false,tail_consumers:null,observability:baselineObservability},
   observability:baselineObservability,
