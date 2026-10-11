@@ -24,18 +24,29 @@ async function grantEnv(env,provider){
  if(credential&&Date.parse(credential.updated_at)>quota.confirmed_at)throw new ProviderError('KEY_CHANGED','키 변경 뒤 무료 계정 확인을 다시 해야 합니다.');
  return {...env,[provider.toUpperCase()+'_FREE_PLAN_CONFIRMED']:'true'};
 }
-async function execute(env,{id,job,provider,units},fn){
+const GEMINI_SPACING_MS=13_000; // At most five starts in any rolling minute, with margin.
+async function execute(env,{id,job,provider,units},fn,onNewCall){
  const prior=await env.DB.prepare('SELECT * FROM yta_operations WHERE id=?').bind(id).first();
  if(prior?.state==='DONE')return JSON.parse(prior.result_json);
  if(prior&&!(prior.state==='BLOCKED'&&prior.error_code==='QUOTA_EXHAUSTED'))throw new ProviderError('OPERATION_REVIEW_REQUIRED','이미 요청했거나 결과가 불명확한 작업입니다. 사용량을 확인한 뒤 새 작업으로 진행하세요.');
  const active=await grantEnv(env,provider);
  // Atomic unique claim and atomic quota decrement: concurrent calls cannot overspend this app's grant.
+ const now=new Date().toISOString(),cutoff=new Date(Date.now()-GEMINI_SPACING_MS).toISOString();
+ const recent="SELECT 1 FROM yta_operations WHERE provider='gemini' AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>? LIMIT 1";
  const claim=prior
-  ?await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=NULL WHERE id=? AND state=? AND error_code=?').bind('CLAIMED',id,'BLOCKED','QUOTA_EXHAUSTED').run()
-  :await env.DB.prepare('INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').bind(id,job,provider,units,'CLAIMED',new Date().toISOString()).run();
- if(claim.meta?.changes!==1)throw new ProviderError('OPERATION_BUSY','중복 요청 차단');
+  ?provider==='gemini'
+   ?await env.DB.prepare(`UPDATE yta_operations SET state=?,error_code=NULL,created_at=? WHERE id=? AND state=? AND error_code=? AND NOT EXISTS (${recent})`).bind('CLAIMED',now,id,'BLOCKED','QUOTA_EXHAUSTED',cutoff).run()
+   :await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=NULL WHERE id=? AND state=? AND error_code=?').bind('CLAIMED',id,'BLOCKED','QUOTA_EXHAUSTED').run()
+  :provider==='gemini'
+   ?await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (${recent})`).bind(id,job,provider,units,'CLAIMED',now,cutoff).run()
+   :await env.DB.prepare('INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,?,?,?,?)').bind(id,job,provider,units,'CLAIMED',now).run();
+ if(claim.meta?.changes!==1){
+  if(provider==='gemini'&&(await env.DB.prepare(recent).bind(cutoff).first()))throw new ProviderError('RATE_LIMIT_PENDING','무료 요약 호출 간격을 지키기 위해 잠시 대기 중입니다. 약 13초 뒤 이력에서 요약 생성을 다시 누르세요.');
+  throw new ProviderError('OPERATION_BUSY','중복 요청 차단');
+ }
  const reserve=await env.DB.prepare('UPDATE yta_quota SET consumed=consumed+?,request_count=request_count+1 WHERE provider=? AND consumed+?<=allowance AND request_count<request_limit AND expires_at>? AND billing_disabled=1').bind(units,provider,units,Date.now()).run();
  if(reserve.meta?.changes!==1){await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=? WHERE id=?').bind('BLOCKED','QUOTA_EXHAUSTED',id).run();throw new ProviderError('QUOTA_EXHAUSTED','무료 사용량 또는 요청 횟수 한도에 도달했습니다.');}
+ onNewCall?.();
  try{
   const result=await fn(active);
   // Conservative accounting: reserved upper bound stays consumed even on provider timeout or mismatch.
@@ -135,8 +146,10 @@ export async function routeLive(request,env){
    const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
    if(job.report?.kind==='GEMINI_EVIDENCE_LINKED')return json({job,persisted:true,cached:true});
    const fingerprint=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([source.segments,job.audit]))))).map(x=>x.toString(16).padStart(2,'0')).join('');
+   let newCall=false;
+   const pending=()=>json({job,persisted:true,pending:true,reason:'NEXT_STAGE_REQUIRES_SEPARATE_REQUEST',minimumWaitSeconds:13},202);
    const ask=async(key,prompt,allowed,stage)=>{
-    const response=await execute(env,{id:id+':summary:'+fingerprint+':'+key,job:id,provider:'gemini',units:summaryUnits(prompt)},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true',SUMMARY_STAGE_OUTPUT_TOKENS:stage?'2048':'8192'},text:prompt}));
+    const response=await execute(env,{id:id+':summary:'+fingerprint+':'+key,job:id,provider:'gemini',units:summaryUnits(prompt)},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true',SUMMARY_STAGE_OUTPUT_TOKENS:stage?'2048':'8192'},text:prompt}),()=>{newCall=true;});
     let result;try{if(response.text.length>12000&&stage)throw Error('STAGE_TOO_LONG');result=validateAnalysis(JSON.parse(response.text),allowed);}catch{throw new ProviderError('REPORT_VALIDATION_FAILED','요약 근거 형식 검증 실패. 원문은 보관됐으며 자동 재호출하지 않습니다.');}
     return result;
    };
@@ -150,6 +163,7 @@ export async function routeLive(request,env){
     for(let i=0;i<groups.length;i++){
      const chunk=groups[i],partial=await ask('raw:'+i,reportPrompt(chunk,job.audit),chunk,true);
      parts.push({ids:evidenceIds(partial),startMs:chunk[0].startMs,endMs:chunk.at(-1).endMs,report:partial});
+     if(newCall)return pending();
     }
     for(let level=0;parts.length>1;level++){
      if(level>12)throw new InputError('요약 단계가 너무 깊습니다.');
@@ -160,6 +174,7 @@ export async function routeLive(request,env){
       const merged=await ask('merge:'+level+':'+i,prompt,allowed,batches.length>1);
       assertGroupCoverage(merged,batch);
       next.push({ids:evidenceIds(merged),startMs:batch[0].startMs,endMs:batch.at(-1).endMs,report:merged});
+      if(newCall&&!(batches.length===1&&parts.length===batch.length))return pending();
      }
      parts=next;
     }
