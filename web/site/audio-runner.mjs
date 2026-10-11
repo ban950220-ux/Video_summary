@@ -38,10 +38,15 @@ export async function runApprovedFreeBatch({jobId,fileSha256,approvedChunkIds,ch
  return {complete:true,summaryStarted:false,reason:'BATCH_COMPLETE_BEFORE_SUMMARY'};
 }
 export async function runApprovedGroqSummary({jobId,scope,getApproval,sendStage,wait,foreground=()=>true,now=Date.now,onUpdate=()=>{}}){
+ const finalize=async fresh=>{if(!foreground()||fresh?.jobId!==jobId||fresh.transcriptHash!==scope.transcriptHash||fresh.finalizationReady!==true)return {complete:false,reason:'SUMMARY_FINALIZATION_CHANGED'};
+  let result;try{result=await sendStage({finalizeOnly:true,transcriptHash:scope.transcriptHash});}catch(error){return {complete:false,reason:error?.code||'SUMMARY_FINALIZATION_FAILED'};}
+  return result?.job?.report?.kind==='GROQ_EVIDENCE_LINKED'&&result.persisted===true?{complete:true,result}:{complete:false,reason:'SUMMARY_RESULT_UNVERIFIED'};};
+ if(scope?.finalizationReady===true){if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED'};return finalize(await getApproval());}
  if(scope?.jobId!==jobId||scope.model!=='openai/gpt-oss-120b'||scope.state!=='APPROVED'||!Number.isSafeInteger(scope.maxRequests)||scope.maxRequests<1)return {complete:false,reason:'SUMMARY_APPROVAL_INVALID'};
  for(let stage=0;stage<=scope.maxRequests;stage++){
   if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED'};
   const fresh=await getApproval();
+  if(fresh?.finalizationReady===true)return finalize(fresh);
   if(fresh?.approved===false&&fresh.jobId===jobId&&fresh.transcriptHash===scope.transcriptHash&&fresh.windowStart===scope.windowStart+scope.maxRequests)return {complete:false,reason:'SUMMARY_WINDOW_COMPLETE',completed:fresh.windowStart,totalRequests:fresh.totalRequests};
   if(fresh?.jobId!==jobId||fresh.transcriptHash!==scope.transcriptHash||fresh.model!==scope.model||fresh.state!=='APPROVED'||fresh.windowStart!==scope.windowStart||fresh.totalRequests!==scope.totalRequests||fresh.maxRequests!==scope.maxRequests||fresh.maxInputTokensPerRequest!==scope.maxInputTokensPerRequest||fresh.maxCompletionTokensPerRequest!==scope.maxCompletionTokensPerRequest||fresh.totalTokenUpperBound!==scope.totalTokenUpperBound||fresh.credentialGeneration!==scope.credentialGeneration||fresh.expiresAt!==scope.expiresAt||fresh.expiresAt<=now())return {complete:false,reason:'SUMMARY_APPROVAL_CHANGED'};
   if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED'};

@@ -4,6 +4,8 @@ import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
 import {routeApi} from '../src/worker.mjs';
 import {partitionGroqTranscript,groqInputUpperBound,groqSummaryMessages,groqRawPrompt,GROQ_SUMMARY_INPUT_BOUND} from '../src/groq-summary.mjs';
+import {encryptProviderKey} from '../src/vault.mjs';
+import {capacityIdentity} from '../src/observed-capacity.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 async function fixture({complete=true,large=false,sourceText=null,longSource=false}={}){
@@ -178,7 +180,7 @@ test('review credential is opaque and a changed key blocks approval before any p
  try{assert.ok(f.approval.credentialGeneration);assert.ok(!JSON.stringify(f.approval).includes('NOT_REAL_TEST_KEY'));
   f.env.GROQ_API_KEY='NEW_TEST_ONLY_KEY';
   const r=await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);
-  assert.equal(r.status,400);assert.equal(calls,0);
+  assert.equal(r.status,409);assert.equal(calls,0);
   assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE provider='groq-summary'").get().n,0);
  }finally{globalThis.fetch=old;f.db.close();}
 });
@@ -223,4 +225,58 @@ test('oversized but valid checkpoint is not saved DONE before an impossible merg
   const r=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal((await r.json()).error.code,'SUMMARY_CHECKPOINT_TOO_LARGE');assert.equal(calls,1);
   assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE provider='groq-summary' AND state='DONE'").get().n,0);
  }finally{globalThis.fetch=old;f.db.close();}
+});
+test('completed checkpoints finalize without a further provider request even after approval expiry',async()=>{
+ const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return response();};
+ try{await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);
+  assert.equal((await routeApi(request(f.path+'/groq-summary','POST',{}),f.env)).status,202);assert.equal(calls,1);
+  const approvalId=f.id+':groq-summary:approval:0',stored=JSON.parse(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(approvalId).result_json);
+  stored.expiresAt=Date.now()-1;f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify(stored),approvalId);
+  const review=await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json();assert.equal(review.finalizationReady,true);
+  const saved=await routeApi(request(f.path+'/groq-summary','POST',{finalizeOnly:true,transcriptHash:f.plan.transcriptHash}),f.env);
+  assert.equal(saved.status,200,await saved.clone().text());assert.equal((await saved.json()).job.report.kind,'GROQ_EVIDENCE_LINKED');assert.equal(calls,1);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('finalizeOnly never dispatches when one checkpoint is missing',async()=>{
+ const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('no provider call');};
+ try{const r=await routeApi(request(f.path+'/groq-summary','POST',{finalizeOnly:true,transcriptHash:f.plan.transcriptHash}),f.env);
+  assert.equal((await r.json()).error.code,'SUMMARY_FINALIZATION_NOT_READY');assert.equal(calls,0);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('Korean words adjoining a number do not hide a substring mismatch',async()=>{
+ const f=await fixture({sourceText:'참가자는 15명입니다.'}),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return response({...valid(1),numbers:[{text:'총5명',evidenceIds:[1]}]});};
+ try{await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);
+  const r=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal((await r.json()).error.code,'SUMMARY_RESPONSE_INVALID');assert.equal(calls,1);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('encrypted D1 key rotation during approval cannot bind the unreviewed key',async()=>{
+ const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('no provider call');};
+ try{const root=Buffer.alloc(32,7),first=await encryptProviderKey(root,'groq','FIRST_TEST_ONLY_KEY'),next=await encryptProviderKey(root,'groq','SECOND_TEST_ONLY_KEY');
+  const insert=(record)=>f.db.prepare('INSERT OR REPLACE INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES(?,?,?,?,?,?)').run('owner','groq',record.version,record.ivB64,record.ciphertextB64,new Date().toISOString());
+  insert(first);const review=await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json();
+  const original=f.env.DB;let reads=0;f.env.DB={...original,prepare(sql){const stmt=original.prepare(sql);if(!sql.startsWith('SELECT cipher_version,iv_b64,ciphertext_b64,updated_at FROM provider_credentials'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async first(){reads++;if(reads===2)insert(next);return bound.first();}};}};}};
+  const r=await routeApi(request(f.path+'/groq-summary-approval','POST',{...f.approval,credentialGeneration:review.credentialGeneration}),f.env);
+  assert.equal((await r.json()).error.code,'SUMMARY_CREDENTIAL_CHANGED');assert.equal(calls,0);assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE state='APPROVED' AND provider='groq-summary'").get().n,0);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('rotation while approval insert awaits leaves no usable approval',async()=>{
+ const f=await fixture(),root=Buffer.alloc(32,7),first=await encryptProviderKey(root,'groq','FIRST_TEST_ONLY_KEY'),next=await encryptProviderKey(root,'groq','SECOND_TEST_ONLY_KEY');
+ try{const put=record=>f.db.prepare('INSERT OR REPLACE INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES(?,?,?,?,?,?)').run('owner','groq',record.version,record.ivB64,record.ciphertextB64,new Date().toISOString());
+  put(first);const review=await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json();
+  const original=f.env.DB;f.env.DB={...original,prepare(sql){const stmt=original.prepare(sql);if(!sql.startsWith('INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json)'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {...bound,async run(){put(next);return bound.run();}};}};}};
+  const r=await routeApi(request(f.path+'/groq-summary-approval','POST',{...f.approval,credentialGeneration:review.credentialGeneration}),f.env);
+  assert.equal((await r.json()).error.code,'SUMMARY_CREDENTIAL_CHANGED');
+  const row=f.db.prepare("SELECT state,error_code,result_json FROM yta_operations WHERE provider='groq-summary'").get();
+  assert.equal(row.state,'STOPPED');assert.equal(row.error_code,'SUMMARY_CREDENTIAL_CHANGED');assert.notEqual(JSON.parse(row.result_json).keyIdentity,await capacityIdentity(f.env,'groq'));
+ }finally{f.db.close();}
+});
+test('deleting during an abnormal provider response retains uncertainty without resurrecting private text',async()=>{
+ const f=await fixture(),old=fetch;let release,started;const gate=new Promise(resolve=>release=resolve),entered=new Promise(resolve=>started=resolve);let calls=0;
+ globalThis.fetch=async()=>{calls++;started();await gate;return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'length',message:{content:'PRIVATE_RESPONSE_TEXT'}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390}});};
+ try{await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);
+  const pending=routeApi(request(f.path+'/groq-summary','POST',{}),f.env);await entered;
+  assert.equal((await routeApi(request(f.path,'DELETE'),f.env)).status,200);release();assert.equal((await pending).status,409);
+  const row=f.db.prepare("SELECT state,result_json FROM yta_operations WHERE job_id=? AND state='FAILED_UNCERTAIN'").get(f.id);
+  assert.equal(row.state,'FAILED_UNCERTAIN');assert.equal(row.result_json,null);assert.equal(calls,1);
+ }finally{release();globalThis.fetch=old;f.db.close();}
 });
