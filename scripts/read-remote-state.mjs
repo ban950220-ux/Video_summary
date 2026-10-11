@@ -18,6 +18,7 @@ export async function readRemoteState({token,fetcher=fetch}={}){
   }
   const service=await read(`/workers/services/${workerName}`);
   const environment=service?.default_environment?.environment;
+  const workerTag=service?.default_environment?.script?.tag;
   if(environment!=='production')throw Error('Remote deployment guard: WORKER_TARGET_MISMATCH');
   const base=`/workers/services/${workerName}/environments/${environment}`;
   const [metadata,bindings,subdomain,routes,domains,history,scriptSettings]=await Promise.all([
@@ -28,10 +29,11 @@ export async function readRemoteState({token,fetcher=fetch}={}){
     read(`/workers/scripts/${workerName}/script-settings`),
   ]);
   if(!Array.isArray(bindings)||!Array.isArray(routes)||!Array.isArray(domains)||!Array.isArray(history?.deployments))throw Error('Remote deployment guard: REMOTE_RESPONSE_INVALID');
+  if(!metadata?.script||typeof metadata.script!=='object'||!scriptSettings||typeof scriptSettings!=='object')throw Error('Remote deployment guard: REMOTE_RESPONSE_INVALID');
   const latest=history.deployments[0];
   if(!latest||!Array.isArray(latest.versions))throw Error('Remote deployment guard: REMOTE_RESPONSE_INVALID');
   return {
-    workerName,environment,
+    workerName,environment,workerTag,
     activeVersions:latest.versions.map(version=>({id:version.version_id,percentage:version.percentage})),
     deploymentMessage:latest.annotations?.['workers/message'],
     workersDev:subdomain?.enabled,previewUrls:subdomain?.previews_enabled,
@@ -39,15 +41,19 @@ export async function readRemoteState({token,fetcher=fetch}={}){
     compatibilityDate:metadata?.script?.compatibility_date,
     compatibilityFlags:metadata?.script?.compatibility_flags,
     observability:metadata?.script?.observability,
-    limits:metadata?.script?.limits??null,
-    placement:metadata?.script?.placement_mode??null,
-    streamingTailConsumers:metadata?.script?.streaming_tail_consumers??[],
+    optionalScriptFields:Object.fromEntries(['limits','placement_mode','streaming_tail_consumers'].map(key=>[key,{present:Object.hasOwn(metadata.script,key),value:metadata.script[key]}])),
     scriptSettings,
     bindings,
   };
 }
 
 export async function assertRemoteDeploymentBaseline(options){
-  for(let i=0;i<2;i++)assertRemoteState(await readRemoteState(options),approvedRemoteBaseline);
-  return true;
+  const baseline=options.baseline??approvedRemoteBaseline;
+  let state;
+  for(let i=0;i<2;i++){
+    state=await readRemoteState(options);
+    assertRemoteState(state,baseline);
+    if(options.ciMatchTag!==undefined&&state.workerTag!==options.ciMatchTag)throw Error('Remote deployment guard: WORKER_TAG_MISMATCH');
+  }
+  return state;
 }

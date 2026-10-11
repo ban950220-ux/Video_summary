@@ -15,6 +15,8 @@ test('Wrangler child target and log controls are fixed',()=>{
   assert.throws(()=>deploymentEnvironment({...base,[key]:value}),/ENV_OVERRIDE_BLOCKED/);
  }
  assert.throws(()=>deploymentEnvironment({...base,WRANGLER_CI_OVERRIDE_NAME:'other'}),/WORKER_NAME_MISMATCH/);
+ assert.equal(deploymentEnvironment({...base,WRANGLER_CI_MATCH_TAG:'REVIEWED_TAG'},'REVIEWED_TAG').WRANGLER_CI_MATCH_TAG,'REVIEWED_TAG');
+ assert.throws(()=>deploymentEnvironment({...base,WRANGLER_CI_MATCH_TAG:'OTHER'},'REVIEWED_TAG'),/WORKER_TAG_MISMATCH/);
 });
 test('raw Wrangler stdout, stderr and errors cannot reach caller output',()=>{
  const secret='SECRET_RUNTIME_ACCESS_VALUE';

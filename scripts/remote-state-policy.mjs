@@ -17,35 +17,40 @@ const requiredObservability={
 const valueAt=(obj,path)=>path.split('.').reduce((value,key)=>value?.[key],obj);
 const canonical=value=>JSON.stringify(value,(_,entry)=>entry&&typeof entry==='object'&&!Array.isArray(entry)?Object.fromEntries(Object.entries(entry).sort(([a],[b])=>a.localeCompare(b))):entry);
 const fail=code=>{throw Error(`Remote deployment guard: ${code}`);};
+const baselineObservability={
+  enabled:true,head_sampling_rate:1,redact_query_string:false,
+  logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true,destinations:[]},
+  traces:{enabled:false,head_sampling_rate:1,persist:true,destinations:[]},
+  issues:{enabled:false},
+};
 
 export const approvedRemoteBaseline={
   activeVersionId:'a33b9720-c167-4998-b8cb-3b065439b0d0',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlags:[],
-  // These optional API fields must be confirmed against the actual Worker before deploy.
-  limits:null,placement:null,streamingTailConsumers:[],
-  scriptSettings:{logpush:false,tail_consumers:[]},
-  observability:{
-    enabled:true,head_sampling_rate:1,redact_query_string:false,
-    logs:{enabled:true,head_sampling_rate:1,invocation_logs:true,persist:true,destinations:[]},
-    traces:{enabled:false,head_sampling_rate:1,persist:true,destinations:[]},
-    issues:{enabled:false},
-  },
+  // Review the real API shape and values, then explicitly approve this baseline.
+  remoteSettingsReviewed:false,
+  optionalScriptFields:{limits:{present:true,value:null},placement_mode:{present:true,value:null},streaming_tail_consumers:{present:true,value:[]}},
+  scriptSettings:{logpush:false,tail_consumers:[],observability:baselineObservability},
+  observability:baselineObservability,
 };
 
 export function assertRemoteState(remote,baseline){
+  if(baseline?.remoteSettingsReviewed!==true)fail('REMOTE_SETTINGS_BASELINE_UNVERIFIED');
   if(!remote||!baseline||!Array.isArray(remote.routes)||!Array.isArray(remote.domains)||!Array.isArray(baseline.routes)||!Array.isArray(baseline.domains)||!Array.isArray(remote.compatibilityFlags)||!Array.isArray(baseline.compatibilityFlags))fail('METADATA_INCOMPLETE');
   if(remote?.workerName!=='holy-rice-b914'||remote.environment!=='production')fail('WORKER_TARGET_MISMATCH');
   if(!Array.isArray(remote.activeVersions)||remote.activeVersions.length!==1||remote.activeVersions[0]?.percentage!==100||remote.activeVersions[0]?.id!==baseline?.activeVersionId)fail('ACTIVE_VERSION_MISMATCH');
   if(remote.workersDev!==true||remote.previewUrls!==false)fail('PUBLIC_URL_SETTINGS_MISMATCH');
   if(canonical(remote.routes)!==canonical(baseline.routes)||canonical(remote.domains)!==canonical(baseline.domains))fail('ROUTES_MISMATCH');
   if(remote.compatibilityDate!==baseline.compatibilityDate||canonical(remote.compatibilityFlags)!==canonical(baseline.compatibilityFlags))fail('COMPATIBILITY_MISMATCH');
-  if(!remote.scriptSettings||typeof remote.scriptSettings.logpush!=='boolean'||!Array.isArray(remote.scriptSettings.tail_consumers)||!Array.isArray(remote.streamingTailConsumers))fail('SCRIPT_SETTINGS_INCOMPLETE');
-  if(canonical(remote.scriptSettings.logpush)!==canonical(baseline.scriptSettings?.logpush)||canonical(remote.scriptSettings.tail_consumers)!==canonical(baseline.scriptSettings?.tail_consumers)||canonical(remote.streamingTailConsumers)!==canonical(baseline.streamingTailConsumers)||canonical(remote.limits)!==canonical(baseline.limits)||canonical(remote.placement)!==canonical(baseline.placement))fail('SCRIPT_SETTINGS_MISMATCH');
+  if(!remote.scriptSettings||typeof remote.scriptSettings.logpush!=='boolean'||!Array.isArray(remote.scriptSettings.tail_consumers)||!remote.scriptSettings.observability||!remote.optionalScriptFields||Object.keys(baseline.optionalScriptFields||{}).some(key=>typeof remote.optionalScriptFields[key]?.present!=='boolean'))fail('SCRIPT_SETTINGS_INCOMPLETE');
+  if(canonical(remote.scriptSettings.logpush)!==canonical(baseline.scriptSettings?.logpush)||canonical(remote.scriptSettings.tail_consumers)!==canonical(baseline.scriptSettings?.tail_consumers)||canonical(remote.optionalScriptFields)!==canonical(baseline.optionalScriptFields))fail('SCRIPT_SETTINGS_MISMATCH');
   for(const path of Object.keys(requiredObservability)){
     if(valueAt(remote.observability,path)===undefined||valueAt(baseline.observability,path)===undefined)fail('OBSERVABILITY_INCOMPLETE');
   }
   if(canonical(remote.observability)!==canonical(baseline.observability))fail('OBSERVABILITY_MISMATCH');
+  for(const path of Object.keys(requiredObservability))if(valueAt(remote.scriptSettings.observability,path)===undefined||valueAt(baseline.scriptSettings.observability,path)===undefined)fail('SCRIPT_SETTINGS_OBSERVABILITY_INCOMPLETE');
+  if(canonical(remote.scriptSettings.observability)!==canonical(baseline.scriptSettings.observability))fail('SCRIPT_SETTINGS_OBSERVABILITY_MISMATCH');
   if(!Array.isArray(remote.bindings))fail('BINDINGS_UNAVAILABLE');
   const bindings=new Map();
   for(const binding of remote.bindings){

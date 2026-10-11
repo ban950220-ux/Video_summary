@@ -14,12 +14,13 @@ const branch=execFileSync('git',['branch','--show-current'],{cwd:root,encoding:'
 const head=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();
 assertProductionBranch(process.env,branch,head);
 if(!process.env.WORKERS_CI)throw Error('Production deploy requires guarded Workers Builds runtime.');
-const childEnvironment=deploymentEnvironment(process.env);
-await assertRemoteDeploymentBaseline({token:process.env.CLOUDFLARE_API_TOKEN});
+const before=await assertRemoteDeploymentBaseline({token:process.env.CLOUDFLARE_API_TOKEN,ciMatchTag:process.env.WRANGLER_CI_MATCH_TAG});
+const childEnvironment=deploymentEnvironment(process.env,before.workerTag);
 const wrangler=resolve(root,'node_modules/wrangler/bin/wrangler.js');
 const deployed=runWranglerSafely(process.execPath,wrangler,root,childEnvironment,head);
 for(let i=0;i<2;i++){
   const after=await readRemoteState({token:process.env.CLOUDFLARE_API_TOKEN});
+  if(process.env.WRANGLER_CI_MATCH_TAG&&after.workerTag!==process.env.WRANGLER_CI_MATCH_TAG)throw Error('Production deploy: POST_DEPLOY_WORKER_TAG_MISMATCH');
   assertDeployedVersion(after,deployed);
   assertRemoteState(after,{...approvedRemoteBaseline,activeVersionId:deployed.versionId});
 }

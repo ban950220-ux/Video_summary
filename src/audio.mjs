@@ -39,7 +39,7 @@ export function mergeAudioSegments(chunks){
    const start=chunk.start+Number(s.start),end=chunk.start+Number(s.end),text=String(s.text||'').trim();
    if(!text||!Number.isFinite(start)||!Number.isFinite(end)||end<=start||start<chunk.start-.1||end>chunk.end+2){rejectedSegments.push({chunkIndex:chunk.index,reason:'INVALID_SEGMENT'});continue;}
    if(chunk.index>0&&(start+end)/2<previousEnd){
-    const duplicate=segments.some(prior=>prior.chunk<chunk.index&&prior.text===text&&prior.endMs>=Math.round(start*1000)-5000);
+    const duplicate=segments.some(prior=>prior.chunk<chunk.index&&prior.text===text&&prior.endMs>Math.round(start*1000)&&prior.startMs<Math.round(end*1000));
     rejectedSegments.push({chunkIndex:chunk.index,reason:duplicate?'OVERLAP_DUPLICATE':'OVERLAP_UNMATCHED'});continue;
    }
    segments.push({startMs:Math.round(start*1000),endMs:Math.round(end*1000),text,chunk:chunk.index});

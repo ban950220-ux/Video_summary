@@ -52,6 +52,18 @@ async function storeTranscriptResult(env,job,segments,provenance,extra={}){
  const audit={...transcriptAudit(clean,job.duration_seconds,false),...auditGaps(clean,job.duration_seconds),...extra};
  await updateJob(env,job.id,audit.status,null,audit);return {job:await ownedJob(env,job.id),source:{segments:clean,provenance},persisted:true};
 }
+async function storeAudioTranscriptOnce(env,job,merged){
+ const raw=merged.segments.map(segment=>segment.text).join('\n'),clean=normalizeSegments(merged.segments);
+ if(new TextEncoder().encode(raw+JSON.stringify(clean)).byteLength>1500000)throw new InputError('보관 원문 크기 제한');
+ const audit={...transcriptAudit(clean,job.duration_seconds,false),...auditGaps(clean,job.duration_seconds),audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:merged.fileSha256,independentVerification:false};
+ // Commit the final audit before making the source visible to summary requests.
+ // A stale second finisher cannot reset a report created after the first insert.
+ await env.DB.prepare("UPDATE jobs SET status=?,audit_json=?,updated_at=? WHERE id=? AND owner_id=? AND (report_json IS NULL OR report_json='null') AND (audit_json IS NULL OR json_extract(audit_json,'$.audioProcessingCoverage') IS NULL)").bind(audit.status,JSON.stringify(audit),new Date().toISOString(),job.id,'owner').run();
+ await env.DB.prepare('INSERT OR IGNORE INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(job.id,raw,JSON.stringify(clean),'GROQ_OWNED_AUDIO',new Date().toISOString()).run();
+ const source=await sourceOf(env,job.id),savedJob=await ownedJob(env,job.id);
+ if(source?.provenance!=='GROQ_OWNED_AUDIO'||source.raw!==raw||JSON.stringify(source.segments)!==JSON.stringify(clean)||savedJob.audit?.audioFileSha256!==merged.fileSha256||savedJob.audit?.audioProcessingCoverage!==1)throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 전사 또는 완료 기록이 일치하지 않습니다.');
+ return {job:savedJob,source:{segments:clean,provenance:'GROQ_OWNED_AUDIO'},persisted:true};
+}
 function completedAudio(rows,duration){
  if(!rows.length||rows.some((row,index)=>row.chunk_index!==index||row.state!=='DONE'))throw new ProviderError('AUDIO_INCOMPLETE','누락된 음성 조각이 있습니다.');
  let edge=0;
@@ -192,7 +204,7 @@ export async function routeLive(request,env){
     if(prior.provenance!=='GROQ_OWNED_AUDIO'||prior.raw!==merged.segments.map(segment=>segment.text).join('\n')||JSON.stringify(prior.segments)!==JSON.stringify(normalizeSegments(merged.segments))||job.audit?.audioFileSha256!==merged.fileSha256||job.audit?.audioProcessingCoverage!==1)throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','기존 전사와 음성 계획이 일치하지 않습니다.');
     return json({job,source:prior,persisted:true,cached:true});
    }
-   return json(await storeTranscriptResult(env,job,merged.segments,'GROQ_OWNED_AUDIO',{audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:merged.fileSha256,independentVerification:false}));
+   return json(await storeAudioTranscriptOnce(env,job,merged));
   }
   if(action==='audio-cleanup'&&request.method==='POST'){
    const body=await readJson(request);

@@ -48,6 +48,11 @@ test('audio merge reports a chunk whose segments are all discarded and unexplain
  assert.deepEqual(invalid.missingChunks,[0]);assert.deepEqual(invalid.rejectedSegments.map(x=>x.reason),['INVALID_SEGMENT']);
  const overlap=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:58,end:60,text:'첫 말'}]},{index:1,start:58,end:120,segments:[{start:0,end:1,text:'다른 말'},{start:5,end:6,text:'나중 말'}]}]);
  assert.deepEqual(overlap.rejectedSegments.map(x=>x.reason),['OVERLAP_UNMATCHED']);
+ const distinctSpeech=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:54,end:55,text:'네'}]},{index:1,start:58,end:120,segments:[{start:.5,end:1.5,text:'네'},{start:7,end:8,text:'다음'}]}]);
+ assert.deepEqual(distinctSpeech.rejectedSegments.map(x=>x.reason),['OVERLAP_UNMATCHED']);
+ const sameSpeech=mergeAudioSegments([{index:0,start:0,end:60,segments:[{start:58.5,end:59.5,text:'네'}]},{index:1,start:58,end:120,segments:[{start:.5,end:1.5,text:'네'},{start:7,end:8,text:'다음'}]}]);
+ assert.deepEqual(sameSpeech.rejectedSegments.map(x=>x.reason),['OVERLAP_DUPLICATE']);
+ assert.deepEqual(sameSpeech.segments.map(x=>x.text),['네','다음']);
 });
 test('audio resume skips completed chunks and rejects a different file or plan',async()=>{const {db,env}=setup();try{const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600}),env)).json();const path='/api/jobs/'+created.job.id,fileSha256='a'.repeat(64),chunks=[{index:0,start:0,end:300},{index:1,start:297,end:600}];assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256,chunks}),env)).status,200);const progress=await(await routeApi(request(path+'/audio-progress'),env)).json();assert.deepEqual(progress.chunks.map(c=>c.state),['PLANNED','PLANNED']);assert.equal(progress.complete,false);db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=0").run(JSON.stringify({fileSha256,segments:[{start:0,end:1,text:'done'}]}),created.job.id);assert.equal((await(await routeApi(request(path+'/audio-chunk?index=0','POST',{}),env)).json()).cached,true);assert.equal((await routeApi(request(path+'/audio-finish','POST',{}),env)).status,409);assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'b'.repeat(64),chunks}),env)).status,400);assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256,chunks:[{index:0,start:0,end:600}]}),env)).status,400);}finally{db.close();}});
 test('temporary audio results need completed coverage, durable TXT readback and separate confirmation before cleanup',async()=>{
@@ -62,7 +67,7 @@ test('temporary audio results need completed coverage, durable TXT readback and 
   assert.equal((await routeApi(request(path+'/audio-finish','POST',{}),env)).status,409);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM yta_sources').get().n,0);
   db.prepare('UPDATE yta_audio SET result_json=? WHERE job_id=? AND chunk_index=0').run(JSON.stringify({fileSha256:sha,segments:[{start:1,end:2,text:'전사 0'}]}),id);
-  const finished=await routeApi(request(path+'/audio-finish','POST',{}),env);assert.equal(finished.status,200);
+  const finished=await routeApi(request(path+'/audio-finish','POST',{}),env);assert.equal(finished.status,200,await finished.clone().text());
   for(let i=0;i<2;i++)db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)").run(id+':audio:'+i,id,'groq',60,'DONE',new Date().toISOString(),JSON.stringify({segments:[{text:'전사 '+i}]}));
   assert.equal((await routeApi(request(path+'/audio-cleanup','POST',{}),env)).status,400);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM yta_audio').get().n,2);
@@ -94,6 +99,39 @@ test('temporary audio results need completed coverage, durable TXT readback and 
   const replay=await(await routeApi(request(path+'/audio-finish','POST',{}),env)).json();assert.equal(replay.cached,true);assert.equal(replay.job.report.kind,'GEMINI_EVIDENCE_LINKED');
   assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:sha,chunks}),env)).status,400);
  }finally{db.close();}
+});
+test('two stale audio finishes cannot overwrite a summary saved between them',async()=>{
+ const {db,env}=setup(),oldFetch=globalThis.fetch;
+ try{
+  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:120}),env)).json();
+  const id=created.job.id,path='/api/jobs/'+id,sha='c'.repeat(64),chunks=[{index:0,start:0,end:60},{index:1,start:60,end:120}];
+  assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:sha,chunks}),env)).status,200);
+  for(let i=0;i<2;i++)db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=?").run(JSON.stringify({fileSha256:sha,segments:[{start:1,end:2,text:'말 '+i}]}),id,i);
+  let reads=0,seenBoth,releaseSecond;const bothSeen=new Promise(resolve=>seenBoth=resolve),secondHeld=new Promise(resolve=>releaseSecond=resolve);
+  const racing={...env,DB:{prepare(sql){
+   const prepared=env.DB.prepare(sql);
+   if(sql!=='SELECT * FROM yta_sources WHERE job_id=?')return prepared;
+   return {bind(...args){
+    const bound=prepared.bind(...args);
+    return {async first(){
+     const row=await bound.first();reads++;
+     if(reads===1)await bothSeen;
+     else if(reads===2){seenBoth();await secondHeld;}
+     return row;
+    }};
+   }};
+  }}};
+  const first=routeApi(request(path+'/audio-finish','POST',{}),racing),second=routeApi(request(path+'/audio-finish','POST',{}),racing);
+  await bothSeen;
+  const firstResult=await first;assert.equal(firstResult.status,200,await firstResult.clone().text());
+  await grant(env);
+  globalThis.fetch=async()=>Response.json({candidates:[{content:{parts:[{text:JSON.stringify(valid())}]}}]});
+  assert.equal((await routeApi(request(path+'/summary','POST',{}),env)).status,200);
+  const before=db.prepare('SELECT report_json FROM jobs WHERE id=?').get(id).report_json;
+  releaseSecond();assert.equal((await second).status,200);
+  assert.equal(db.prepare('SELECT report_json FROM jobs WHERE id=?').get(id).report_json,before);
+  assert.equal((await(await routeApi(request(path+'/audio-finish','POST',{}),env)).json()).cached,true);
+ }finally{globalThis.fetch=oldFetch;db.close();}
 });
 test('summary partitions full transcript without truncation or over-budget requests',()=>{const segments=Array.from({length:240},(_,i)=>({id:i+1,startMs:i*24000,endMs:(i+1)*24000,text:'발언 내용 '.repeat(65)}));const groups=partitionTranscript(segments,{status:'TRANSCRIPT_UNVERIFIED'});assert.ok(groups.length>2);assert.deepEqual(groups.flat().map(s=>s.id),segments.map(s=>s.id));for(const group of groups){const prompt=reportPrompt(group,{status:'TRANSCRIPT_UNVERIFIED'});assert.ok(prompt.length<=SUMMARY_PROMPT_LIMIT);assert.ok(summaryUnits(prompt)<=250000);}const partial=groups.map(g=>({ids:[g[0].id],report:valid()}));for(const batch of partitionSynthesis(partial,{}))assert.ok(synthesisPrompt(batch,{}).length<=SUMMARY_PROMPT_LIMIT);});
 test('MOCK long summary resumes completed stages after renewed grants without duplicate calls',async()=>{

@@ -12,10 +12,13 @@ connect or deploy the separate `video-summary` Worker. Keep the existing token
 selection if it already has the required access; do not create or broaden a token
 as part of this handoff. Confirm the connected repository is
 `ban950220-ux/Video_summary`, root directory is `/`, and production branch is
-`main`. Workers Builds may inject `WRANGLER_CI_OVERRIDE_NAME` automatically.
+`main`. Workers Builds may inject `WRANGLER_CI_OVERRIDE_NAME` and
+`WRANGLER_CI_MATCH_TAG` automatically.
 Do not try to remove a platform-managed value. The guard accepts it only when
 its value is `holy-rice-b914`; `video-summary` or any other value stops the
-build/deployment before Wrangler can override the target.
+build/deployment before Wrangler can override the target. A supplied match tag
+is passed to Wrangler only after it matches the tag read from this Worker;
+pinned Wrangler then performs its own account/name/tag check.
 
 - Build command: `npm ci && npm run check && npm test`
 - Deploy command after explicit production deployment approval: `npm run deploy:production`
@@ -77,11 +80,16 @@ all remote conflicts when strict mode is absent. The replacement guard pins the
 full active version ID, checks the full observability object, routes, domains,
 workers.dev and preview URL switches, D1 UUID, Access variable/secret presence,
 and runtime flags. It permits only the reviewed `ASSETS` binding addition.
-The guard also reads script settings (`logpush`, `tail_consumers`) and version
-metadata (`streaming_tail_consumers`, limits, placement). Missing or different
-settings block the deploy. The values `false`, empty lists, and no limits or
-placement in the baseline are proposed expectations, **not yet verified from
-the production API**. Confirm the actual response before any deployment.
+The guard also reads script settings (`logpush`, `tail_consumers`, and the
+separate script-settings `observability` object) and version metadata
+(`streaming_tail_consumers`, limits, placement). The metadata fields may
+legitimately be omitted by the API; the guard records presence separately from
+value. The proposed baseline expects explicit `[]` for streaming tails and
+explicit `null` for limits and placement. These shapes and values are **not
+yet verified from the production API**. `remoteSettingsReviewed=false` blocks
+deployment until an actual response is checked and the presence/value baseline
+is updated and explicitly marked reviewed. Missing required settings or any
+unexpected difference still blocks deployment.
 Its approved baseline currently identifies active version
 `a33b9720-c167-4998-b8cb-3b065439b0d0`. A later deployment must update the
 baseline after independently confirming the then-active version. See

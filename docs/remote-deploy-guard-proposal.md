@@ -21,17 +21,22 @@ Pinned Wrangler 4.149.0 itself reads these account-scoped API endpoints when
 comparing a Dashboard-managed Worker:
 
 - `GET /workers/services/holy-rice-b914` to identify the default environment.
+  If Workers Builds supplies `WRANGLER_CI_MATCH_TAG`, compare it with this
+  service's default-environment script tag and pass it to Wrangler so its own
+  account/name/tag check remains active.
 - `GET /workers/services/holy-rice-b914/environments/{environment}` for script
-  metadata, including observability and compatibility settings.
+  metadata, including observability and compatibility settings. Track whether
+  optional limits, placement and streaming-tail fields are present rather than
+  silently converting omission to empty or null.
 - `GET /workers/services/holy-rice-b914/environments/{environment}/bindings`
   for binding types and identifiers.
 - `GET /workers/services/holy-rice-b914/environments/{environment}/subdomain`
   for workers.dev and version URL switches.
 - `GET /workers/scripts/holy-rice-b914/deployments` for the latest active
   deployment and its version ID/traffic percentage.
-- `GET /workers/scripts/holy-rice-b914/script-settings` for Logpush and tail
-  consumers. The environment metadata supplies streaming tail consumers,
-  limits, and placement.
+- `GET /workers/scripts/holy-rice-b914/script-settings` for Logpush, tail
+  consumers and a separate observability object. The environment metadata
+  supplies streaming tail consumers, limits, and placement.
 - Read routes and domains too; unexpected routes must stop deployment.
 
 Every path above is under `/accounts/{account_id}`. The account ID may be
