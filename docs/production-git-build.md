@@ -11,12 +11,14 @@ Use the existing Worker `holy-rice-b914` in Cloudflare Workers & Pages. Do not
 connect or deploy the separate `video-summary` Worker. Keep the existing token
 selection if it already has the required access; do not create or broaden a token
 as part of this handoff. Confirm the connected repository is
-`ban950220-ux/Video_summary`, root directory is `/`, production branch is `main`,
-and remove the existing `WRANGLER_CI_OVERRIDE_NAME` build variable. The guard
-fails if that override remains set, so it cannot silently target `video-summary`.
+`ban950220-ux/Video_summary`, root directory is `/`, and production branch is
+`main`. Workers Builds may inject `WRANGLER_CI_OVERRIDE_NAME` automatically.
+Do not try to remove a platform-managed value. The guard accepts it only when
+its value is `holy-rice-b914`; `video-summary` or any other value stops the
+build/deployment before Wrangler can override the target.
 
 - Build command: `npm ci && npm run check && npm test`
-- Deploy command: `npm run deploy:production`
+- Deploy command after explicit production deployment approval: `npm run deploy:production`
 - Preview command: `npm run preview:blocked` (until a separate D1 database and
   owner-only Access protection are verified for previews)
 
@@ -25,11 +27,24 @@ to submit the Cloudflare form or deploy now. Keep the production Worker Access
 application on its existing owner-only policy. Verify the production and any
 future preview hostname remain protected before enabling preview builds.
 
-`deploy:production` requires the checked-out `main` branch, refuses any
-`WRANGLER_CI_OVERRIDE_NAME`, validates the Worker and D1 target, and invokes
+Before approving a merge, first inspect the existing `video-summary` Git Build
+connection. A push to `main` must not trigger its default deployment. Disable
+that connection or give it the deliberately blocking deploy command
+`npm run release:gate` and blocking preview command `npm run preview:blocked`
+before merging. Connect `holy-rice-b914` using the selected existing token with
+the same blocked deploy and preview commands initially. Saving a Git Build
+connection may trigger a build; expect `release:gate` to exit 2 with no deploy.
+Do not enable `npm run deploy:production` until a separate deploy approval,
+preflight review, and the correct Worker target are confirmed.
+
+`deploy:production` requires `main`. In Workers Builds, it verifies
+`WORKERS_CI_BRANCH=main` and that `WORKERS_CI_COMMIT_SHA` matches the checkout
+HEAD, including detached checkouts. Outside Workers Builds it requires a local
+`main` branch. It validates the Worker and D1 target, and invokes
 the pinned Wrangler with `--name holy-rice-b914 --keep-vars --strict`.
-`--keep-vars` preserves existing dashboard runtime text variables, including
-`ACCESS_AUD` and `ACCESS_TEAM_DOMAIN`. The existing `ACCESS_OWNER_EMAIL` and
+`--keep-vars` preserves existing dashboard runtime text variables not specified
+by config, including `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN`; the three configured
+flags are explicitly sent as `false`, `false`, and `true`. The existing `ACCESS_OWNER_EMAIL` and
 `KEY_ENCRYPTION_KEY_B64` Worker Secrets are not read or changed. Their values
 must never be added to this repository. `ALLOW_PAID_API=false`,
 `ENABLE_LIVE_FREE=false`, and `SITE_DEPLOYED=true` are explicit in the config.

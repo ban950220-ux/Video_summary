@@ -29,8 +29,8 @@ export function assertProductionTarget(config,env={}){
   if(/database_id\s*=|\[\[previews\.d1_databases\]\]/m.test(previewConfig)){
     throw Error('Deployment target guard: preview must not bind production D1');
   }
-  if(env.WRANGLER_CI_OVERRIDE_NAME){
-    throw Error('Deployment target guard: remove WRANGLER_CI_OVERRIDE_NAME before deployment');
+  if(env.WRANGLER_CI_OVERRIDE_NAME&&env.WRANGLER_CI_OVERRIDE_NAME!=='holy-rice-b914'){
+    throw Error('Deployment target guard: WRANGLER_CI_OVERRIDE_NAME targets a different Worker');
   }
   return true;
 }
