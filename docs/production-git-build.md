@@ -2,8 +2,8 @@
 
 ## Current guarded free-provider rollout
 
-The current 100% active version is `3aab49e1-9b32-4543-86bd-bb96fb33f583`
-from source `4f7d2b9ff6bbe7ded7b0ec6af31bd7c7002e959d`. It already has one
+The current 100% active version is `d899f6db-0cab-475b-9fdb-da8c5c8e4301`
+from source `4cde3937269ab764a91185ebdd15616edb9ba7ea`. It already has one
 `ASSETS` binding. The next guarded deployment expects `ENABLE_LIVE_FREE=true`
 before and after upload. `ALLOW_PAID_API=false`,
 `SITE_DEPLOYED=true`, the production D1 binding, owner-only Access, secrets,
@@ -148,7 +148,7 @@ automatic approval. The exact observed production response shape was
 independently reconciled before the gate changed.
 
 Its approved baseline currently identifies active version
-`3aab49e1-9b32-4543-86bd-bb96fb33f583`. A later deployment must update the
+`d899f6db-0cab-475b-9fdb-da8c5c8e4301`. A later deployment must update the
 baseline after independently confirming the then-active version. See
 [the remote guard design](remote-deploy-guard-proposal.md).
 
