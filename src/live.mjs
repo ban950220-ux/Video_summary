@@ -391,11 +391,19 @@ export async function routeLive(request,env){
   if(action==='summary'&&request.method==='POST'){
    const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
    if(job.report?.kind==='GEMINI_EVIDENCE_LINKED')return json({job,persisted:true,cached:true});
+   const auditJson=JSON.stringify(job.audit),summarySourceChanged=()=>{const error=new ProviderError('SUMMARY_INPUT_CHANGED','요약 원본·경계 검토 정보가 변경됐습니다. 새로 검토하세요.');error.preDispatchBlocked=true;throw error;};
+   const assertSummarySource=async(operationId,requireClaimed)=>{
+    const row=await env.DB.prepare("SELECT 1 AS ok FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=? AND j.owner_id='owner' AND j.audit_json=? AND j.report_json=? AND s.raw=? AND s.segments_json=? AND NOT EXISTS (SELECT 1 FROM yta_operations d WHERE d.id=? AND d.provider='deletion' AND d.state='DELETING') AND EXISTS (SELECT 1 FROM yta_operations o WHERE o.id=? AND o.job_id=j.id AND o.provider='gemini' AND o.state=?)").bind(id,auditJson,job.report_json,source.raw,source.segments_json,id+':deleting',operationId,requireClaimed?'CLAIMED':'DONE').first();
+    if(!row)summarySourceChanged();
+   };
    const fingerprint=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([source.segments,job.audit]))))).map(x=>x.toString(16).padStart(2,'0')).join('');
    let newCall=false;
    const pending=()=>json({job,persisted:true,pending:true,reason:'NEXT_STAGE_REQUIRES_SEPARATE_REQUEST',minimumWaitSeconds:13},202);
    const ask=async(key,prompt,allowed,stage)=>{
-    const response=await execute(env,{id:id+':summary:'+fingerprint+':'+key,job:id,provider:'gemini',units:summaryUnits(prompt)},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true',SUMMARY_STAGE_OUTPUT_TOKENS:stage?'2048':'8192'},text:prompt,beforeDispatch:()=>assertGeminiBeforeFetch(env,active),beforeFetch:()=>assertGeminiBeforeFetch(env,active)}),()=>{newCall=true;});
+    const operationId=id+':summary:'+fingerprint+':'+key;
+    const beforeSummaryFetch=async active=>{await assertGeminiBeforeFetch(env,active);await assertSummarySource(operationId,true);};
+    const response=await execute(env,{id:operationId,job:id,provider:'gemini',units:summaryUnits(prompt)},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true',SUMMARY_STAGE_OUTPUT_TOKENS:stage?'2048':'8192'},text:prompt,beforeDispatch:()=>beforeSummaryFetch(active),beforeFetch:()=>beforeSummaryFetch(active)}),()=>{newCall=true;});
+    await assertSummarySource(operationId,false);
     let result;try{if(response.text.length>12000&&stage)throw Error('STAGE_TOO_LONG');result=validateAnalysis(JSON.parse(response.text),allowed);}catch{throw new ProviderError('REPORT_VALIDATION_FAILED','요약 근거 형식 검증 실패. 원문은 보관됐으며 자동 재호출하지 않습니다.');}
     return result;
    };
@@ -427,7 +435,9 @@ export async function routeLive(request,env){
     report=parts[0].report;
     assertGroupCoverage(report,groups.map(chunk=>({ids:chunk.map(s=>s.id)})));
    }
-   await updateJob(env,id,job.status,report,{...job.audit,summaryProvider:'gemini',externalFactCheck:'NOT_PERFORMED'});return json({job:await ownedJob(env,id),persisted:true});
+   const updated=await env.DB.prepare("UPDATE jobs SET status=?,report_json=?,audit_json=?,updated_at=? WHERE id=? AND owner_id='owner' AND audit_json=? AND report_json=? AND EXISTS (SELECT 1 FROM yta_sources WHERE job_id=? AND raw=? AND segments_json=?) AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(job.status,JSON.stringify(report),JSON.stringify({...job.audit,summaryProvider:'gemini',externalFactCheck:'NOT_PERFORMED'}),new Date().toISOString(),id,auditJson,job.report_json,id,source.raw,source.segments_json,id+':deleting').run();
+   if(updated.meta?.changes!==1)summarySourceChanged();
+   return json({job:await ownedJob(env,id),persisted:true});
   }
   if(action==='audio-plan'&&request.method==='POST'){
    if(['GROQ_OWNED_AUDIO','GEMINI_OWNED_AUDIO','MIXED_OWNED_AUDIO'].includes((await sourceOf(env,id))?.provenance))throw new InputError('완료된 전사입니다. 저장된 TXT를 확인하세요.');
@@ -624,7 +634,7 @@ export async function routeLive(request,env){
   if(action==='audio-boundary-reconcile'&&['GET','POST'].includes(request.method)){
    const source=await sourceOf(env,id),audit=job.audit,chunks=audit?.audioChunks,origins=audit?.audioSegmentOrigins;
    if(job.source_type!=='audio'||audit?.audioProcessing!=='ALL_PLANNED_CHUNKS_PROCESSED'||audit.audioProcessingCoverage!==1||!/^[a-f0-9]{64}$/.test(audit.audioFileSha256||'')||!['GROQ_OWNED_AUDIO','GEMINI_OWNED_AUDIO','MIXED_OWNED_AUDIO'].includes(source?.provenance)||!Array.isArray(chunks)||chunks.length<2||!Array.isArray(origins)||origins.length!==source.segments?.length||source.raw!==source.segments.map(part=>part.text).join('\n'))throw new ProviderError('BOUNDARY_RECONCILE_SOURCE_INVALID','저장된 음성 원본·출처를 검증할 수 없습니다.');
-   if(chunks.some((chunk,index)=>chunk.index!==index||!Number.isFinite(chunk.start)||!Number.isFinite(chunk.end)||chunk.start<0||chunk.end<=chunk.start||chunk.end-chunk.start>601||(index&&chunk.start<Math.max(0,chunks[index-1].end-5))||(index&&chunk.start>chunks[index-1].end+.1)||chunk.end>job.duration_seconds+2)||Math.abs(chunks.at(-1).end-job.duration_seconds)>2)throw new ProviderError('BOUNDARY_RECONCILE_SOURCE_INVALID','저장된 음성 조각 시간축을 검증할 수 없습니다.');
+   if(chunks.some((chunk,index)=>chunk.index!==index||!Number.isFinite(chunk.start)||!Number.isFinite(chunk.end)||chunk.start<0||chunk.end<=chunk.start||chunk.end-chunk.start>601||(!index&&chunk.start>.1)||(index&&chunk.start<Math.max(0,chunks[index-1].end-5))||(index&&chunk.start>chunks[index-1].end+.1)||chunk.end>job.duration_seconds+2)||Math.abs(chunks.at(-1).end-job.duration_seconds)>2)throw new ProviderError('BOUNDARY_RECONCILE_SOURCE_INVALID','저장된 음성 조각 시간축을 검증할 수 없습니다.');
    const retained=source.segments.map((part,index)=>{
     const origin=origins[index];
     if(part.id!==index+1||origin?.segmentId!==part.id||!Number.isSafeInteger(origin.chunkIndex)||origin.chunkIndex<0||origin.chunkIndex>=chunks.length||!Number.isSafeInteger(part.startMs)||!Number.isSafeInteger(part.endMs)||part.startMs!==origin.startMs||part.endMs!==origin.endMs||typeof part.text!=='string'||!part.text.trim()||part.startMs<0||part.endMs<=part.startMs||part.startMs<chunks[origin.chunkIndex].start*1000-101||part.endMs>chunks[origin.chunkIndex].end*1000+2001)throw new ProviderError('BOUNDARY_RECONCILE_SOURCE_INVALID','저장된 구간과 조각 출처가 일치하지 않습니다.');

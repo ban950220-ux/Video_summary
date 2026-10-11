@@ -69,11 +69,12 @@ test('cached audio boundary reconciliation preserves speech, invalidates old rev
   assert.equal((await blocked.json()).error.code,'BOUNDARY_RECONCILE_CONFLICT');
   assert.deepEqual(JSON.parse(locked.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(locked.id).audit_json).audioBoundaryAmbiguities,[]);
  }finally{locked.db.close();}
- for(const mode of ['gemini-summary','deletion-race','string-timestamps']){
+ for(const mode of ['gemini-summary','deletion-race','string-timestamps','late-first-chunk']){
   const candidate=await prepare();try{
-   if(mode==='string-timestamps'){
+   if(mode==='string-timestamps'||mode==='late-first-chunk'){
     const source=candidate.db.prepare('SELECT segments_json FROM yta_sources WHERE job_id=?').get(candidate.id),segments=JSON.parse(source.segments_json),audit=JSON.parse(candidate.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(candidate.id).audit_json);
-    segments[0].startMs='1000';audit.audioSegmentOrigins[0].startMs='1000';
+    if(mode==='string-timestamps'){segments[0].startMs='1000';audit.audioSegmentOrigins[0].startMs='1000';}
+    else audit.audioChunks[0].start=.5;
     candidate.db.prepare('UPDATE yta_sources SET segments_json=? WHERE job_id=?').run(JSON.stringify(segments),candidate.id);
     candidate.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),candidate.id);
     const invalid=await routeApi(request(candidate.path+'/audio-boundary-reconcile'),candidate.env);

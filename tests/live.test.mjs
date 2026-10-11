@@ -190,6 +190,24 @@ test('stale unknown Gemini claim blocks new jobs with explicit review status',as
 });
 test('MOCK provider 429 expires grant; uncertain operation cannot auto retry or reserve twice',async()=>{const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({}, {status:429});};try{const j=await job(env);await grant(env);assert.equal((await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)).status,409);assert.equal(db.prepare('SELECT expires_at FROM yta_quota').get().expires_at,0);assert.equal(db.prepare('SELECT request_count FROM yta_quota').get().request_count,1);await grant(env);assert.equal((await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)).status,409);assert.equal(calls,1);assert.equal(db.prepare('SELECT request_count FROM yta_quota').get().request_count,0);assert.equal(db.prepare("SELECT state FROM yta_operations WHERE provider='gemini'").get().state,'FAILED_UNCERTAIN');}finally{globalThis.fetch=old;db.close();}});
 test('MOCK invalid evidence report never saves as validated AI summary',async()=>{const {db,env}=setup(),old=fetch;const bad=valid();bad.summary[0].evidenceIds=[999];globalThis.fetch=async()=>Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(bad)}]}}]});try{const j=await job(env);await grant(env);const r=await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env);assert.equal((await r.json()).error.code,'REPORT_VALIDATION_FAILED');assert.notEqual(JSON.parse(db.prepare('SELECT report_json FROM jobs').get().report_json).kind,'GEMINI_EVIDENCE_LINKED');}finally{globalThis.fetch=old;db.close();}});
+test('Gemini summary cannot erase reconciled boundary markers when it read the old audit before claim',async()=>{
+ const {db,env}=setup(),old=fetch;let calls=0,reconciled=false;globalThis.fetch=async()=>{calls++;throw Error('provider must not run');};
+ try{
+  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:6}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
+  const segments=[{id:1,startMs:1000,endMs:4000,text:'앞 조각 발언'},{id:2,startMs:3500,endMs:5000,text:'뒤 조각 다른 발언'}];
+  const audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64),audioProviders:['groq'],audioChunks:[{index:0,start:0,end:4,provider:'groq'},{index:1,start:3,end:6,provider:'groq'}],audioSegmentOrigins:[{segmentId:1,chunkIndex:0,startMs:1000,endMs:4000},{segmentId:2,chunkIndex:1,startMs:3500,endMs:5000}],audioBoundaryReview:'NO_NONIDENTICAL_OVERLAP_TEXT',audioBoundaryAmbiguities:[]};
+  db.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').run(id,segments.map(part=>part.text).join('\n'),JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString());
+  db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),id);
+  await grant(env);
+  const preview=await(await routeApi(request(path+'/audio-boundary-reconcile'),env)).json();
+  const original=env.DB;env.DB={...original,prepare(sql){const statement=original.prepare(sql);if(sql!=='SELECT * FROM yta_operations WHERE id=?')return statement;return {bind(...args){const bound=statement.bind(...args);return {...bound,async first(){if(!reconciled&&String(args[0]).startsWith(id+':summary:')){const result=await routeApi(request(path+'/audio-boundary-reconcile','POST',{...preview,confirmBoundaryMetadataReconcile:true}),env);assert.equal(result.status,200,await result.clone().text());reconciled=true;}return bound.first();}};}};}};
+  const response=await routeApi(request(path+'/summary','POST',{}),env);
+  assert.equal((await response.json()).error.code,'SUMMARY_INPUT_CHANGED');assert.equal(calls,0);assert.equal(reconciled,true);
+  const saved=JSON.parse(db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(id).audit_json);
+  assert.deepEqual(saved.audioBoundaryAmbiguities.map(item=>item.segmentId),[1,2]);
+  assert.equal(db.prepare('SELECT report_json FROM jobs WHERE id=?').get(id).report_json,'null');
+ }finally{globalThis.fetch=old;db.close();}
+});
 test('valid-looking Gemini summary JSON with MAX_TOKENS or SAFETY remains uncertain and reviewable',async()=>{
  const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>Response.json({candidates:[{finishReason:++calls===1?'MAX_TOKENS':'SAFETY',content:{parts:[{text:JSON.stringify(valid())}]}}]});
  try{await grant(env);for(const reason of ['MAX_TOKENS','SAFETY']){const j=await job(env),path='/api/jobs/'+j.id;
