@@ -50,8 +50,9 @@ export function prepareMp3Chunk(bytes){
  if(flags===15){
   const tag=xing+120,encoder=word(tag);
   if(!['LAME','Lavf','Lavc'].includes(encoder)||endOfFirst<xing+156)throw Error('MP3_LAME_TAG_UNSUPPORTED');
-  if(first.byteEnd<190)throw Error('MP3_LAME_CRC_SPAN_UNSUPPORTED');
-  const originalTag=Uint8Array.from(bytes.subarray(0,190));originalTag.fill(0,xing+154,xing+156);
+  const lame=encoder==='LAME',crcEnd=lame?xing+154:190;
+  if(first.byteEnd<crcEnd)throw Error('MP3_LAME_CRC_SPAN_UNSUPPORTED');
+  const originalTag=Uint8Array.from(bytes.subarray(0,crcEnd));if(!lame)originalTag.fill(0,xing+154,xing+156);
   if(mp3TagCrc(originalTag)!==view.getUint16(xing+154))throw Error('MP3_LAME_CRC_INVALID');
   const toc=xing+16;prepared[toc]=0;
   for(let i=1;i<100;i++){const frame=frames[Math.min(frames.length-1,1+Math.floor(i*frameCount/100))];prepared[toc+i]=Math.min(255,Math.floor(256*frame.byteStart/prepared.length));}
@@ -59,7 +60,7 @@ export function prepareMp3Chunk(bytes){
   const delay=delayPadding>>>12;prepared[paddingField]=delay>>>4;prepared[paddingField+1]=(delay&15)<<4;prepared[paddingField+2]=0;
   out.setUint32(xing+148,prepared.length);
   out.setUint16(xing+152,mp3TagCrc(prepared.subarray(endOfFirst)));
-  const correctedTag=Uint8Array.from(prepared.subarray(0,190));correctedTag.fill(0,xing+154,xing+156);
+  const correctedTag=Uint8Array.from(prepared.subarray(0,crcEnd));if(!lame)correctedTag.fill(0,xing+154,xing+156);
   out.setUint16(xing+154,mp3TagCrc(correctedTag));
  }
  return {bytes:prepared,metadataCorrected:true};

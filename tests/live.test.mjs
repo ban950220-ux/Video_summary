@@ -109,6 +109,34 @@ test('CRC-protected Xing location and mono FFmpeg fixed-span CRC are recognized'
  const tag=mono.slice(0,190);tag.fill(0,175,177);new DataView(mono.buffer).setUint16(175,crc(tag));
  const fixed=prepareMp3Chunk(mono);assert.equal(fixed.metadataCorrected,true);const corrected=fixed.bytes.slice(0,190);corrected.fill(0,175,177);assert.equal(new DataView(fixed.bytes.buffer).getUint16(175),crc(corrected));
 });
+test('LAME mono MPEG-1 and MPEG-2 tags use the variable CRC span',()=>{
+ const crc=data=>{let value=0;for(const byte of data){value^=byte;for(let bit=0;bit<8;bit++)value=(value>>1)^((value&1)?0xa001:0);}return value;};
+ for(const {header,size,xing} of [{header:[255,251,144,192],size:417,xing:21},{header:[255,243,144,192],size:261,xing:13}]){
+  const frames=383,bytes=new Uint8Array(frames*size),view=new DataView(bytes.buffer);
+  for(let i=0;i<frames;i++)bytes.set(header,i*size);
+  bytes.set(new TextEncoder().encode('Info'),xing);view.setUint32(xing+4,15);view.setUint32(xing+8,1000);view.setUint32(xing+12,500000);
+  bytes.set(new TextEncoder().encode('LAME'),xing+120);view.setUint16(xing+154,crc(bytes.subarray(0,xing+154)));
+  const original=bytes.slice(),prepared=prepareMp3Chunk(bytes);
+  assert.equal(prepared.metadataCorrected,true);assert.deepEqual(bytes,original);
+  assert.equal(new DataView(prepared.bytes.buffer).getUint16(xing+154),crc(prepared.bytes.subarray(0,xing+154)));
+  assert.deepEqual(prepared.bytes.subarray(size),original.subarray(size));
+ }
+});
+test('FFmpeg mono MPEG-1 and MPEG-2 Xing tags retain decodable PCM after correction',t=>{
+ if(spawnSync('ffmpeg',['-version'],{stdio:'ignore'}).status!==0){t.skip('FFmpeg unavailable');return;}
+ const dir=mkdtempSync(join(tmpdir(),'yta-ffmpeg-crc-'));
+ try{for(const sampleRate of ['44100','22050']){
+  const source=join(dir,`source-${sampleRate}.mp3`),sliced=join(dir,`slice-${sampleRate}.mp3`);
+  assert.equal(spawnSync('ffmpeg',['-v','error','-f','lavfi','-i','sine=frequency=440:duration=12','-ac','1','-ar',sampleRate,'-c:a','libmp3lame','-b:a','64k','-y',source]).status,0);
+  const full=readFileSync(source),chunk=planMp3(full,{chunkSeconds:10}).chunks[0],input=full.subarray(chunk.byteStart,chunk.byteEnd);
+  const xing=sampleRate==='44100'?21:13;assert.equal(Buffer.from(input).toString('ascii',xing,xing+4),'Info');
+  const encoder=Buffer.from(input).toString('ascii',xing+120,xing+124);assert.ok(['Lavf','Lavc'].includes(encoder),encoder);
+  const prepared=prepareMp3Chunk(input);assert.equal(prepared.metadataCorrected,true);
+  assert.deepEqual(Buffer.from(prepared.bytes.subarray(scanMp3(input).frames[0].byteEnd)),input.subarray(scanMp3(input).frames[0].byteEnd));
+  writeFileSync(sliced,prepared.bytes);const decoded=spawnSync('ffmpeg',['-v','error','-i',sliced,'-f','s16le','-'],{maxBuffer:3000000});
+  assert.equal(decoded.status,0);assert.ok(decoded.stdout.length>sampleRate*2*8);
+ }}finally{rmSync(dir,{recursive:true,force:true});}
+});
 test('flags=3 encoder extension with nonzero end padding fails closed',()=>{
  const bytes=new Uint8Array(383*417);for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);
  bytes.set(new TextEncoder().encode('Xing'),36);new DataView(bytes.buffer).setUint32(40,3);new DataView(bytes.buffer).setUint32(44,1000);new DataView(bytes.buffer).setUint32(48,500000);
