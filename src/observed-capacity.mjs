@@ -4,6 +4,14 @@ const models={gemini:'gemini-2.5-flash',groq:'whisper-large-v3-turbo'};
 const sources={gemini:'AI_STUDIO_LIVE',groq:'GROQ_CONSOLE_LIVE'};
 const dimensions={gemini:['requestsMinute','tokensMinute','requestsDay'],groq:['requestsMinute','audioSecondsHour','audioSecondsDay']};
 const maxAgeMs=60_000;
+async function capacityIdentity(env,provider){
+ const credential=await env.DB.prepare('SELECT cipher_version,iv_b64,ciphertext_b64,updated_at FROM provider_credentials WHERE owner_id=? AND provider=?').bind('owner',provider).first();
+ const material=credential?JSON.stringify(credential):env[provider.toUpperCase()+'_API_KEY'];
+ if(typeof material!=='string'||!material.length)throw new ProviderError('KEY_MISSING','관측 용량에 연결할 제공자 키가 없습니다.');
+ const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(provider+':'+material)));
+ return Array.from(bytes).map(value=>value.toString(16).padStart(2,'0')).join('');
+}
+export async function capacityIdentityMatches(env,provider,source){try{return source===sources[provider]+':'+await capacityIdentity(env,provider);}catch{return false;}}
 export async function ensureCapacitySchema(env){
  const rows=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('yta_capacity','yta_wait')").bind().all()).results||[];
  if(rows.length!==2)throw new ProviderError('CAPACITY_SCHEMA_REQUIRED','관측 용량 테이블의 추가 마이그레이션이 필요합니다.');
@@ -24,7 +32,7 @@ export async function recordCapacity(env,body){
  const inFlight=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider=? AND state='CLAIMED' LIMIT 1").bind(provider).first();
  if(inFlight)throw new ProviderError('OPERATION_IN_FLIGHT','진행 중인 제공자 요청이 끝난 뒤 관측치를 갱신하세요.');
  const old=await env.DB.prepare('SELECT version FROM yta_capacity WHERE provider=?').bind(provider).first();
- const data=[provider,body.model,body.source,body.observedAt,body.observedAt+maxAgeMs,JSON.stringify(reset),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(required.map(key=>[key,0]))),1];
+ const data=[provider,body.model,body.source+':'+await capacityIdentity(env,provider),body.observedAt,body.observedAt+maxAgeMs,JSON.stringify(reset),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(required.map(key=>[key,0]))),1];
  const result=old?await env.DB.prepare('UPDATE yta_capacity SET model=?,source=?,observed_at=?,valid_until=?,reset_json=?,remaining_json=?,reserved_json=?,version=version+1,billing_disabled=? WHERE provider=? AND version=? AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider=? AND state=\'CLAIMED\')').bind(...data.slice(1),provider,old.version,provider).run():await env.DB.prepare('INSERT OR IGNORE INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES(?,?,?,?,?,?,?,?,?)').bind(...data).run();
  if(result.meta?.changes!==1)throw new ProviderError('CAPACITY_UPDATE_RACE','용량 관측 중 요청 상태가 바뀌었습니다. 다시 확인하세요.');
  return {recorded:true,provider,model:body.model,validUntil:body.observedAt+maxAgeMs,provenance:'OWNER_COPIED_PROVIDER_DASHBOARD_NOT_INDEPENDENTLY_VERIFIED'};
@@ -34,7 +42,7 @@ export async function reserveObservedCapacity(env,{provider,operationId,jobId,bo
  const required=dimensions[provider];if(!required)throw new ProviderError('CAPACITY_PROVIDER_UNSUPPORTED','관측 용량 제공자 오류');
  for(let attempt=0;attempt<3;attempt++){
   const row=await env.DB.prepare('SELECT * FROM yta_capacity WHERE provider=?').bind(provider).first(),now=Date.now();
-  if(!row||row.model!==models[provider]||row.billing_disabled!==1||row.valid_until<=now){await persistWait(env,{operationId,jobId,provider,reason:'OBSERVATION_MISSING_OR_STALE',resetAt:null});throw new ProviderError('CAPACITY_WAIT','최신 공급자 계정 전체 잔여량 관측이 필요합니다.');}
+  if(!row||row.model!==models[provider]||row.billing_disabled!==1||row.valid_until<=now||!await capacityIdentityMatches(env,provider,row.source)){await persistWait(env,{operationId,jobId,provider,reason:'OBSERVATION_MISSING_OR_STALE',resetAt:null});throw new ProviderError('CAPACITY_WAIT','현재 제공자 키에 대한 최신 계정 잔여량 관측이 필요합니다.');}
   const remaining=JSON.parse(row.remaining_json),reserved=JSON.parse(row.reserved_json),reset=JSON.parse(row.reset_json);
   const limiting=required.find(key=>!Number.isSafeInteger(bounds[key])||bounds[key]<1||!Number.isSafeInteger(remaining[key])||!Number.isSafeInteger(reserved[key])||remaining[key]-reserved[key]<bounds[key]);
   if(limiting){await persistWait(env,{operationId,jobId,provider,reason:'INSUFFICIENT_'+limiting,resetAt:reset[limiting]});throw new ProviderError('CAPACITY_WAIT','공급자 잔여 '+limiting+' 한도가 부족합니다. 재설정 후 다시 관측하세요.');}
