@@ -36,6 +36,15 @@ test('preflight emits only approved booleans, rates, presence and counts',()=>{
  assert.equal(report.matchesProposedBaseline,false);
  assert.equal(report.mismatchCode,'ROUTES_MISMATCH');
 });
+test('version diagnostic emits only validated active UUID and source SHA',()=>{
+ const state=remote(),sha='a'.repeat(40);state.deploymentMessage='source-commit:'+sha;
+ const report=safeRemoteBaselineReport(state,{REMOTE_PREFLIGHT_VERSION_DIAGNOSTIC:'true'});
+ assert.deepEqual(report.versionDiagnostic,{activeVersionId:approvedRemoteBaseline.activeVersionId,sourceCommit:sha});
+ assert.ok(!JSON.stringify(report).includes(secret));
+ state.deploymentMessage=secret;state.activeVersions[0].id=secret;
+ assert.deepEqual(safeRemoteBaselineReport(state,{REMOTE_PREFLIGHT_VERSION_DIAGNOSTIC:'true'}).versionDiagnostic,{activeVersionId:'UNAVAILABLE',sourceCommit:'UNAVAILABLE'});
+ assert.equal(Object.hasOwn(safeRemoteBaselineReport(state,{}),'versionDiagnostic'),false);
+});
 
 test('diagnostic ignores object key order and reports complete, unique bindings separately from review approval',()=>{
  const reorder=value=>Array.isArray(value)?value.map(reorder):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).reverse().map(([key,entry])=>[key,reorder(entry)])):value;
