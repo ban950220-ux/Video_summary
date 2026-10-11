@@ -361,6 +361,22 @@ test('fresh observed Gemini capacity is shared by summary and audio, with durabl
   assert.equal((await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)).status,200);assert.equal(calls,1);assert.ok(JSON.parse(db.prepare("SELECT reserved_json FROM yta_capacity WHERE provider='gemini'").get().reserved_json).tokensMinute>0);
  }finally{globalThis.fetch=old;db.close();}
 });
+test('Gemini accepts fresh sufficient capacity with unknown reset times for one mocked call',async()=>{
+ const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(valid())}]}}]});};
+ try{const j=await job(env);await grant(env);const response=await routeApi(request('/api/live/capacity','PUT',{provider:'gemini',model:'gemini-2.5-flash',source:'AI_STUDIO_LIVE',observedAt:Date.now(),remaining:{requestsMinute:5,tokensMinute:250000,requestsDay:20},billingDisabled:true,freeOnly:true,externalActivity:false}),env);
+  assert.equal(response.status,200);assert.deepEqual(JSON.parse(db.prepare("SELECT reset_json FROM yta_capacity WHERE provider='gemini'").get().reset_json),{requestsMinute:null,tokensMinute:null,requestsDay:null});
+  assert.equal((await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)).status,200);assert.equal(calls,1);
+ }finally{globalThis.fetch=old;db.close();}
+});
+test('unknown Gemini reset never permits insufficient capacity or invents a wait time',async()=>{
+ const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('PROVIDER_MUST_NOT_RUN');};
+ try{const j=await job(env);await grant(env);const base={provider:'gemini',model:'gemini-2.5-flash',source:'AI_STUDIO_LIVE',observedAt:Date.now(),remaining:{requestsMinute:5,tokensMinute:0,requestsDay:20},billingDisabled:true,freeOnly:true,externalActivity:false};
+  assert.equal((await routeApi(request('/api/live/capacity','PUT',base),env)).status,200);
+  const blocked=await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env);assert.equal((await blocked.json()).error.code,'CAPACITY_WAIT');assert.equal(calls,0);
+  const wait=db.prepare('SELECT reason,reset_at FROM yta_wait').get();assert.equal(wait.reason,'INSUFFICIENT_tokensMinute');assert.equal(wait.reset_at,null);
+  assert.equal((await routeApi(request('/api/live/capacity','PUT',{...base,resetAt:{tokensMinute:Date.now()+60000,requestsMinute:'guessed',requestsDay:null}}),env)).status,400);
+ }finally{globalThis.fetch=old;db.close();}
+});
 test('two stale capacity attempts use zero grant slots and zero provider calls',async()=>{
  const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('PROVIDER_MUST_NOT_RUN');};
  try{const j=await job(env);await grant(env,39072);db.prepare("UPDATE yta_capacity SET valid_until=0 WHERE provider='gemini'").run();

@@ -6,7 +6,7 @@ import {assertProductionBranch} from './production-branch.mjs';
 import {assertRemoteDeploymentBaseline} from './read-remote-state.mjs';
 import {readRemoteState} from './read-remote-state.mjs';
 import {approvedRemoteBaseline,assertRemoteState} from './remote-state-policy.mjs';
-import {deploymentEnvironment,runWranglerSafely,assertDeployedVersion} from './deployment-runtime.mjs';
+import {deploymentEnvironment,runWranglerSafely,assertDeployedVersion,safeDeploymentReceipt} from './deployment-runtime.mjs';
 
 const root=resolve(import.meta.dirname,'..');
 assertProductionTarget(readFileSync(resolve(root,'wrangler.toml'),'utf8'),process.env);
@@ -18,10 +18,12 @@ const before=await assertRemoteDeploymentBaseline({token:process.env.CLOUDFLARE_
 const childEnvironment=deploymentEnvironment(process.env,before.workerTag);
 const wrangler=resolve(root,'node_modules/wrangler/bin/wrangler.js');
 const deployed=runWranglerSafely(process.execPath,wrangler,root,childEnvironment,head);
+let verified;
 for(let i=0;i<2;i++){
   const after=await readRemoteState({token:process.env.CLOUDFLARE_API_TOKEN});
   if(process.env.WRANGLER_CI_MATCH_TAG&&after.workerTag!==process.env.WRANGLER_CI_MATCH_TAG)throw Error('Production deploy: POST_DEPLOY_WORKER_TAG_MISMATCH');
   assertDeployedVersion(after,deployed);
   assertRemoteState(after,{...approvedRemoteBaseline,activeVersionId:deployed.versionId},{postDeploy:true});
+  verified=after;
 }
-console.log('Production deploy completed and remote metadata rechecked. Verify owner-only Access separately.');
+console.log(safeDeploymentReceipt(verified,deployed));

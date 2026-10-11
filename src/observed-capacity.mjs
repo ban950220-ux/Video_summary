@@ -26,8 +26,10 @@ export async function recordCapacity(env,body){
  const remaining={},reset={};
  for(const key of required){
   const value=body.remaining?.[key],at=body.resetAt?.[key];
-  if(!Number.isSafeInteger(value)||value<0||!Number.isInteger(at)||at<=now||at>now+86_500_000)throw new InputError('공급자 잔여량과 각 제한의 재설정 시각이 모두 필요합니다.');
-  remaining[key]=value;reset[key]=at;
+  if(!Number.isSafeInteger(value)||value<0)throw new InputError('공급자 잔여량을 확인해야 합니다.');
+  if(at!=null&&(!Number.isInteger(at)||at<=now||at>now+86_500_000))throw new InputError('제공자가 표시한 재설정 시각 형식 오류');
+  if(provider!=='gemini'&&at==null)throw new InputError('Groq 제한의 재설정 시각이 필요합니다.');
+  remaining[key]=value;reset[key]=at??null;
  }
  const inFlight=await env.DB.prepare("SELECT 1 FROM yta_operations WHERE provider=? AND state='CLAIMED' LIMIT 1").bind(provider).first();
  if(inFlight)throw new ProviderError('OPERATION_IN_FLIGHT','진행 중인 제공자 요청이 끝난 뒤 관측치를 갱신하세요.');

@@ -124,7 +124,15 @@ async function saveKey(ev){ev.preventDefault();const provider=state.provider,key
 }
 async function loadQuota(){const d=await api('/api/live/quota'),out=$('#quota-status');empty(out);out.append(el('p',{text:d.liveEnabled?'무료 호출 설정 활성':'Worker ENABLE_LIVE_FREE=true 설정이 필요합니다.'}));for(const q of d.grants){const row=el('div',{className:'line'});row.append(el('span',{text:q.provider+' · 앱 할당 잔여 '+Math.max(0,q.allowance-q.consumed)+' · '+(q.expires_at>Date.now()?'유효':'만료')}));const revoke=el('button',{text:'할당 취소'});revoke.onclick=async()=>{await api('/api/live/quota',{method:'DELETE',body:{provider:q.provider}});await loadQuota();};row.append(revoke);out.append(row);}}
 async function loadCapacity(){const data=await api('/api/live/capacity'),out=$('#capacity-status');empty(out);for(const snapshot of data.snapshots){out.append(el('p',{text:snapshot.provider+' · '+snapshot.model+' · '+(snapshot.valid_until>Date.now()?'관측 유효':'관측 만료')+' · '+fmtDate(snapshot.observed_at)}));}}
-function capacityPayload(){const provider=$('#capacity-provider').value,now=Date.now(),minute=Date.parse($('#cap-reset-minute').value),hour=Date.parse($('#cap-reset-hour').value),day=Date.parse($('#cap-reset-day').value);const remaining=provider==='gemini'?{requestsMinute:Number($('#cap-rpm').value),tokensMinute:Number($('#cap-tpm').value),requestsDay:Number($('#cap-rpd').value)}:{requestsMinute:Number($('#cap-rpm').value),audioSecondsHour:Number($('#cap-audio-hour').value),audioSecondsDay:Number($('#cap-audio-day').value)};const resetAt=provider==='gemini'?{requestsMinute:minute,tokensMinute:minute,requestsDay:day}:{requestsMinute:minute,audioSecondsHour:hour,audioSecondsDay:day};return {provider,model:provider==='gemini'?'gemini-2.5-flash':'whisper-large-v3-turbo',source:provider==='gemini'?'AI_STUDIO_LIVE':'GROQ_CONSOLE_LIVE',observedAt:now,remaining,resetAt,externalActivity:!$('#cap-confirm').checked,billingDisabled:$('#cap-confirm').checked,freeOnly:$('#cap-confirm').checked};}
+function capacityPayload(){
+  const provider=$('#capacity-provider').value,now=Date.now();
+  const count=id=>{const value=$(id).value;return value===''?null:Number(value);};
+  const time=id=>{const value=$(id).value;return value===''?null:Date.parse(value);};
+  const minute=time('#cap-reset-minute'),hour=time('#cap-reset-hour'),day=time('#cap-reset-day');
+  const remaining=provider==='gemini'?{requestsMinute:count('#cap-rpm'),tokensMinute:count('#cap-tpm'),requestsDay:count('#cap-rpd')}:{requestsMinute:count('#cap-rpm'),audioSecondsHour:count('#cap-audio-hour'),audioSecondsDay:count('#cap-audio-day')};
+  const resetAt=provider==='gemini'?{requestsMinute:minute,tokensMinute:minute,requestsDay:day}:{requestsMinute:minute,audioSecondsHour:hour,audioSecondsDay:day};
+  return {provider,model:provider==='gemini'?'gemini-2.5-flash':'whisper-large-v3-turbo',source:provider==='gemini'?'AI_STUDIO_LIVE':'GROQ_CONSOLE_LIVE',observedAt:now,remaining,resetAt,externalActivity:!$('#cap-confirm').checked,billingDisabled:$('#cap-confirm').checked,freeOnly:$('#cap-confirm').checked};
+}
 function init(){
   window.addEventListener('hashchange',()=>switchView(location.hash.replace('#','')));
   document.querySelectorAll('[data-input-mode]').forEach(b=>b.addEventListener('click',()=>setInputMode(b.dataset.inputMode)));

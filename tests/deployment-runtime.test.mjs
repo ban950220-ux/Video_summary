@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {writeFileSync} from 'node:fs';
-import {deploymentEnvironment,runWranglerSafely,assertDeployedVersion,safeBuildEnvironmentReport} from '../scripts/deployment-runtime.mjs';
+import {deploymentEnvironment,runWranglerSafely,assertDeployedVersion,safeDeploymentReceipt,safeBuildEnvironmentReport} from '../scripts/deployment-runtime.mjs';
 
 const base={CLOUDFLARE_API_TOKEN:'TEST_ONLY_TOKEN',WORKERS_CI:'1',WORKERS_CI_BRANCH:'main',WORKERS_CI_COMMIT_SHA:'a'.repeat(40),WRANGLER_CI_OVERRIDE_NAME:'holy-rice-b914'};
 test('Wrangler child target and log controls are fixed',()=>{
@@ -81,4 +81,13 @@ test('structured Wrangler version and commit annotation must match the live depl
  assert.throws(()=>assertDeployedVersion({activeVersions:[{id:otherId,percentage:100}],deploymentMessage:`source-commit:${commit}`},result),/POST_DEPLOY_VERSION_UNVERIFIED/);
  assert.throws(()=>assertDeployedVersion({activeVersions:[{id:versionId,percentage:100}],deploymentMessage:'source-commit:'+('b'.repeat(40))},result),/POST_DEPLOY_VERSION_UNVERIFIED/);
  assert.throws(()=>runWranglerSafely('node','fake','/tmp',deploymentEnvironment(base),commit,()=>({status:0,stdout:'success',stderr:''})),/DEPLOY_RESULT_UNVERIFIED/);
+});
+test('postcheck receipt exposes only validated full version and source commit',()=>{
+ const versionId='11111111-1111-4111-8111-111111111111',sourceCommit='a'.repeat(40),secret='PRIVATE_ACCESS_VALUE';
+ const remote={activeVersions:[{id:versionId,percentage:100}],deploymentMessage:'source-commit:'+sourceCommit,bindings:[{name:'ACCESS_OWNER_EMAIL',text:secret}]};
+ const result={versionId,sourceCommit,rawMetadata:secret};
+ assert.deepEqual(JSON.parse(safeDeploymentReceipt(remote,result)),{activeVersionId:versionId,sourceCommit});
+ assert.ok(!safeDeploymentReceipt(remote,result).includes(secret));
+ assert.throws(()=>safeDeploymentReceipt({...remote,activeVersions:[{id:versionId,percentage:99}]},result),/POST_DEPLOY_VERSION_UNVERIFIED/);
+ assert.throws(()=>safeDeploymentReceipt({...remote,deploymentMessage:'source-commit:'+secret},{...result,sourceCommit:secret}),/SOURCE_COMMIT_INVALID/);
 });

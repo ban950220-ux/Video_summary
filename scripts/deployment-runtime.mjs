@@ -91,3 +91,8 @@ export function assertDeployedVersion(remote,result){
   if(!isVersionId(result?.versionId)||remote?.activeVersions?.length!==1||remote.activeVersions[0]?.id!==result.versionId||remote.activeVersions[0]?.percentage!==100||remote.deploymentMessage!==`source-commit:${result.sourceCommit}`)throw Error('Production deploy: POST_DEPLOY_VERSION_UNVERIFIED');
   return true;
 }
+export function safeDeploymentReceipt(remote,result){
+  assertDeployedVersion(remote,result);
+  if(!/^[0-9a-f]{40}$/.test(result.sourceCommit))throw Error('Production deploy: SOURCE_COMMIT_INVALID');
+  return JSON.stringify({activeVersionId:result.versionId,sourceCommit:result.sourceCommit});
+}
