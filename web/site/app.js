@@ -1,6 +1,6 @@
 import {planMp3,prepareMp3Chunk} from '/audio.mjs';
 import {runAudioChunks,runSummaryStages,detailRequestIsCurrent,beginDetailAction} from '/audio-runner.mjs';
-import {audioProgressPlan,cleanedAudioComplete} from '/audio-progress-plan.mjs';
+import {audioProgressPlan,cleanedAudioComplete,fmtRetryDate} from '/audio-progress-plan.mjs';
 // Private owner-only site, no third-party scripts and no API keys in browser storage.
 const $=(sel)=>document.querySelector(sel);
 const state={view:'analyze',mode:'url',page:0,hasMore:false,provider:null,connections:[]};
@@ -16,7 +16,6 @@ function toast(msg){const e=$('#toast');e.textContent=msg;e.hidden=false;clearTi
 function el(tag,{className,text,attrs}={}){const x=document.createElement(tag);if(className)x.className=className;if(text!==undefined)x.textContent=String(text);if(attrs)for(const [k,v] of Object.entries(attrs))x.setAttribute(k,String(v));return x;}
 function empty(x){x.replaceChildren();}
 function fmtDate(s){if(!s)return '미확인';const d=new Date(s);return isNaN(+d)?'미확인':d.toLocaleString('ko-KR',{dateStyle:'medium',timeStyle:'short'});}
-function fmtRetryDate(s){const d=new Date(s);return isNaN(+d)?'미확인':d.toLocaleString('ko-KR',{dateStyle:'medium',timeStyle:'medium',timeZoneName:'short'});}
 function safeError(e){return e?.message??'요청 처리 중 오류가 발생했습니다.';}
 async function api(path,{method='GET',body}={}){
   const headers={Accept:'application/json'};
@@ -44,12 +43,12 @@ function resultLine(container,label,value){const div=el('div',{className:'line'}
 function audioPlanView(job,progress,target){
  if(progress?.temporaryResultsCleaned){target.append(el('p',{className:'tip',text:cleanedAudioComplete(progress,job)?'임시 조각은 정리됐습니다. 저장된 전체 전사 완료 기록이 있으며 TXT와 리포트에서 결과를 확인하세요.':'임시 조각 정보가 없습니다. 저장된 완료 기록을 확인할 수 없어 진행률과 견적을 표시하지 않습니다.'}));return;}
  const plan=audioProgressPlan(progress,job.duration_seconds);
- if(!plan.valid){target.append(el('p',{className:'tip',text:'조각 계획이나 시간 정보가 없어 진행률과 견적을 확인할 수 없습니다.'}));return;}
+ if(!plan.valid){if(plan.planIncomplete)target.append(el('p',{className:'tip',text:`저장 확인된 원본 시간축 ${Math.round(plan.coveredSeconds/60*10)/10} / ${Math.round(job.duration_seconds/60*10)/10}분. 조각 계획이 전체 원본을 덮지 않아 남은 조각 수와 견적은 확인할 수 없습니다.`}));else target.append(el('p',{className:'tip',text:'조각 계획이나 시간 정보가 없어 진행률과 견적을 확인할 수 없습니다.'}));return;}
  const seconds=value=>`${Math.round(value/60*10)/10}분`;
  resultLine(target,'저장된 원본 시간축',`${seconds(plan.coveredSeconds)} / ${seconds(job.duration_seconds)} (중복 구간 제외, 내용 검증 아님)`);
  resultLine(target,'남은 전사 작업',`${plan.remainingChunks} / ${plan.totalChunks} 조각 · 미확인 시간축 ${seconds(plan.remainingSeconds)}`);
  if(plan.complete){target.append(el('p',{className:'tip',text:'모든 조각이 저장됐습니다. 저장된 전사·요약을 별도로 확인하세요.'}));return;}
- const next={REVIEW_REQUIRED:'불명확한 요청 결과를 먼저 검토하세요.',PROVIDER_RETRY:'다음 조각은 공급자의 429 요청 기록과 재시도 가능 시각을 직접 확인해야 합니다.',LOCAL_EARLIEST:'다음 조각의 앱 내 가장 이른 요청 시각입니다. 공급자 허용이나 완료 시각을 보장하지 않습니다.',UNKNOWN_PROBE_WAIT:'Groq Free 1회 탐침의 앱 내 대기 시각입니다. 조직 잔여량은 UNKNOWN이며 이 시각에 전송이 보장되지 않습니다.',UNKNOWN_CAPACITY_PROBE:'승인된 Groq Free 1회 탐침만 가능합니다. 조직 잔여량과 완료 가능 여부는 UNKNOWN입니다.',OPERATION_IN_FLIGHT:'해당 제공자의 요청이 진행 중입니다. 결과를 확인하기 전 재전송하지 마세요.',CAPACITY_UNKNOWN:'다음 요청 가능 시각과 계정 잔여량은 UNKNOWN입니다.'}[plan.nextKind]??'다음 조각 상태를 확인하세요.';
+ const next={REVIEW_REQUIRED:'불명확한 요청 결과를 먼저 검토하세요.',PROVIDER_RETRY:'다음 조각은 공급자의 429 요청 기록과 재시도 가능 시각을 직접 확인해야 합니다. Gemini 경로의 무료 여부는 확인되지 않았습니다.',LOCAL_EARLIEST:'Groq 경로의 앱 내 가장 이른 요청 시각입니다. 계정 잔여량, 공급자 허용이나 완료 시각을 보장하지 않습니다.',UNKNOWN_PROBE_WAIT:'Groq Free 1회 탐침의 앱 내 대기 시각입니다. 조직 잔여량은 UNKNOWN이며 이 시각에 전송이 보장되지 않습니다.',UNKNOWN_CAPACITY_PROBE:'승인된 Groq Free 1회 탐침만 가능합니다. 조직 잔여량과 완료 가능 여부는 UNKNOWN입니다.',OPERATION_IN_FLIGHT:'Groq 요청이 진행 중입니다. 결과를 확인하기 전 재전송하지 마세요.',NO_VERIFIED_FREE_PATH:'현재 표시할 수 있는 무료 경로가 없습니다. Gemini 계정의 무료 여부는 확인되지 않았습니다.',CAPACITY_UNKNOWN:'Groq의 다음 요청 가능 시각과 계정 잔여량은 UNKNOWN입니다.'}[plan.nextKind]??'다음 조각 상태를 확인하세요.';
  target.append(el('p',{text:`다음 조각 ${plan.nextIndex+1}: ${next}${plan.nextAt?' · '+fmtRetryDate(plan.nextAt):''}`}));
  target.append(el('p',{className:'tip',text:'Groq Free의 최신 상태를 확인하고 기다리거나 같은 MP3로 나중에 재개할 수 있습니다. 다른 무료 제공자 경로는 이 화면에서 검증하지 않았습니다. 요청은 로그인한 브라우저가 활성화된 동안에만 진행됩니다. 완료·미확정 기록은 보존됩니다. Gemini Tier 1 용량은 무료로 표시하지 않습니다.'}));
  const choices=el('div',{className:'library-actions'}),guidance=el('p',{className:'tip'});
