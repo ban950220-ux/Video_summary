@@ -1,6 +1,7 @@
 import {InputError,videoIdOf,durationSec,parseCaptions,transcriptAudit,extractiveReport,estimateSource,PROVIDERS,DEFAULT_POLICY,usableFreeUnits} from './core.mjs';
 import {configuredMasterKey,encryptProviderKey,providerAllowed} from './vault.mjs';
-import {routeLive,saveSource} from './live.mjs';
+import {routeLive,saveSource,ensureLiveSchema} from './live.mjs';
+import {ProviderError} from './adapters.mjs';
 
 const JSON_HEADERS={'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer'};
 const json=(obj,status=200)=>new Response(JSON.stringify(obj),{status,headers:JSON_HEADERS});
@@ -51,6 +52,7 @@ async function handleJob(env,payload){
   const report=extractiveReport(parsed);
   const row={...job,status:audit.status,report,audit,segments:parsed.segments};
   const persistRow={...row,segments:undefined};
+  if(env?.DB&&payload.persistTranscript===true)await ensureLiveSchema(env);
   const persisted=await saveJob(env,persistRow);
   if(persisted&&payload.persistTranscript===true)await saveSource(env,row.id,payload.transcript,parsed.segments,parsed.origin);
   return json({job:row,persisted,preflight:quote},201);
@@ -138,6 +140,7 @@ export async function routeApi(request,env){
       return json({error:{code:'NOT_FOUND'}},404);
     }catch(e){
       if(e instanceof InputError) return json({error:{code:e.code,message:e.message}},400);
+      if(e instanceof ProviderError&&e.code==='LIVE_SCHEMA_REQUIRED')return json({error:{code:e.code,message:e.message}},409);
       // Do not leak provider credentials, transcripts, or request bodies into logs.
       return json({error:{code:'INTERNAL_ERROR',message:'내부 처리 오류입니다.'}},500);
     }

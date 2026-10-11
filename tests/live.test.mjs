@@ -8,10 +8,32 @@ import {planMp3,scanMp3,mergeAudioSegments} from '../src/audio.mjs';
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,SUMMARY_PROMPT_LIMIT,summaryUnits} from '../src/summary-plan.mjs';
 import {reportPrompt} from '../src/report.mjs';
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
-function setup(){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
+function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema)db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
 async function job(env){return (await(await routeApi(request('/api/jobs','POST',{sourceType:'text',title:'LOCAL MOCK TEST',filename:'x.srt',transcript:'1\n00:00:00,000 --> 00:01:00,000\n테스트 발언입니다.',durationSeconds:60,persistTranscript:true}),env)).json()).job;}
 async function grant(env,allowance=250000){const r=await routeApi(request('/api/live/quota','PUT',{provider:'gemini',allowance,requestLimit:5,billingDisabled:true,freeOnly:true}),env);assert.equal(r.status,200);}
 const valid=()=>({summary:[{text:'테스트 발언',evidenceIds:[1]}],chapters:[{text:'시작 발언',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실 미검증'});
+test('GET quota and health do not create live tables; writes need explicit additive schema setup',async()=>{
+ const {db,env}=setup({liveSchema:false});
+ try{
+  const before=db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'yta_%'").all();
+  const quota=await routeApi(request('/api/live/quota'),env);
+  assert.equal(quota.status,409);
+  assert.equal((await quota.json()).error.code,'LIVE_SCHEMA_REQUIRED');
+  assert.equal((await routeApi(request('/api/health'),env)).status,200);
+  assert.equal((await routeApi(request('/api/settings/providers'),env)).status,200);
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'yta_%'").all(),before);
+  const created=await routeApi(request('/api/jobs','POST',{sourceType:'text',filename:'x.srt',transcript:'1\n00:00:00,000 --> 00:01:00,000\n테스트',durationSeconds:60,persistTranscript:true}),env);
+  assert.equal(created.status,409);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM jobs').get().n,0);
+  const urlJob=await routeApi(request('/api/jobs','POST',{sourceType:'url',url:'https://www.youtube.com/watch?v=2hUkTmwYm3A',durationSeconds:60}),env);
+  const id=(await urlJob.json()).job.id;
+  assert.equal((await routeApi(request('/api/jobs/'+id+'/source'),env)).status,409);
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'yta_%'").all(),before);
+  db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));
+  const readOnly={...env,DB:{prepare(sql){assert.match(sql,/^SELECT\b/i);return env.DB.prepare(sql);}}};
+  assert.equal((await routeApi(request('/api/live/quota'),readOnly)).status,200);
+ }finally{db.close();}
+});
 test('LOCAL real SQLite: raw source persisted, export and purge remove private source/results',async()=>{const {db,env}=setup();try{const j=await job(env);const source=await(await routeApi(request('/api/jobs/'+j.id+'/source'),env)).json();assert.match(source.source.raw,/테스트 발언/);const exp=await routeApi(request('/api/jobs/'+j.id+'/export'),env);assert.match(await exp.text(),/원본 스크립트/);assert.equal((await routeApi(request('/api/jobs/'+j.id,'DELETE'),env)).status,200);assert.equal(db.prepare('SELECT COUNT(*) n FROM yta_sources').get().n,0);}finally{db.close();}});
 test('LOCAL quota missing/too small/paid enabled never sends network calls',async()=>{const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('NETWORK MUST NOT RUN');};try{const j=await job(env);assert.equal((await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)).status,409);await grant(env,1);assert.equal((await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)).status,409);env.ALLOW_PAID_API='true';assert.equal((await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)).status,409);assert.equal(calls,0);}finally{globalThis.fetch=old;db.close();}});
 test('MOCK provider: concurrent/repeated summary sends at most once and durable result reopens',async()=>{const {db,env}=setup(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;await new Promise(r=>setTimeout(r,10));return Response.json({candidates:[{content:{parts:[{text:JSON.stringify(valid())}]}}]});};try{const j=await job(env);await grant(env);const results=await Promise.all([1,2].map(()=>routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)));assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);assert.equal((await routeApi(request('/api/jobs/'+j.id+'/summary','POST',{}),env)).status,200);assert.equal(calls,1);const reopened=await(await routeApi(request('/api/jobs/'+j.id),env)).json();assert.equal(reopened.job.report.kind,'GEMINI_EVIDENCE_LINKED');assert.notEqual(reopened.job.status,'FULL_TRANSCRIPT');}finally{globalThis.fetch=old;db.close();}});

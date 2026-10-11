@@ -20,6 +20,7 @@ test('LOCAL SQLite file persists reports and encrypted keys across DB close/reop
  let db=new DatabaseSync(join(dir,'store.sqlite'));
  try{
   db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));
+  db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));
   const root=crypto.getRandomValues(new Uint8Array(32));
   const env={DB:binding(db),KEY_ENCRYPTION_KEY_B64:Buffer.from(root).toString('base64')};
   const created=await routeApi(req('/api/jobs','POST',{sourceType:'text',title:'지속저장 검증',filename:'sample.srt',durationSeconds:5892.864,transcript:'1\n00:00:00,000 --> 00:30:00,000\n부분 전사 테스트'}),env);

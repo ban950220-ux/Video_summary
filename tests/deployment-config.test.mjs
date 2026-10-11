@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {assertProductionTarget} from '../scripts/guard-production-target.mjs';
 import {assertProductionBranch} from '../scripts/production-branch.mjs';
-import {productionDeployArgs} from '../scripts/deploy-args.mjs';
 
 const config=readFileSync(new URL('../wrangler.toml',import.meta.url),'utf8');
 
@@ -36,14 +35,4 @@ test('production config preserves remote preview, logs, and dashboard variables'
   assert.throws(()=>assertProductionTarget(config.replace('preview_urls = false','preview_urls = true')),/version URLs/);
   assert.throws(()=>assertProductionTarget(config.replace('keep_vars = true','keep_vars = false')),/dashboard variables/);
   assert.throws(()=>assertProductionTarget(config.replace('enabled = true','enabled = false')),/observability/);
-});
-
-test('a one-commit reconciliation exception cannot spread to other builds',()=>{
-  const sha='a'.repeat(40);
-  assert.equal(productionDeployArgs({},sha).at(-1),'--strict');
-  const args=productionDeployArgs({WORKERS_CI:'1',APPROVED_CONFIG_RECONCILIATION_SHA:sha},sha);
-  assert.equal(args.includes('--strict'),false);
-  assert.equal(args.includes('--keep-vars'),true);
-  assert.throws(()=>productionDeployArgs({WORKERS_CI:'1',APPROVED_CONFIG_RECONCILIATION_SHA:sha},'b'.repeat(40)),/exact approved commit/);
-  assert.throws(()=>productionDeployArgs({APPROVED_CONFIG_RECONCILIATION_SHA:sha},sha),/Workers Builds/);
 });

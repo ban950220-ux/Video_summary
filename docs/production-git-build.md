@@ -69,17 +69,15 @@ way to make the diff pass. The new `ASSETS` binding is intentional and required
 by `src/site-worker.mjs` to serve authenticated static files. It is the only
 planned new binding.
 
-For the **one reviewed reconciliation deploy**, the Cloudflare Build operator
-must first recheck the remote Worker settings and selected Access application,
-then set the Build environment variable `APPROVED_CONFIG_RECONCILIATION_SHA` to
-the exact commit being deployed. That commit must be the reviewed `main` SHA;
-do not set the variable until that SHA is final. This allows the deploy script
-to omit `--strict` for that one SHA only, while still using `--keep-vars`, the
-production target guard, and the branch/SHA guard. A missing or mismatched value
-keeps strict mode or stops the deploy. After confirming the resulting version,
-remove the one-commit exception from Build settings so later commits use strict
-mode again. Keep Preview builds disabled. Do not paste raw Wrangler diff output
-into Git or chat because it can contain runtime variable values.
+The previously proposed SHA-limited strict exception was removed. It could be
+retried indefinitely for the same commit, and noninteractive Wrangler accepts
+all remote conflicts when strict mode is absent. Production deployment remains
+blocked until an independently reviewed remote-metadata guard is available and
+the selected Build token's read access is confirmed. The guard must pin the
+active version, inspect the full observability settings, and permit only the
+reviewed `ASSETS` addition while preserving all existing bindings and variables.
+Keep Preview builds disabled. Do not paste raw Wrangler diff output into Git
+or chat because it can contain runtime variable values.
 
 Before a later production deployment, inspect the selected Worker, target URL,
 active version, DB binding, Access policy, and names (not values) of variables
@@ -97,3 +95,14 @@ provider calls remain disabled. If the new version fails, use Cloudflare
 Workers & Pages > `holy-rice-b914` > Deployments > Rollback to the previously
 recorded version. Cloudflare rollback does not undo database changes, which is
 why this branch contains no D1 writes or migrations.
+
+The live feature uses four additional tables: `yta_sources`, `yta_quota`,
+`yta_operations`, and `yta_audio`, defined in `migrations/0002_live.sql`.
+Runtime requests no longer run `CREATE TABLE`: quota, source, export and status
+reads are read-only, and missing live tables return `LIVE_SCHEMA_REQUIRED`.
+Writing a transcript, setting free-use grants, processing live providers, and
+audio planning require a separately approved, additive application of that
+migration to the existing D1 database. Do not run it as part of the Build or a
+post-deploy read-only check. Also verify the base `schema.sql` tables exist
+before attempting end-to-end writes; no production schema inventory has yet
+been performed here.

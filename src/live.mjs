@@ -4,13 +4,12 @@ import {runNativeCaption,runNativePoll,runTranscriptSummary,runOwnedAudioTranscr
 import {normalizeSegments,auditGaps,validateAnalysis,reportPrompt,markdownReport} from './report.mjs';
 import {scanMp3,mergeAudioSegments} from './audio.mjs';
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,summaryUnits,evidenceIds,assertGroupCoverage} from './summary-plan.mjs';
-const initialized=new WeakSet();
-const schemas=[
- 'CREATE TABLE IF NOT EXISTS yta_sources(job_id TEXT PRIMARY KEY, raw TEXT NOT NULL, segments_json TEXT NOT NULL, provenance TEXT NOT NULL, updated_at TEXT NOT NULL)',
- 'CREATE TABLE IF NOT EXISTS yta_quota(provider TEXT PRIMARY KEY, allowance REAL NOT NULL, consumed REAL NOT NULL DEFAULT 0, request_limit INTEGER NOT NULL, request_count INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, confirmed_at INTEGER NOT NULL, billing_disabled INTEGER NOT NULL)',
- 'CREATE TABLE IF NOT EXISTS yta_operations(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, provider TEXT NOT NULL, units REAL NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, error_code TEXT, result_json TEXT)',
- 'CREATE TABLE IF NOT EXISTS yta_audio(job_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, start_sec REAL NOT NULL, end_sec REAL NOT NULL, state TEXT NOT NULL, result_json TEXT, PRIMARY KEY(job_id,chunk_index))'];
-export async function ensureLiveSchema(env){if(!env.DB)throw new ProviderError('DB_REQUIRED','D1 연결 필요');if(initialized.has(env.DB))return;for(const sql of schemas)await env.DB.prepare(sql).bind().run();initialized.add(env.DB);}
+const liveTables=['yta_sources','yta_quota','yta_operations','yta_audio'];
+export async function ensureLiveSchema(env){
+ if(!env.DB)throw new ProviderError('DB_REQUIRED','D1 연결 필요');
+ const rows=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('yta_sources','yta_quota','yta_operations','yta_audio')").bind().all()).results||[];
+ if(liveTables.some(name=>!rows.some(row=>row.name===name)))throw new ProviderError('LIVE_SCHEMA_REQUIRED','라이브 저장 테이블을 별도 승인 후 준비해야 합니다.');
+}
 const json=(x,status=200)=>Response.json(x,{status,headers:{'cache-control':'no-store'}});
 async function readJson(req){const text=await req.text();if(text.length>900000)throw new InputError('본문 90만자 제한');try{return JSON.parse(text);}catch{throw new InputError('JSON 오류');}}
 export async function saveSource(env,id,raw,segments,provenance){await ensureLiveSchema(env);const normalized=normalizeSegments(segments);if(new TextEncoder().encode(raw+JSON.stringify(normalized)).byteLength>1500000)throw new InputError('보관 원문 크기 제한');await env.DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET raw=excluded.raw,segments_json=excluded.segments_json,provenance=excluded.provenance,updated_at=excluded.updated_at').bind(id,raw,JSON.stringify(normalized),provenance,new Date().toISOString()).run();return normalized;}

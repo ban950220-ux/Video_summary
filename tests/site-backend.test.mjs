@@ -24,11 +24,12 @@ class FakeDB {
             db.keys.delete(`${args[0]}:${args[1]}`);
           } else if(sql.startsWith('INSERT INTO provider_credential_events')){
             db.events.push(args);
-          } else if(sql.startsWith('CREATE TABLE IF NOT EXISTS yta_')||sql.startsWith('DELETE FROM yta_')||sql.startsWith('UPDATE yta_operations')){} else throw new Error('Unsupported mock run: '+sql);
+          } else if(sql.startsWith('DELETE FROM yta_')||sql.startsWith('UPDATE yta_operations')){} else throw new Error('Unsupported mock run: '+sql);
           return {success:true};
         },
         async first(){if(sql.startsWith('SELECT * FROM jobs'))return db.jobs.get(args[0])?.owner_id===args[1]?db.jobs.get(args[0]):null;throw new Error('Unsupported mock first: '+sql);},
         async all(){
+          if(sql.includes('FROM sqlite_master'))return {results:['yta_sources','yta_quota','yta_operations','yta_audio'].map(name=>({name}))};
           if(sql.startsWith('SELECT provider,updated_at FROM provider_credentials'))return {results:[...db.keys.values()].filter(x=>x.owner_id===args[0])};
           if(sql.includes('FROM usage_events'))return {results:[]};
           if(sql.includes('FROM jobs')){
