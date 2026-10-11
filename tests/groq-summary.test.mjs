@@ -298,3 +298,20 @@ test('late truncated response cannot refill cleared payload while final DELETE a
   assert.equal(f.db.prepare("SELECT COUNT(*) n FROM jobs WHERE id=?").get(f.id).n,0);
  }finally{releaseFetch();releaseDelete();globalThis.fetch=old;f.db.close();}
 });
+test('deletion marker blocks the final D1 admission read before any Groq fetch',async()=>{
+ const f=await fixture(),old=fetch;let calls=0,releaseDelete,deleteReached,deleting;
+ const deleteGate=new Promise(resolve=>releaseDelete=resolve),enteredDelete=new Promise(resolve=>deleteReached=resolve);
+ globalThis.fetch=async()=>{calls++;throw Error('provider must not be reached');};
+ try{await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);
+  const original=f.env.DB;let interleaved=false;f.env.DB={...original,prepare(sql){const stmt=original.prepare(sql);
+   if(sql==='DELETE FROM yta_sources WHERE job_id=?')return {bind(...args){const bound=stmt.bind(...args);return {...bound,async run(){deleteReached();await deleteGate;return bound.run();}};}};
+   if(!sql.startsWith('SELECT 1 AS ok FROM yta_operations a JOIN'))return stmt;
+   return {bind(...args){const bound=stmt.bind(...args);return {...bound,async first(){if(!interleaved){interleaved=true;deleting=routeApi(request(f.path,'DELETE'),f.env);await enteredDelete;}return bound.first();}};}};
+  }};
+  const stage=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);
+  assert.equal(stage.status,409);assert.equal((await stage.json()).error.code,'SUMMARY_APPROVAL_CHANGED');assert.equal(calls,0);
+  assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE id=?").get(f.id+':deleting').state,'DELETING');
+  assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE job_id=? AND state='BLOCKED'").get(f.id).state,'BLOCKED');
+  releaseDelete();assert.equal((await deleting).status,200);
+ }finally{releaseDelete();globalThis.fetch=old;f.db.close();}
+});
