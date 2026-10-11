@@ -46,3 +46,9 @@ test('vault rejection: wrong master key, unsupported provider, and no configured
   await assert.rejects(()=>resolveProviderKey(env,'unknown'),e=>e.code==='PROVIDER_NOT_SUPPORTED');
   await assert.rejects(()=>resolveProviderKey(env,'assemblyai'),e=>e.code==='PLAN_UNVERIFIED');
 });
+
+test('Groq fetch boundary rechecks expiry after multipart preparation',async()=>{
+ await store('groq');let calls=0,checks=0;
+ await assert.rejects(()=>runOwnedAudioTranscription({env,bytes:new Uint8Array([1,2,3]),name:'test.mp3',mime:'audio/mpeg',durationSeconds:1,beforeDispatch:()=>{checks++;},beforeFetch:()=>{checks++;const error=new Error('EXPIRED_BEFORE_FETCH');error.preDispatchBlocked=true;throw error;},fetchFn:async()=>{calls++;return Response.json({});}}),/EXPIRED_BEFORE_FETCH/);
+ assert.equal(checks,2);assert.equal(calls,0);
+});

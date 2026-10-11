@@ -82,6 +82,7 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
   throw error;
  }
 }
+function assertGroqAtFetch(active){if(!Number.isFinite(active.quotaExpiresAt)||active.quotaExpiresAt<=Date.now()){const error=new ProviderError('QUOTA_UNVERIFIED','Groq 무료 허가가 실제 전송 직전에 만료됐습니다.');error.preDispatchBlocked=true;throw error;}}
 async function assertGroqBeforeDispatch(env,id){
  try{
   const {quotaExpiresAt}=await grantEnv(env,'groq');
@@ -268,7 +269,7 @@ export async function routeLive(request,env){
     if(attempts.length>=10)throw new ProviderError('RECOVERY_LIMIT_REACHED','이 조각의 재개 횟수가 한도에 도달했습니다. 작업 기록을 검토하세요.');
     operationId=base+':reviewed429:'+attempts.length;
    }
-   const result=await execute(env,{id:operationId,job:id,provider:'groq',units:Math.max(10,Math.ceil(plannedDuration))},active=>runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:()=>assertGroqBeforeDispatch(env,operationId)}));
+   const result=await execute(env,{id:operationId,job:id,provider:'groq',units:Math.max(10,Math.ceil(plannedDuration))},active=>runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:()=>assertGroqBeforeDispatch(env,operationId),beforeFetch:()=>assertGroqAtFetch(active)}));
    if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','음성 조각 전사가 비었습니다. 전체 전사로 처리하지 않습니다.');
    const segments=result.segments;
    await env.DB.prepare('UPDATE yta_audio SET state=?,result_json=? WHERE job_id=? AND chunk_index=?').bind('DONE',JSON.stringify({...result,segments,fileSha256:JSON.parse(chunk.result_json).fileSha256}),id,index).run();return json({index,state:'DONE',segmentCount:segments.length});

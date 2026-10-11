@@ -32,7 +32,7 @@ export async function fetchSupadataCaption(url,env,fetchFn=fetch){
   return {status:'TRANSCRIPT_AVAILABLE',provider:'supadata',segments,language:data.lang||null,billedCredits,usageProvenance:billedCredits===null?'UNKNOWN':'EXACT_APP'};
 }
 
-export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,fetchFn=fetch}){
+export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,fetchFn=fetch,beforeFetch}){
   assertLive(env,'GROQ');
   if(!env.GROQ_API_KEY) throw new ProviderError('KEY_MISSING','Groq API 키 미설정');
   if(!(bytes instanceof Uint8Array)||bytes.byteLength>24_000_000 || bytes.byteLength===0) throw new InputError('파일은 비어있지 않은 24MB 이하 음성이어야 합니다.','AUDIO_SIZE');
@@ -40,6 +40,7 @@ export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,
   // This upload path is intentionally only a building block; the route must reserve quota BEFORE invoking it.
   const data=new FormData();data.append('file',new Blob([bytes],{type:mime||'application/octet-stream'}),name);
   data.append('model','whisper-large-v3-turbo');data.append('response_format','verbose_json');data.append('temperature','0');data.append('timestamp_granularities[]','segment');
+  beforeFetch?.();
   const result=await requestJson('https://api.groq.com/openai/v1/audio/transcriptions',{method:'POST',headers:{Authorization:`Bearer ${env.GROQ_API_KEY}`},body:data},fetchFn);
   return {provider:'groq',text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION'};
 }
