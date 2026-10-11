@@ -5,20 +5,42 @@ import {join} from 'node:path';
 
 const accountId='fe9d7e2a164274b1ff6cef150a75cb0b';
 const workerName='holy-rice-b914';
-const allowedOverrides=new Set(['CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','WRANGLER_CI_OVERRIDE_NAME','WRANGLER_CI_MATCH_TAG','WRANGLER_CI_GENERATE_PREVIEW_ALIAS','WRANGLER_OUTPUT_FILE_DIRECTORY','WRANGLER_OUTPUT_FILE_PATH']);
+const canonicalApiBase='https://api.cloudflare.com/client/v4';
+const allowedOverrides=new Set(['CLOUDFLARE_API_TOKEN','CLOUDFLARE_ACCOUNT_ID','CLOUDFLARE_API_BASE_URL','WRANGLER_CI_OVERRIDE_NAME','WRANGLER_CI_MATCH_TAG','WRANGLER_CI_GENERATE_PREVIEW_ALIAS','WRANGLER_CI_OVERRIDE_NETWORK_MODE_HOST','WRANGLER_OUTPUT_FILE_DIRECTORY','WRANGLER_OUTPUT_FILE_PATH']);
 const safeName=name=>/^[A-Z][A-Z0-9_]{0,63}$/.test(name)?name:'INVALID_NAME';
+const unsupportedNames=input=>Object.keys(input).filter(key=>/^(?:CLOUDFLARE_|CF_|WRANGLER_)/.test(key)&&!allowedOverrides.has(key)).sort();
+
+export function safeBuildEnvironmentReport(input){
+  const unsupported=unsupportedNames(input);
+  const host=input.WRANGLER_CI_OVERRIDE_NETWORK_MODE_HOST;
+  return {
+    kind:'BUILD_ENV_DIAGNOSTIC',readOnly:true,
+    apiBasePresent:Object.hasOwn(input,'CLOUDFLARE_API_BASE_URL'),
+    apiBaseCanonicalMatch:input.CLOUDFLARE_API_BASE_URL===canonicalApiBase,
+    networkHostMode:Object.hasOwn(input,'WRANGLER_CI_OVERRIDE_NETWORK_MODE_HOST')?(host==='true'?'TRUE':host==='false'?'FALSE':'INVALID'):'OMITTED',
+    accountMatchesExpected:input.CLOUDFLARE_ACCOUNT_ID===accountId,
+    workerNameMatchesExpected:input.WRANGLER_CI_OVERRIDE_NAME===workerName,
+    previewAliasMode:['true','false'].includes(input.WRANGLER_CI_GENERATE_PREVIEW_ALIAS)?input.WRANGLER_CI_GENERATE_PREVIEW_ALIAS.toUpperCase():Object.hasOwn(input,'WRANGLER_CI_GENERATE_PREVIEW_ALIAS')?'INVALID':'OMITTED',
+    outputDirectoryPresent:Object.hasOwn(input,'WRANGLER_OUTPUT_FILE_DIRECTORY'),
+    outputPathPresent:Object.hasOwn(input,'WRANGLER_OUTPUT_FILE_PATH'),
+    unsupportedNames:unsupported.slice(0,12).map(safeName),
+    moreUnsupportedNames:unsupported.length>12,
+  };
+}
 
 export function deploymentEnvironment(input,verifiedWorkerTag){
-  const unsupported=Object.keys(input).filter(key=>/^(?:CLOUDFLARE_|CF_|WRANGLER_)/.test(key)&&!allowedOverrides.has(key)).sort();
+  const unsupported=unsupportedNames(input);
   if(unsupported.length){
     const names=unsupported.slice(0,12).map(safeName).join(',');
     throw Error(`Production deploy: ENV_OVERRIDES_BLOCKED: ${names}${unsupported.length>12?',MORE_NAMES_OMITTED':''}`);
   }
   if(!input.CLOUDFLARE_API_TOKEN)throw Error('Production deploy: BUILD_TOKEN_UNAVAILABLE');
   if(input.CLOUDFLARE_ACCOUNT_ID&&input.CLOUDFLARE_ACCOUNT_ID!==accountId)throw Error('Production deploy: ACCOUNT_MISMATCH');
+  if(Object.hasOwn(input,'CLOUDFLARE_API_BASE_URL')&&input.CLOUDFLARE_API_BASE_URL!==canonicalApiBase)throw Error('Production deploy: API_BASE_NOT_CANONICAL');
   if(input.WRANGLER_CI_OVERRIDE_NAME&&input.WRANGLER_CI_OVERRIDE_NAME!==workerName)throw Error('Production deploy: WORKER_NAME_MISMATCH');
   if(input.WRANGLER_CI_MATCH_TAG&&(typeof verifiedWorkerTag!=='string'||!verifiedWorkerTag||input.WRANGLER_CI_MATCH_TAG!==verifiedWorkerTag))throw Error('Production deploy: WORKER_TAG_MISMATCH');
   if(Object.hasOwn(input,'WRANGLER_CI_GENERATE_PREVIEW_ALIAS')&&!['true','false'].includes(input.WRANGLER_CI_GENERATE_PREVIEW_ALIAS))throw Error('Production deploy: PREVIEW_ALIAS_FLAG_INVALID');
+  if(Object.hasOwn(input,'WRANGLER_CI_OVERRIDE_NETWORK_MODE_HOST')&&!['true','false'].includes(input.WRANGLER_CI_OVERRIDE_NETWORK_MODE_HOST))throw Error('Production deploy: NETWORK_HOST_FLAG_INVALID');
   for(const key of ['WRANGLER_OUTPUT_FILE_DIRECTORY','WRANGLER_OUTPUT_FILE_PATH']){
     if(Object.hasOwn(input,key)&&(typeof input[key]!=='string'||!input[key]))throw Error('Production deploy: OUTPUT_LOCATION_INVALID');
   }
@@ -31,6 +53,7 @@ export function deploymentEnvironment(input,verifiedWorkerTag){
     WORKERS_CI_COMMIT_SHA:input.WORKERS_CI_COMMIT_SHA,
     CLOUDFLARE_API_TOKEN:input.CLOUDFLARE_API_TOKEN,
     CLOUDFLARE_ACCOUNT_ID:accountId,
+    CLOUDFLARE_API_BASE_URL:canonicalApiBase,
     WRANGLER_CI_OVERRIDE_NAME:input.WRANGLER_CI_OVERRIDE_NAME,
     WRANGLER_CI_MATCH_TAG:input.WRANGLER_CI_MATCH_TAG,
     WRANGLER_CI_GENERATE_PREVIEW_ALIAS:'false',

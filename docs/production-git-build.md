@@ -188,6 +188,27 @@ safe variable names together, never values or paths. The documented default
 Workers Builds variables (`CI` and `WORKERS_CI_*`) remain separate from this
 Wrangler override allowlist. See [Workers Builds default variables](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)
 and [Wrangler output variables](https://developers.cloudflare.com/workers/wrangler/system-environment-variables/).
+Build `fc770220-75fb-4831-9125-66aacf798376` at source `66ef068`
+then stopped before Wrangler upload and reported both
+`CLOUDFLARE_API_BASE_URL` and `WRANGLER_CI_OVERRIDE_NETWORK_MODE_HOST`.
+Pinned Wrangler uses the former as the base for API requests; the read-only
+guard uses `https://api.cloudflare.com/client/v4`. The wrapper now accepts
+the Build value only if it is byte-for-byte that canonical base, and passes
+the same fixed base to Wrangler. A changed origin, path, query or userinfo
+fails before upload. The pinned Wrangler source uses the latter flag only in
+the Docker command that builds a container image (`--network host`). This
+Worker has no container configuration. The wrapper accepts only exact
+`true`/`false` inputs and passes neither value to the child, so it cannot
+change the production deployment's network mode. Other API and Wrangler
+overrides remain blocked.
+
+If the actual Build-injected API base needs inspection, run
+`npm run preflight:build-env` as a separate read-only Build command before
+restoring the production deploy command. It reports only whether the API base
+exactly matches the canonical base, non-sensitive flag classifications,
+target-match booleans, output-location presence, and bounded unsupported
+variable names. It does not print raw URLs, paths, tokens or Access values.
+Do not start an upload when `apiBaseCanonicalMatch` is false or unknown.
 This protects against Wrangler's raw dashboard diff appearing in its console
 or Wrangler debug files under this pinned version. It does not make Cloudflare
 platform logs or unrelated Build commands private; never print raw responses
