@@ -258,6 +258,13 @@ test('1,226-segment audio source produces a read-only summary scope without prov
 });
 test('one approved Groq stage saves usage and report once; cached reopen needs no second provider call',async()=>{
  const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return response();};
+ // Node's SQLite shim tolerates missing bindings; Workerd D1 rejects them.
+ const originalDb=f.env.DB;
+ f.env.DB={...originalDb,prepare(sql){
+  const statement=originalDb.prepare(sql);
+  if(!sql.startsWith('INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT'))return statement;
+  return {bind(...args){assert.equal(args.length,(sql.match(/\?/g)||[]).length,'D1 claim binding count');return statement.bind(...args);}};
+ }};
  try{await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);
   const first=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal(first.status,202,await first.clone().text());
   assert.equal((await first.json()).pending,true);assert.equal(calls,1);
