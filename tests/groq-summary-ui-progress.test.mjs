@@ -76,9 +76,16 @@ test('hidden tab before dispatch stops locally; reopening only reads saved state
  const executing=run.onclick();await reading;
  ui.document.hidden=true;ui.listeners.get('visibilitychange')();releaseApproval();await executing;
  assert.equal(posts,0);assert.match(ui.heading(),/자동 진행 중단/);
+ ui.document.hidden=false;
+ await ui.refresh.onclick();
+ assert.equal(posts,0);assert.equal(run.disabled,false);
+ assert.match(ui.heading(),/승인 저장 확인/);
+ assert.equal(ui.review.disabled,false);
+ await run.onclick();
+ assert.equal(posts,1);
  const readsBefore=statusReads;
  const reentered=harness(async(path)=>path.endsWith('/groq-summary-status')?json({...ledger(),completedStages:1}):json(scope()));
- await pause();assert.match(reentered.heading(),/중간 단계 저장/);assert.equal(posts,0);assert.equal(statusReads,readsBefore);
+ await pause();assert.match(reentered.heading(),/중간 단계 저장/);assert.equal(posts,1);assert.equal(statusReads,readsBefore);
 });
 
 test('lost approval response is resolved by ledger read without starting a model request',async()=>{

@@ -26,7 +26,7 @@ export function groqSummaryProgress(status,{phase='idle',reason=null,waitUntil=n
  if(reason==='SUMMARY_WINDOW_COMPLETE')return result('이번 승인 창 완료','남은 단계는 별도 범위 검토와 승인 후 실행할 수 있습니다.','waiting');
  if(reason==='SUMMARY_LOCAL_LIMIT')return result('앱 무료 요약 한도 대기','실제 Groq 계정 잔여량은 UNKNOWN입니다. 이력과 사용량을 확인한 뒤 다시 검토하세요.','waiting');
  if(reason==='SUMMARY_PACING_WAIT')return result('요약 요청 간격 대기','마지막 저장 후 61초가 지난 다음 다시 검토하세요.','waiting');
- if(reason==='FOREGROUND_REQUIRED')return result('이 탭의 자동 진행 중단','이미 전송된 요청은 서버에서 계속될 수 있습니다. 저장 상태를 새로 확인하세요.','warning');
+ if(reason==='FOREGROUND_REQUIRED')return result('이 탭의 자동 진행 중단','이미 전송된 요청은 서버에서 계속될 수 있습니다. 저장 상태를 확인하고, 계속하려면 라이브러리에서 이 작업의 Groq Free 요약 승인·실행을 다시 여세요. 자동 재전송은 없습니다.','warning');
  if(approval?.state==='APPROVED'&&approval.expiresAt<=now)return result('요약 승인 만료','저장된 중간 단계는 유지됩니다. 새 범위를 검토한 뒤 별도 승인해야 합니다.','warning');
  if(reason)return result('요약 중단 · '+reason,'원장 상태와 제공자 사용량을 확인하세요. 자동 재전송은 없습니다.','warning');
  if(approval?.state==='STOPPED')return result('요약 승인 중단','이력과 제공자 사용량을 확인하세요. 자동 재승인은 없습니다.','warning');
