@@ -1,11 +1,11 @@
 import {ProviderError} from './adapters.mjs';
 import {configuredMasterKey,decryptProviderKey} from './vault.mjs';
-import {PAID_SUMMARY_CATALOG,paidExecutionEnabled,checkedPaidWireBody} from './paid-summary-contract.mjs';
+import {PAID_SUMMARY_CATALOG,paidExecutionAllowed,checkedPaidWireBody} from './paid-summary-contract.mjs';
 
 // This adapter is reachable only through a separately enabled paid contract route.
 // Tests inject fetchFn. No paid API is invoked by importing this module.
-export async function runPaidGeminiFullSummary({env,body,quote,fetchFn=fetch,beforeFetch}){
- if(!paidExecutionEnabled(env))throw new ProviderError('PAID_EXECUTION_DISABLED','유료 요약 실행은 비활성입니다.');
+export async function runPaidGeminiFullSummary({env,body,quote,firstTrial=false,fetchFn=fetch,beforeFetch}){
+ if(!paidExecutionAllowed(env,firstTrial))throw new ProviderError('PAID_EXECUTION_DISABLED','유료 요약 실행은 비활성입니다.');
  const row=await env.DB.prepare('SELECT cipher_version,iv_b64,ciphertext_b64 FROM provider_credentials WHERE owner_id=? AND provider=?').bind('owner','gemini').first();
  const root=configuredMasterKey(env);if(!row||!root)throw new ProviderError('PAID_CREDENTIAL_UNAVAILABLE','저장된 Gemini 연결을 확인하세요.');
  let key;try{key=await decryptProviderKey(root,'gemini',{version:row.cipher_version,ivB64:row.iv_b64,ciphertextB64:row.ciphertext_b64});}catch{throw new ProviderError('PAID_CREDENTIAL_UNAVAILABLE','저장된 Gemini 연결을 확인하세요.');}

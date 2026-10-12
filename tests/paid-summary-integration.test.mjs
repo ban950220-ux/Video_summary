@@ -9,10 +9,11 @@ import {encryptProviderKey} from '../src/vault.mjs';
 import {fullSummaryRequest,paidRequestCostPreview,PAID_SUMMARY_CATALOG} from '../src/paid-summary-contract.mjs';
 import {runPaidGeminiFullSummary} from '../src/paid-summary-adapter.mjs';
 import {priceSummaryQuote} from '../src/paid-summary-budget.mjs';
+import {consumeFirstTrial} from '../src/paid-summary-trial.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 async function fixture(){
- const db=new DatabaseSync(':memory:');for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0008_paid_summary_budget.sql'])db.exec(readFileSync(new URL(file,import.meta.url),'utf8'));
+ const db=new DatabaseSync(':memory:');for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0008_paid_summary_budget.sql','../migrations/0009_paid_first_trial.sql'])db.exec(readFileSync(new URL(file,import.meta.url),'utf8'));
  const DB={prepare(sql){const make=args=>({bind(...next){return make(next);},async run(){return {meta:{changes:db.prepare(sql).run(...args).changes}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};
  const id='22222222-2222-4222-8222-222222222222',path='/api/jobs/'+id,segments=[{id:1,startMs:0,endMs:1000,text:'첫 발언'},{id:2,startMs:1000,endMs:2000,text:'둘째 발언'}],audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
  db.prepare("INSERT INTO jobs(id,owner_id,title,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json) VALUES(?,'owner','Paid mock','audio','TRANSCRIBED',2,?,?,?,?)").run(id,new Date().toISOString(),new Date().toISOString(),'null',JSON.stringify(audit));
@@ -55,6 +56,45 @@ test('server quote ID, explicit approval, gated mock execution, reopen and TXT k
   const exported=await routeApi(request(f.path+'/export?format=txt'),f.env),txt=await exported.text();assert.ok(txt.includes('첫 발언'));assert.ok(txt.includes('둘째 발언'));
   const cached=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:quoteId}),f.env);assert.equal(cached.status,200);assert.equal(calls,1);
   const status=await(await routeApi(request(f.path+'/paid-summary-status'),f.env)).json();assert.equal(status.finalReportSaved,true);assert.equal(status.reservations[0].state,'SETTLED');assert.equal(status.reservations[0].usage.thoughtsTokenCount,20);assert.equal(status.providerInvoiceAmount,'UNKNOWN');
+ }finally{f.db.close();}
+});
+
+test('first generation trial is scoped, cost-gated and consumed once without claiming prior success',async()=>{
+ const f=await fixture();try{
+  const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();
+  assert.equal(issued.firstTrialAvailable,true);assert.equal(issued.firstTrialEvidence.metadataGet,'NOT_REQUESTED');assert.equal(issued.firstTrialEvidence.generation,'UNTESTED');
+  const approvalBody={quoteId:issued.quoteId,maxMicroUsd:720896,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true,trialKind:'FIRST_GENERATION_UNTESTED',confirmUnknownGeneration:true,confirmExistingPrepayOnly:true,confirmCurrentKeyProject:true};
+  const missingConsent=await routeApi(request(f.path+'/paid-summary-approve','POST',{...approvalBody,confirmUnknownGeneration:false}),f.env);assert.equal((await missingConsent.json()).error.code,'PAID_FIRST_TRIAL_SCOPE_CHANGED');assert.equal(f.db.prepare('SELECT COUNT(*) n FROM yta_paid_summary_approvals').get().n,0);
+  Object.assign(f.env,{ENABLE_PAID_SUMMARY:'true',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_FIRST_GENERATION_TRIAL_ENABLED:'true'});
+  const unverifiedCost=await routeApi(request(f.path+'/paid-summary-approve','POST',approvalBody),f.env);assert.equal((await unverifiedCost.json()).error.code,'PAID_FIRST_TRIAL_SCOPE_CHANGED');assert.equal(f.db.prepare('SELECT COUNT(*) n FROM yta_paid_summary_approvals').get().n,0);
+  f.env.PAID_TAX_MAX_BPS_VERIFIED='true'; // Offline fixture only: no actual account tax evidence is claimed.
+  const approved=await routeApi(request(f.path+'/paid-summary-approve','POST',approvalBody),f.env);assert.equal(approved.status,200,await approved.clone().text());assert.equal((await approved.json()).trial.generation,'UNTESTED');
+  const trial=f.db.prepare('SELECT * FROM yta_paid_first_trial').get();assert.equal(trial.job_id,f.id);assert.equal(trial.source_sha256,issued.quote.sourceSha256);assert.equal(trial.request_sha256,issued.quote.requestSha256);assert.equal(trial.quote_sha256,issued.quote.quoteSha256);assert.equal(trial.model,issued.quote.model);assert.equal(trial.credential_generation,issued.quote.credentialGeneration);assert.equal(trial.expires_at,issued.quote.expiresAt);assert.equal(trial.max_calls,1);assert.equal(trial.max_micro_usd,720896);
+  let sends=0;f.env.PAID_SUMMARY_TEST_RUNNER=async({beforeFetch})=>{await beforeFetch();sends++;return {text:JSON.stringify(report),usage:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20}};};
+  f.env.PAID_TAX_MAX_BPS_VERIFIED='false';
+  const before=await(await routeApi(request(f.path+'/paid-summary-status'),f.env)).json();assert.equal(before.firstTrial.generation,'UNTESTED');assert.equal(before.firstTrial.evidence.observedPrepayTopup,'OWNER_UI_2026_10_11_KRW_8000_EQUALS_CREDIT_7273_PLUS_VAT_727');assert.equal(before.executionReady,false);
+  const blocked=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.equal((await blocked.json()).error.code,'PAID_EXECUTION_DISABLED');assert.equal(sends,0);assert.equal(f.db.prepare('SELECT state FROM yta_paid_first_trial').get().state,'APPROVED');assert.equal(f.db.prepare('SELECT COUNT(*) n FROM yta_paid_summary_reservations').get().n,0);
+  f.env.PAID_TAX_MAX_BPS_VERIFIED='true';
+  assert.equal((await(await routeApi(request(f.path+'/paid-summary-status'),f.env)).json()).executionReady,true);
+  const done=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.equal(done.status,200,await done.clone().text());assert.equal(sends,1);
+  assert.equal(f.db.prepare('SELECT state FROM yta_paid_first_trial').get().state,'CONSUMED');
+  const after=await(await routeApi(request(f.path+'/paid-summary-status'),f.env)).json();assert.equal(after.firstTrial.generation,'SUCCEEDED');assert.equal(after.firstTrial.metadataGet,'NOT_REQUESTED');assert.equal(after.executionReady,false);
+  const same=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.equal(same.status,200);assert.equal(sends,1);
+ }finally{f.db.close();}
+});
+
+test('concurrent first-trial claims consume the global permission only once',async()=>{
+ const f=await fixture();try{
+  const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();
+  const body={quoteId:issued.quoteId,maxMicroUsd:720896,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true,trialKind:'FIRST_GENERATION_UNTESTED',confirmUnknownGeneration:true,confirmExistingPrepayOnly:true,confirmCurrentKeyProject:true};
+  Object.assign(f.env,{ENABLE_PAID_SUMMARY:'true',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_FIRST_GENERATION_TRIAL_ENABLED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true'});
+  assert.equal((await routeApi(request(f.path+'/paid-summary-approve','POST',body),f.env)).status,200);
+  const reservationId=issued.quoteId+':call:0';f.db.prepare("INSERT INTO yta_paid_summary_reservations(id,approval_id,call_index,reserved_micro_usd,state,created_at) VALUES(?,?,0,720896,'RESERVED',?)").run(reservationId,issued.quoteId,new Date().toISOString());
+  const args={approvalId:issued.quoteId,reservationId,quote:issued.quote,current:{sourceSha256:issued.quote.sourceSha256,requestSha256:issued.quote.requestSha256}};
+  await assert.rejects(consumeFirstTrial(f.DB,{...args,current:{...args.current,requestSha256:'f'.repeat(64)}}),{code:'PAID_FIRST_TRIAL_SCOPE_CHANGED'});assert.equal(f.db.prepare('SELECT state FROM yta_paid_first_trial').get().state,'APPROVED');
+  const results=await Promise.allSettled([consumeFirstTrial(f.DB,args),consumeFirstTrial(f.DB,args)]);
+  assert.equal(results.filter(item=>item.status==='fulfilled').length,1);assert.equal(results.filter(item=>item.status==='rejected'&&item.reason.code==='PAID_FIRST_TRIAL_SCOPE_CHANGED').length,1);
+  assert.equal(f.db.prepare('SELECT state FROM yta_paid_first_trial').get().state,'CONSUMED');
  }finally{f.db.close();}
 });
 

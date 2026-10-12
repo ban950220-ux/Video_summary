@@ -4,6 +4,10 @@ The paid path is disabled unless `ENABLE_PAID_SUMMARY`,
 `PAID_SUMMARY_EXECUTION_APPROVED`, `PAID_MODEL_ACCESS_VERIFIED`, and
 `PAID_TAX_MAX_BPS_VERIFIED` are all `true`. `ALLOW_PAID_API` stays `false`
 so the existing Groq Free path remains usable.
+For the first generation only, `PAID_FIRST_GENERATION_TRIAL_ENABLED` replaces
+the prior-generation-success flag, while `PAID_TAX_MAX_BPS_VERIFIED` and the
+other budget and operator gates remain mandatory. No generation success is
+asserted before the first call. All new flags are absent from production vars.
 This review branch changes none of those production settings and does not apply
 `0008_paid_summary_budget.sql` to production. The 98-minute private transcript
 and the user's provider account were not read or called for this work.
@@ -59,8 +63,63 @@ provider invoice, tax, balance and ETA remain `UNKNOWN`. The optional
 provider `countTokens` request could give a model token count, but it needs
 authorized account API access and has not been called. Its price/billing
 treatment for this account has not been verified; do not assume it is free.
-An operator must verify model access and the applicable tax upper bound
-before enabling execution.
+An operator must verify the applicable tax upper bound before any execution.
+Ordinary paid execution also requires prior model-generation evidence; the
+one-time trial below handles the first generation separately.
+
+## First generation trial (offline contract)
+
+The owner has separately approved one Gemini 3.1 Flash-Lite full-transcript
+attempt up to the app's $0.720896 reservation, with zero automatic retries,
+no fallback, and use of existing prepaid credit only. The owner confirmed the
+site's stored Gemini key belongs to the project whose UI showed an ₩8,000
+prepaid balance, auto-reload off, and this model in the list. The separate
+2026-10-11 Cloud Billing prepay transaction displayed ₩8,000 paid as
+₩7,273 prepaid credit plus ₩727 VAT. This is **account transaction evidence**
+of VAT on that top-up, not evidence of how this request's usage is taxed or
+of a current balance readback. The owner must confirm the quote's current key
+generation belongs to that project at app approval. No key or token value is
+stored in the evidence record. `models.get/list` was not called.
+
+The [official Models metadata endpoint](https://ai.google.dev/api/models)
+can report model limits and `supportedGenerationMethods`. It does not prove
+this key's project binding, paid balance, quota at dispatch, or a successful
+`generateContent`. Metadata GET is useful as an optional additional
+preflight check, not a necessary prerequisite to the first approved
+generation. It requires separate permission to use the saved key; its
+account-specific billing treatment has not been established, so this
+contract does not send it or claim it is free.
+
+The distinct `FIRST_GENERATION_UNTESTED` approval displays and persists the
+owner-reported facts, official price, metadata `NOT_REQUESTED`, generation
+`UNTESTED`, and account-specific billing `UNVERIFIED`. Migration 0009 adds a
+single global trial row. It binds the exact job, source SHA-256, serialized
+request SHA-256, quote SHA-256, model, key generation, expiry, **one** call,
+and **720896 microUSD**. Approval first claims the singleton in
+`PENDING_APPROVAL`, preventing a concurrent second trial approval; only a
+matching saved budget approval advances it to `APPROVED`. A failed approval
+leaves a non-executable pending row for explicit reconciliation. The final
+guard consumes the approved row with a conditional D1
+update before the only fetch. It cannot be reissued or retried. A lost or
+uncertain provider result leaves it consumed; readback must establish the
+outcome. This migration is not applied to production.
+
+The text-model token ceiling yields $0.360448 before tax. The [general South
+Korean Cloud Billing rule](https://docs.cloud.google.com/billing/docs/resources/vat-overview#south_korea)
+states 10% VAT; if it applies to precisely that taxable amount, it adds
+$0.0360448, for $0.3964928 in model fees plus VAT. The observed top-up VAT
+supports the account's VAT treatment for purchasing prepaid credit, but does
+not establish a second VAT charge on usage or rule out every account-specific
+fee. No new prepaid purchase or card charge is part of the trial. A card or
+foreign-transaction fee on a new purchase has no intended trigger here;
+unexpected provider usage adjustments or a separate account-specific charge
+remain unverified. [KRW Cloud Billing conversion](https://docs.cloud.google.com/billing/docs/resources/currency)
+depends on account currency and the applicable monthly exchange rate. The
+$0.720896 USD app buffer exceeds the model-plus-10%-VAT arithmetic, but it is
+not a provider-enforced invoice cap or a guaranteed KRW amount. No new purchase
+or top-up is in scope. `PAID_TAX_MAX_BPS_VERIFIED` stays false until the
+account-specific charge bound is established, so a fresh app trial approval
+and its execution remain blocked.
 
 The browser sends a server-issued quote ID, user maximum microUSD, call count,
 expiry, and explicit confirmation. It cannot submit a price or model. The
