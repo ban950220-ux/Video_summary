@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS yta_paid_summary_receipts(
  model_version TEXT,
  finish_reason TEXT,
  usage_json TEXT,
- state TEXT NOT NULL CHECK(state IN ('RECEIVED','INCOMPLETE','ENVELOPE_INVALID','VALIDATION_FAILED','SAVE_FAILED','SAVED')),
+ state TEXT NOT NULL CHECK(state IN ('RECEIVED','INCOMPLETE','ENVELOPE_INVALID','VALIDATION_FAILED','SAVE_FAILED','SAVED','SOURCE_DELETED')),
  error_code TEXT,
  validation_version TEXT,
  revalidation_version TEXT,

@@ -148,6 +148,20 @@ test('audio library labels the legacy free action separately from paid quote cho
  assert.match(labels,/기존 Gemini 무료 요약 생성/);assert.match(labels,/전체 요약 선택·유료 견적/);assert.equal(card.children.flatMap(item=>item.children||[]).some(item=>item.textContent==='요약 생성'),false);
 });
 
+test('paid choice offers no-call revalidation only for a complete stored receipt',async()=>{
+ const node=tag=>({tag,children:[],dataset:{},hidden:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}});
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showSummaryChoice=showSummaryChoice;globalThis.__state=state;');
+ const choice={transcription:{complete:true},summary:{complete:false,savedRawStages:0,rawStages:1,remainingRawStages:1},free:{model:'free',inputTokensUpperPerCall:1,outputTokensUpperPerCall:1,eta:{reason:'UNKNOWN'}},paid:{executionEnabled:false,quoteIssueReady:true,reason:'별도 승인',model:'paid',priceVersion:'v1',inputTokensUpper:100,outputTokensUpper:100,maxRetries:0}};
+ for(const hasReceipt of [false,true]){
+  const target=node('div'),toast=node('div');target.dataset.jobId='job-a';const calls=[];
+  const status={approval:{id:'approval-a',state:'APPROVED'},reservations:[{id:'reservation-a',state:'SETTLED',outcome:'REPORT_NOT_SAVED'}],executionReady:false,receipt:hasReceipt?{revalidationAvailable:true,response_bytes:1234,error_code:'PAID_REPORT_WINDOW_COVERAGE'}:null};
+  const fetcher=async(path,options)=>{calls.push({path,method:options.method,body:options.body&&JSON.parse(options.body)});const result=path.endsWith('summary-choice')?choice:status;return {ok:true,headers:{get:()=> 'application/json'},json:async()=>result};};
+  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent,clearTimeout,setTimeout:()=>0};runInNewContext(source,context);context.__state.view='library';context.__showSummaryChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
+  const host=target.children[0],button=host.children.find(item=>item.textContent==='보존 응답만 재검증 · 제공자 호출 없음');assert.equal(!!button,hasReceipt);
+  assert.equal(calls.some(call=>call.method==='POST'),false);
+ }
+});
+
 test('lost checkpoint recovery POST and failed status GET leave only read-only reconciliation',async()=>{
  const node=tag=>({tag,children:[],hidden:false,dataset:{},disabled:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
  const preview={responseSha256:'a'.repeat(64),contractHash:'b'.repeat(64),firstRange:{firstId:1,lastId:20},summaryCount:4,chapterCount:20,storedUtf16Length:1954,failedOperationId:'failed-raw0',confirmedUsage:{totalTokens:2169},evidenceHash:'c'.repeat(64)};

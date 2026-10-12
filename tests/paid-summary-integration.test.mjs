@@ -273,6 +273,56 @@ test('failed receipt write settles known usage but never offers recovery',async(
  }finally{f.db.close();}
 });
 
+test('job deletion scrubs paid response text while retaining the cost ledger',async()=>{
+ const f=await fixture();try{
+  const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();await routeApi(request(f.path+'/paid-summary-approve','POST',{quoteId:issued.quoteId,maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true}),f.env);
+  Object.assign(f.env,{ENABLE_PAID_SUMMARY:'true',ALLOW_PAID_API:'false',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true'});
+  f.env.PAID_SUMMARY_TEST_RUNNER=async({beforeFetch})=>{await beforeFetch();return {text:JSON.stringify({...report,chapters:[]}),usage:{promptTokenCount:300,candidatesTokenCount:90}};};
+  await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.ok(f.db.prepare('SELECT response_json FROM yta_paid_summary_receipts').get().response_json);
+  const before=f.db.prepare('SELECT state,outcome,usage_json,token_estimate_micro_usd FROM yta_paid_summary_reservations').get();const deleted=await routeApi(request(f.path,'DELETE'),f.env);assert.equal(deleted.status,200);
+  const receipt=f.db.prepare('SELECT state,error_code,response_json,response_sha256,response_complete FROM yta_paid_summary_receipts').get();assert.equal(receipt.state,'SOURCE_DELETED');assert.equal(receipt.error_code,'PAID_SOURCE_DELETED');assert.equal(receipt.response_json,null);assert.equal(receipt.response_sha256,null);assert.equal(receipt.response_complete,0);
+  assert.deepEqual(f.db.prepare('SELECT state,outcome,usage_json,token_estimate_micro_usd FROM yta_paid_summary_reservations').get(),before);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM yta_paid_summary_approvals').get().n,1);
+ }finally{f.db.close();}
+});
+
+test('deletion tombstone blocks a late paid receipt insert',async()=>{
+ const f=await fixture();try{
+  const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();await routeApi(request(f.path+'/paid-summary-approve','POST',{quoteId:issued.quoteId,maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true}),f.env);
+  Object.assign(f.env,{ENABLE_PAID_SUMMARY:'true',ALLOW_PAID_API:'false',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true'});
+  f.env.PAID_SUMMARY_TEST_RUNNER=async({beforeFetch})=>{await beforeFetch();return {text:JSON.stringify(report),usage:{promptTokenCount:300,candidatesTokenCount:90}};};
+  const original=f.env.DB;let removed=false;f.env.DB={prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('INSERT OR IGNORE INTO yta_paid_summary_receipts'))return statement;return {bind(...args){const bound=statement.bind(...args);return {async run(){if(!removed){removed=true;assert.equal((await routeApi(request(f.path,'DELETE'),{...f.env,DB:original})).status,200);}return bound.run();}};}};}};
+  const response=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.equal(response.status,409);assert.equal(removed,true);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM yta_paid_summary_receipts').get().n,0);assert.equal(f.db.prepare('SELECT COUNT(*) n FROM jobs').get().n,0);
+ }finally{f.db.close();}
+});
+
+test('real adapter mock response recovers after metadata write failure or lost receipt readback without a second fetch',async()=>{
+ for(const mode of ['metadata','readback','interrupted']){
+  const f=await fixture();try{
+   const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();
+   Object.assign(f.env,{ENABLE_PAID_SUMMARY:'true',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_FIRST_GENERATION_TRIAL_ENABLED:'true',PAID_FIRST_TRIAL_USD_COST_REVIEWED:'true',ALLOW_PAID_API:'false'});
+   const approvalBody={quoteId:issued.quoteId,maxMicroUsd:720896,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true,trialKind:'FIRST_GENERATION_UNTESTED',confirmUnknownGeneration:true,confirmExistingPrepayOnly:true,confirmCurrentKeyProject:true};assert.equal((await routeApi(request(f.path+'/paid-summary-approve','POST',approvalBody),f.env)).status,200);
+   let sends=0;f.env.PAID_SUMMARY_TEST_RUNNER=args=>runPaidGeminiFullSummary({...args,fetchFn:async()=>{sends++;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(report)}]}}],usageMetadata:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20},modelVersion:'gemini-3.1-flash-lite'});}});
+   const original=f.env.DB;let failed=false;f.env.DB={prepare(sql){const statement=original.prepare(sql),target=mode==='metadata'?sql.startsWith('UPDATE yta_paid_summary_receipts SET state='):sql.startsWith('SELECT response_sha256,response_bytes,response_json,response_complete FROM yta_paid_summary_receipts')||mode==='interrupted'&&sql.startsWith("UPDATE yta_paid_summary_reservations SET state='UNCERTAIN'");if(!target)return statement;return {bind(...args){const bound=statement.bind(...args);return {async run(){if(mode==='metadata'&&!failed){failed=true;throw Error('offline metadata write failure');}if(mode==='interrupted')throw Error('offline worker interrupted before cost settlement');return bound.run();},async first(){if(mode!=='metadata'&&!failed){failed=true;throw Error('offline readback response lost');}return bound.first();}};}};}};
+   const first=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.ok(first.status>=409,mode);assert.equal(failed,true);assert.equal(sends,1);
+   f.env.DB=original;const receipt=f.db.prepare('SELECT response_json,response_sha256,model_version,finish_reason,usage_json FROM yta_paid_summary_receipts').get();assert.ok(receipt.response_json);assert.equal(receipt.response_sha256,createHash('sha256').update(receipt.response_json).digest('hex'));assert.equal(receipt.model_version,null);assert.equal(receipt.finish_reason,null);assert.equal(receipt.usage_json,null);
+   const approvalBefore=f.db.prepare('SELECT * FROM yta_paid_summary_approvals').get(),trialBefore=f.db.prepare('SELECT * FROM yta_paid_first_trial').get(),costBefore=f.db.prepare('SELECT * FROM yta_paid_summary_reservations').get();assert.equal(trialBefore.state,'CONSUMED');assert.equal(costBefore.state,mode==='metadata'?'SETTLED':mode==='readback'?'UNCERTAIN':'RESERVED');
+   const status=await(await routeApi(request(f.path+'/paid-summary-status'),f.env)).json();assert.equal(status.receipt.revalidationAvailable,true);
+   const recovery=await routeApi(request(f.path+'/paid-summary-revalidate','POST',{reservationId:issued.quoteId+':call:0',confirmNoProviderCall:true}),f.env);assert.equal(recovery.status,200,mode+': '+await recovery.clone().text());assert.equal((await recovery.json()).costReconciliation,mode==='metadata'?'SETTLED_PRIOR':'REVIEW_REQUIRED');assert.equal((await(await routeApi(request(f.path+'/paid-summary-status'),f.env)).json()).costReconciliation,mode==='metadata'?'SETTLED_PRIOR':'REVIEW_REQUIRED');assert.equal(sends,1);
+   assert.deepEqual(f.db.prepare('SELECT * FROM yta_paid_summary_approvals').get(),approvalBefore);assert.deepEqual(f.db.prepare('SELECT * FROM yta_paid_first_trial').get(),trialBefore);assert.deepEqual(f.db.prepare('SELECT * FROM yta_paid_summary_reservations').get(),costBefore);
+  }finally{f.db.close();}
+ }
+});
+
+test('exact 256000-byte UTF-8 response is stored whole and a larger response is never treated as complete',async()=>{
+ const f=await fixture();try{
+  const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();await routeApi(request(f.path+'/paid-summary-approve','POST',{quoteId:issued.quoteId,maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true}),f.env);
+  Object.assign(f.env,{ENABLE_PAID_SUMMARY:'true',ALLOW_PAID_API:'false',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true'});
+  const body=JSON.stringify({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(report)}]}}],usageMetadata:{promptTokenCount:300,candidatesTokenCount:90},modelVersion:'모의 한글 모델'}),bytes=new TextEncoder().encode(body).length,responseText=body+' '.repeat(256000-bytes);assert.equal(new TextEncoder().encode(responseText).length,256000);
+  f.env.PAID_SUMMARY_TEST_RUNNER=args=>runPaidGeminiFullSummary({...args,fetchFn:async()=>new Response(responseText)});
+  const response=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.equal(response.status,200,await response.clone().text());const receipt=f.db.prepare('SELECT response_bytes,response_json,response_sha256,response_complete FROM yta_paid_summary_receipts').get();assert.equal(receipt.response_bytes,256000);assert.equal(receipt.response_json,responseText);assert.equal(receipt.response_sha256,createHash('sha256').update(responseText).digest('hex'));assert.equal(receipt.response_complete,1);
+ }finally{f.db.close();}
+});
+
 test('concurrent paid mock execution claims one call and a lost response reconciles through status',async()=>{
  const f=await fixture();try{
   const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();await routeApi(request(f.path+'/paid-summary-approve','POST',{quoteId:issued.quoteId,maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true}),f.env);
