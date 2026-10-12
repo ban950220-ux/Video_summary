@@ -9,7 +9,7 @@ const preview={jobId:job.id,audioFileSha256:'a'.repeat(64),sourceSegmentCount:12
 function harness(fetcher){
  const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){for(const item of items){item.parent=this;this.children.push(item);}},prepend(...items){for(const item of items)item.parent=this;this.children.unshift(...items);},replaceChildren(...items){this.children=[];this.append(...items);},setAttribute(){},remove(){if(this.parent)this.parent.children=this.parent.children.filter(child=>child!==this);}});
  const target=node('div'),toast=node('div');target.dataset.jobId=job.id;
- const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showBoundaryReconcileChoice=showBoundaryReconcileChoice;globalThis.__state=state;');
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showBoundaryReconcileChoice=showBoundaryReconcileChoice;globalThis.__state=state;');
  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,detailRequestIsCurrent};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';
  return {target,state:context.__state,show:context.__showBoundaryReconcileChoice};

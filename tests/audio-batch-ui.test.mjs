@@ -32,7 +32,7 @@ test('unchecking batch while audio-plan awaits cannot start ordinary Groq or Gem
   else throw Error('Unexpected UI request: '+path);
   return {ok:true,headers:{get:()=> 'application/json'},json:async()=>body};
  };
- const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__handleAnalyze=handleAnalyze;globalThis.__state=state;');
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__handleAnalyze=handleAnalyze;globalThis.__state=state;');
  const context={document:{querySelector:selector=>elements.get(selector),createElement:()=>node(),hidden:false},window:{},location:{hash:''},crypto:webcrypto,fetch:fetcher,clearTimeout,setTimeout:()=>0,confirm:()=>false,
   planMp3:()=>({durationSeconds:600,chunks:[{index:0,start:0,end:600,byteStart:0,byteEnd:100}]}),prepareMp3Chunk:()=>({bytes:new Uint8Array(100)}),
   runApprovedFreeBatch:async args=>{batchRuns++;assert.equal(args.jobId,job.id);return {complete:false,reason:'TEST_STOP',index:0};},

@@ -16,7 +16,7 @@ function harness(fetcher,{setTimeoutFn=()=>0}={}){
  const target=node('div');target.dataset.jobId='job-a';const toast=node('div');
  const listeners=new Map(),intervals=new Map();let timerId=0;
  const document={createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false,addEventListener(name,fn){listeners.set(name,fn);},removeEventListener(name){listeners.delete(name);}};
- const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqSummaryChoice=showGroqSummaryChoice;globalThis.__state=state;');
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqSummaryChoice=showGroqSummaryChoice;globalThis.__state=state;');
  const context={document,window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:setTimeoutFn,setInterval:fn=>{intervals.set(++timerId,fn);return timerId;},clearInterval:id=>intervals.delete(id),runApprovedGroqSummary,detailRequestIsCurrent,groqSummaryProgress,fmtRetryDate};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';
  const job={id:'job-a',source_type:'audio',duration_seconds:600,report:null};

@@ -63,7 +63,9 @@ test('Build output overrides never replace the private structured result file',(
   assert.equal(options.env.WRANGLER_CI_GENERATE_PREVIEW_ALIAS,'false');
   assert.equal(options.env.WRANGLER_OUTPUT_FILE_DIRECTORY,undefined);
   assert.notEqual(options.env.WRANGLER_OUTPUT_FILE_PATH,input.WRANGLER_OUTPUT_FILE_PATH);
-  assert.match(options.env.WRANGLER_OUTPUT_FILE_PATH,/yta-wrangler-output-.*\/result\.jsonl$/);
+  const privateResultPath=/yta-wrangler-output-[^\\/]+[\\/]result\.jsonl$/;
+  assert.match(options.env.WRANGLER_OUTPUT_FILE_PATH,privateResultPath);
+  assert.match(String.raw`C:\Temp\yta-wrangler-output-example\result.jsonl`,privateResultPath);
   writeFileSync(options.env.WRANGLER_OUTPUT_FILE_PATH,JSON.stringify({type:'deploy',version:1,worker_name:'holy-rice-b914',version_id:'11111111-1111-4111-8111-111111111111'})+'\n');
   return {status:0,stdout:'PRIVATE_ACCESS_VALUE',stderr:'PRIVATE_ACCESS_VALUE'};
  });
