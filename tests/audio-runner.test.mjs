@@ -2,6 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {runAudioChunks,runSummaryStages,runApprovedFreeBatch,runApprovedGroqSummary,detailRequestIsCurrent,beginDetailAction} from '../web/site/audio-runner.mjs';
 
+test('raw checkpoint bundle stops the foreground summary runner without a final report',async()=>{
+ let sends=0;const scope={jobId:'job-a',transcriptHash:'a'.repeat(64),model:'openai/gpt-oss-120b',state:'APPROVED',maxRequests:1};
+ const result=await runApprovedGroqSummary({jobId:'job-a',scope,getApproval:async()=>({jobId:'job-a',transcriptHash:scope.transcriptHash,bundleAvailable:true}),sendStage:async()=>{sends++;return {};},wait:async()=>{}});
+ assert.equal(result.complete,false);assert.equal(result.reason,'SUMMARY_BUNDLE_AVAILABLE');assert.equal(sends,0);
+});
+
 test('Groq summary foreground runner rechecks exact approval and stops on first error',async()=>{
  const scope={jobId:'job-a',transcriptHash:'a'.repeat(64),model:'openai/gpt-oss-120b',state:'APPROVED',expiresAt:200_000,maxRequests:2,maxInputTokensPerRequest:4800,maxCompletionTokensPerRequest:1800,totalTokenUpperBound:13200};
  let now=100_000,calls=0,waits=0;

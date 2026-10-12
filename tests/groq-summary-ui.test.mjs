@@ -76,3 +76,29 @@ test('checkpoint recovery UI requires explicit review and never starts a provide
  assert.equal(calls[1].body.confirmNoProviderCall,true);assert.equal(calls[1].body.confirmNoAutomaticContinuation,true);
  assert.equal(host.children.some(item=>item.tag==='form'),false);
 });
+
+test('bundle UI labels the intermediate artifact and uses a separate export URL',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
+ const bundle={sourceCheckpointCount:90,bundleContractVersion:'raw-checkpoint-bundle-v1',bundleHash:'a'.repeat(64),report:{summary:[{text:'구간 요약',evidenceIds:[1]}],chapters:[{text:'구간 장',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'구간 결론',warning:'별도 모델 재병합 없음'}};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqBundleChoice=showGroqBundleChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:async()=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>bundle}),detailRequestIsCurrent};
+ runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqBundleChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
+ const host=target.children[0];assert.match(host.children[0].textContent,/전체 종합 요약 미완료/);
+ const links=host.children.at(-1).children;assert.deepEqual(links.map(item=>item.textContent),['구간별 묶음 TXT 내보내기','구간별 묶음 MD 내보내기']);
+ assert.ok(links.every(item=>item.href===undefined||item.tag==='a'));
+});
+
+test('lost checkpoint recovery POST and failed status GET leave only read-only reconciliation',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},disabled:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
+ const preview={responseSha256:'a'.repeat(64),contractHash:'b'.repeat(64),firstRange:{firstId:1,lastId:20},summaryCount:4,chapterCount:20,storedUtf16Length:1954,failedOperationId:'failed-raw0',confirmedUsage:{totalTokens:2169},evidenceHash:'c'.repeat(64)};
+ let posts=0,gets=0,recovered=false;
+ const fetcher=async(_path,options)=>{if(options.method==='POST'){posts++;recovered=true;throw Error('POST response lost');}gets++;if(gets===2)throw Error('status unavailable');return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({...preview,recovered})};};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqCheckpointRecoveryChoice=showGroqCheckpointRecoveryChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,clearInterval,detailRequestIsCurrent};
+ runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCheckpointRecoveryChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
+ const host=target.children[0],form=host.children.find(item=>item.tag==='form');for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
+ await form.onsubmit({preventDefault(){}});assert.equal(posts,1);assert.equal(form.children.at(-1).disabled,true);
+ await form.onsubmit({preventDefault(){}});assert.equal(posts,1);
+ const refresh=host.children.find(item=>item.tag==='button'&&item.textContent==='저장 상태 다시 확인');assert.ok(refresh);await refresh.onclick();
+ assert.equal(posts,1);assert.equal(gets,3);assert.equal(host.children.some(item=>item.tag==='form'),false);
+});

@@ -45,8 +45,8 @@ by Groq are a different unit from this conservative UTF-8 input bound.
 1. Complete the independent code and remote baseline review. Confirm the
    owner-only Access policy, existing D1 binding, free-only settings, secret
    names, and the exact production Worker version. The approved GET-only
-   diagnostic finished without deploying, and the Cloudflare Builds command
-   is back at `npm run deploy:production`; do not start a production build
+   diagnostic finished without deploying. Confirm the Cloudflare Builds command
+   and exact remote baseline before any production build; do not start one
    before separate rollout authorization. Do not copy credential values.
 2. Review the proposed no-call recovery of the new stored response. Its
    source, owner job, strict contract hash, response hash, original failed row
@@ -62,15 +62,17 @@ by Groq are a different unit from this conservative UTF-8 input bound.
    covering the full 98-minute timeline. Check numerical claims, speaker
    uncertainty, gaps and partial markers against the preserved source.
    Evidence ID validation alone does not prove factual accuracy. For a long
-   source or an oversized valid checkpoint, the proposed offline code joins
-   every validated raw report locally and marks the result
-   `LOSSLESS_RAW_CHECKPOINTS`. This retains the raw chapters, summary items,
-   references and conclusions in time order without claiming an additional
-   model synthesis. Reports above 1 MB stop for review instead of truncation.
+   source or an oversized valid checkpoint, the proposed offline code can
+   expose every validated raw report as a separate read-only
+   `RAW_CHECKPOINT_BUNDLE` with its own contract and hash. It retains chapters,
+   summary items, references and conclusions in time order; it does not save
+   `jobs.report` or complete the requested single full-video synthesis.
+   Bundles above 1 MB stop for review instead of truncation.
 5. Verify the final report and full source after a fresh owner login and page
    reload, search by video ID/title, export TXT, and read back the corresponding
    D1 job, source and operation ledger. Only then mark the video end-to-end
-   summary accepted. Retain the PC and Library originals; temporary service
+   summary accepted. A bundle export is an intermediate artifact and does not
+   satisfy this final-report acceptance. Retain the PC and Library originals; temporary service
    audio/result cleanup needs its separate explicit confirmation.
 
 Code and mocked Chromium/SQLite/Workerd tests are development evidence, not
@@ -79,7 +81,7 @@ succeeded.
 
 ## Review-branch verification (mock only)
 
-On 2026-10-12, `npm run check` and all 249 local tests passed. Workerd D1
+On 2026-10-12, the earlier review commit passed `npm run check` and 249 local tests. Workerd D1
 tests injected stored Groq key rotation, a deletion marker, an audit change,
 and pilot approval cancellation immediately before the final single-statement
 dispatch guard; each blocked the provider mock with zero calls and kept the
@@ -91,5 +93,6 @@ status review rather than a new approval. Additional SQLite and Workerd D1
 tests revalidated a synthetic stored 1,954-character report without a model
 call, retained both usage records, and kept the recovery write separate from
 later approval and execution. A 1,226-segment / 90-checkpoint fixture retained
-all 1,226 chapter references in a locally composed report and TXT export.
+all 1,226 chapter references in a separate read-only bundle and TXT export,
+without a final `jobs.report` row.
 These tests did not call production.
