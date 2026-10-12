@@ -2,11 +2,11 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
-import {generateKeyPairSync,sign} from 'node:crypto';
+import {generateKeyPairSync,sign,createHash} from 'node:crypto';
 import {routeApi} from '../src/worker.mjs';
 import {handleSiteRequest} from '../src/site-worker.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
-import {fullSummaryRequest,PAID_SUMMARY_CATALOG} from '../src/paid-summary-contract.mjs';
+import {fullSummaryRequest,paidRequestCostPreview,PAID_SUMMARY_CATALOG} from '../src/paid-summary-contract.mjs';
 import {runPaidGeminiFullSummary} from '../src/paid-summary-adapter.mjs';
 import {priceSummaryQuote} from '../src/paid-summary-budget.mjs';
 
@@ -93,7 +93,20 @@ test('official-model request budgets a full synthetic 1,226-segment transcript w
  const segments=Array.from({length:1226},(_,i)=>({id:i+1,startMs:i*4807,endMs:(i+1)*4807,text:'저장된 한국어 발언 '.repeat(4)})),source={raw:segments.map(s=>s.text).join('\n'),segments};
  const planned=fullSummaryRequest(source,{audioProcessingCoverage:1,audioBoundaryAmbiguityCount:47});
  assert.ok(planned.requestBytes>source.raw.length);assert.ok(planned.estimatedInputUpper<PAID_SUMMARY_CATALOG.inputLimit);
- assert.equal(planned.inputChargeCeiling,1_048_576);assert.equal(planned.outputChargeCeiling,65_536);assert.equal(planned.body.generationConfig.maxOutputTokens,8192);assert.ok(planned.body.generationConfig.responseJsonSchema.properties.chapters);
+ assert.equal(planned.inputChargeCeiling,planned.requestBytes*2+8192);assert.equal(planned.outputChargeCeiling,8192);assert.equal(planned.body.generationConfig.maxOutputTokens,8192);assert.ok(planned.body.generationConfig.responseJsonSchema.properties.chapters);
+});
+
+test('98-minute, 50,300-character synthetic transcript has a separate scenario and byte-bound reserve',()=>{
+ const segments=Array.from({length:100},(_,i)=>({id:i+1,startMs:i*58920,endMs:(i+1)*58920,text:'가'.repeat(503)})),source={raw:segments.map(s=>s.text).join('\n'),segments};
+ const request=fullSummaryRequest(source,{audioProcessingCoverage:1}),preview=paidRequestCostPreview(request);
+ assert.equal(segments.map(s=>s.text).join('').length,50300);assert.equal(segments.at(-1).endMs,5_892_000);
+ assert.equal(request.inputChargeCeiling,request.requestBytes*2+8192);assert.equal(request.outputChargeCeiling,8192);
+ assert.ok(preview.estimatedPreTaxLowMicroUsd<preview.estimatedPreTaxHighMicroUsd);
+ assert.ok(preview.estimatedPreTaxHighMicroUsd<preview.reservationPreTaxMicroUsd);
+ assert.ok(preview.reservationWithBufferMicroUsd<720896);
+ assert.equal(preview.inputTokenCountVerified,false);
+ const oversized=[{id:1,startMs:0,endMs:1000,text:'a'.repeat(600000)}];
+ assert.throws(()=>fullSummaryRequest({raw:oversized[0].text,segments:oversized},{audioProcessingCoverage:1}),{code:'PAID_INPUT_LIMIT'});
 });
 
 test('cancel, expiry and source changes at the final guard prove no dispatch',async()=>{
@@ -160,9 +173,14 @@ test('concurrent paid mock execution claims one call and a lost response reconci
 
 test('paid adapter uses stored encrypted key and official model endpoint only after the final callback',async()=>{
  const f=await fixture();try{
-  const current={segments:f.segments,raw:f.segments.map(s=>s.text).join('\n')},body=fullSummaryRequest(current,{audioProcessingCoverage:1}).body;
+  const current={segments:f.segments,raw:f.segments.map(s=>s.text).join('\n')},planned=fullSummaryRequest(current,{audioProcessingCoverage:1}),body=planned.body,quote={requestBytes:planned.requestBytes,inputTokensUpper:planned.inputChargeCeiling,outputTokensUpper:planned.outputChargeCeiling,requestSha256:createHash('sha256').update(JSON.stringify(body)).digest('hex')};
   f.env.ENABLE_PAID_SUMMARY='true';f.env.ALLOW_PAID_API='false';f.env.PAID_SUMMARY_EXECUTION_APPROVED='true';f.env.PAID_MODEL_ACCESS_VERIFIED='true';f.env.PAID_TAX_MAX_BPS_VERIFIED='true';let guard=false,calls=0;
-  const result=await runPaidGeminiFullSummary({env:f.env,body,beforeFetch:()=>{guard=true;},fetchFn:async(url,options)=>{calls++;assert.equal(guard,true);assert.match(url,/models\/gemini-3\.1-flash-lite:generateContent$/);assert.equal(options.headers['x-goog-api-key'],'OFFLINE_MOCK_KEY');return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(report)}]}}],usageMetadata:{promptTokenCount:100,candidatesTokenCount:80,thoughtsTokenCount:10}});}});
+  const result=await runPaidGeminiFullSummary({env:f.env,body,quote,beforeFetch:()=>{guard=true;},fetchFn:async(url,options)=>{calls++;assert.equal(guard,true);assert.equal(options.body,JSON.stringify(body));assert.match(url,/models\/gemini-3\.1-flash-lite:generateContent$/);assert.equal(options.headers['x-goog-api-key'],'OFFLINE_MOCK_KEY');return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(report)}]}}],usageMetadata:{promptTokenCount:100,candidatesTokenCount:80,thoughtsTokenCount:10}});}});
   assert.equal(calls,1);assert.equal(result.usage.thoughtsTokenCount,10);
+  await assert.rejects(runPaidGeminiFullSummary({env:f.env,body:{...body,contents:[{role:'user',parts:[{text:'changed'}]}]},quote,beforeFetch:()=>{guard=true;},fetchFn:async()=>{calls++;throw Error('must not send');}}),{code:'PAID_WIRE_SCOPE_CHANGED'});assert.equal(calls,1);
+  const sameBytes=structuredClone(body);sameBytes.contents[0].parts[0].text=sameBytes.contents[0].parts[0].text.replace('첫','셋');
+  await assert.rejects(runPaidGeminiFullSummary({env:f.env,body:sameBytes,quote,beforeFetch:()=>{guard=true;},fetchFn:async()=>{calls++;throw Error('must not send');}}),{code:'PAID_WIRE_SCOPE_CHANGED'});assert.equal(calls,1);
+  const overOutput=structuredClone(body);overOutput.generationConfig.maxOutputTokens=8193;
+  await assert.rejects(runPaidGeminiFullSummary({env:f.env,body:overOutput,quote,beforeFetch:()=>{guard=true;},fetchFn:async()=>{calls++;throw Error('must not send');}}),{code:'PAID_WIRE_SCOPE_CHANGED'});assert.equal(calls,1);
  }finally{f.db.close();}
 });

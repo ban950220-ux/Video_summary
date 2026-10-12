@@ -20,8 +20,8 @@ so their application and schema readback require a separate authorized step.
   thinking** is $1.50 per million tokens:
   <https://ai.google.dev/gemini-api/docs/pricing>.
 - Google's `max_output_tokens` description says the cap includes thought
-  tokens. The app requests 8,192 output tokens and conservatively reserves
-  against the model's full 65,536-token output limit:
+  tokens. The app requests and reserves 8,192 total output and thinking tokens,
+  below the model's 65,536-token output limit:
   <https://ai.google.dev/gemini-api/docs/thinking>.
 - JSON Schema objects, arrays, required fields, and `additionalProperties`
   are documented as supported; output is still checked locally:
@@ -35,14 +35,31 @@ was made to check them.
 ## Contract and bounds
 
 The server builds one full-transcript request, including timed segment IDs,
-source audit and the JSON schema. It refuses a request if its UTF-8 body plus
-8,192 bytes of margin exceeds the model input limit. The charge ceiling still
-reserves the **entire model input limit** and **entire output limit**, including
-thinking. One call, zero automatic retries, the catalog token prices, and a
-0–100% tax allowance yield a conservative app reservation of $0.720896.
-This is an app authorization ceiling, not a verified Google invoice or tax
-quote. An operator must verify account model access and the applicable tax
-upper bound before enabling execution.
+source audit and the JSON schema. It measures the exact serialized request in
+UTF-8 bytes. The input reservation uses **twice those bytes plus 8,192** for
+tokenization and protocol uncertainty, and refuses an oversized request. The
+output reservation uses the explicit `maxOutputTokens=8192`, including thinking.
+The adapter verifies the serialized body's size, SHA-256 and output cap against
+the server-issued, hashed quote before the final no-send D1 guard and fetch. This bounds the
+app's sent request, but it is **not a provider-certified token count**. An
+unexpected provider usage above the reserved estimate becomes `UNCERTAIN`;
+it cannot be represented as proven settled cost.
+
+The owner-facing range is an **offline cost scenario**, not an invoice forecast:
+input tokens are illustrated at request bytes / 4 through bytes / 2, and
+output plus thinking at 2,048 through 8,192 tokens. The range uses catalog
+text prices before tax; Korean tokenization and actual output can fall outside
+it. The server displays the separately calculated worst app reservation from
+the byte-based input ceiling and the hard output cap. One call and zero
+automatic retries remain fixed. The additional **100% app budget buffer** is
+for unknown tax and other billing differences; it is not a claim that the
+applicable tax rate is 100%, or a verified tax quote. Actual token count,
+provider invoice, tax, balance and ETA remain `UNKNOWN`. The optional
+provider `countTokens` request could give a model token count, but it needs
+authorized account API access and has not been called. Its price/billing
+treatment for this account has not been verified; do not assume it is free.
+An operator must verify model access and the applicable tax upper bound
+before enabling execution.
 
 The browser sends a server-issued quote ID, user maximum microUSD, call count,
 expiry, and explicit confirmation. It cannot submit a price or model. The

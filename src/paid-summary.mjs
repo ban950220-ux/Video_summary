@@ -1,7 +1,7 @@
 import {ProviderError} from './adapters.mjs';
 import {capacityIdentity} from './observed-capacity.mjs';
 import {completeSource,promptAudit,summaryInputAudit} from './groq-summary.mjs';
-import {PAID_SUMMARY_CATALOG,paidExecutionEnabled,fullSummaryRequest,validatePaidFullReport} from './paid-summary-contract.mjs';
+import {PAID_SUMMARY_CATALOG,paidExecutionEnabled,fullSummaryRequest,paidRequestCostPreview,validatePaidFullReport} from './paid-summary-contract.mjs';
 import {priceSummaryQuote,approvePaidSummaryBudget,reservePaidSummaryCall,markPaidSummaryUncertain,releaseUndispatchedPaidSummary,settlePaidSummary,cancelPaidSummaryBudget} from './paid-summary-budget.mjs';
 import {runPaidGeminiFullSummary} from './paid-summary-adapter.mjs';
 
@@ -13,7 +13,7 @@ const snapshot=(job,source)=>({raw:source.raw,segmentsJson:source.segments_json,
 async function scope(env,job,sourceOf){const complete=await completeSource(env,job,sourceOf),source=complete.source,sourceSnapshot=snapshot(job,source),request=fullSummaryRequest(source,promptAudit(job));return {source,sourceSnapshot,request,sourceSha256:await digest(sourceSnapshot),requestSha256:await digest(request.body)};}
 async function schema(env){const rows=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('yta_paid_summary_quotes','yta_paid_summary_approvals','yta_paid_summary_reservations')").all()).results||[];if(rows.length!==3)fail('PAID_SCHEMA_REQUIRED','유료 계약 migration이 아직 준비되지 않았습니다.');}
 async function quoteRow(env,id,quoteId){return env.DB.prepare("SELECT id,quote_json,quote_sha256,request_sha256,source_sha256,expires_at,state FROM yta_paid_summary_quotes WHERE id=? AND job_id=? AND owner_id='owner'").bind(quoteId,id).first();}
-async function catalogQuote(id,current,credentialGeneration,expiresAt){const c=PAID_SUMMARY_CATALOG;return priceSummaryQuote({jobId:id,sourceSha256:current.sourceSha256,requestSha256:current.requestSha256,model:c.model,priceVersion:c.priceVersion,priceSource:c.priceSource,inputTokensUpper:current.request.inputChargeCeiling,outputTokensUpper:current.request.outputChargeCeiling,plannedCalls:1,maxRetries:0,maxTaxBps:10000,priceInputMicroUsdPerMillion:c.inputPriceMicroUsdPerMillion,priceOutputMicroUsdPerMillion:c.outputPriceMicroUsdPerMillion,credentialGeneration,expiresAt});}
+async function catalogQuote(id,current,credentialGeneration,expiresAt){const c=PAID_SUMMARY_CATALOG;return priceSummaryQuote({jobId:id,sourceSha256:current.sourceSha256,requestSha256:current.requestSha256,model:c.model,priceVersion:c.priceVersion,priceSource:c.priceSource,inputTokensUpper:current.request.inputChargeCeiling,outputTokensUpper:current.request.outputChargeCeiling,plannedCalls:1,maxRetries:0,maxTaxBps:10000,priceInputMicroUsdPerMillion:c.inputPriceMicroUsdPerMillion,priceOutputMicroUsdPerMillion:c.outputPriceMicroUsdPerMillion,credentialGeneration,expiresAt,costEstimate:paidRequestCostPreview(current.request)});}
 async function issuedQuote(env,id,job,current){
  const storedKey=await env.DB.prepare("SELECT 1 AS ok FROM provider_credentials WHERE owner_id='owner' AND provider='gemini'").first();if(!storedKey)fail('PAID_CREDENTIAL_UNAVAILABLE');
  const key=await capacityIdentity(env,'gemini');
@@ -75,7 +75,7 @@ export async function handlePaidSummaryAction(request,env,{id,action,job,sourceO
   try{
    const beforeFetch=async()=>{await dispatchGuard(env,{id,approvalId,reservationId,current,quote});dispatchAdmitted=true;};
    const runner=env.PAID_SUMMARY_TEST_RUNNER??runPaidGeminiFullSummary;
-   result=await runner({env,body:current.request.body,beforeFetch});
+   result=await runner({env,body:current.request.body,quote,beforeFetch});
    if(!dispatchAdmitted)fail('PAID_ADAPTER_GUARD_MISSING');
    const report=validatePaidFullReport(result.text,current.source);
    const saved=await env.DB.prepare("UPDATE jobs SET report_json=?,audit_json=json_set(audit_json,'$.summaryProvider','gemini-paid','$.externalFactCheck','NOT_PERFORMED'),status='COMPLETE',updated_at=? WHERE id=? AND owner_id='owner' AND (report_json IS NULL OR report_json='null') AND json_remove(audit_json,'$.summaryProvider','$.externalFactCheck')=? AND EXISTS(SELECT 1 FROM yta_sources WHERE job_id=? AND raw=? AND segments_json=?) AND EXISTS(SELECT 1 FROM yta_paid_summary_reservations WHERE id=? AND state='RESERVED') AND NOT EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND state='DELETING')").bind(JSON.stringify(report),new Date().toISOString(),id,current.sourceSnapshot.auditJson,id,current.sourceSnapshot.raw,current.sourceSnapshot.segmentsJson,reservationId,id+':deleting').run();

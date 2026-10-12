@@ -24,7 +24,7 @@ test('stored transcript choice remains read-only and labels catalog price as an 
   assert.equal(response.status,200,JSON.stringify(choice));assert.equal(choice.transcription.remainingChunks,0);assert.equal(choice.summary.savedRawStages,0);
   assert.equal(choice.summary.requestedOutput,'FULL_VIDEO_SYNTHESIS');assert.equal(choice.summary.intermediateOutput,'RAW_CHECKPOINT_BUNDLE');
   assert.equal(choice.free.eta.status,'UNKNOWN');assert.equal(choice.free.automaticPaidFallback,false);
-  assert.equal(choice.paid.executionEnabled,false);assert.equal(choice.paid.quoteIssueReady,true);assert.equal(choice.paid.maxMicroUsd,720896);assert.equal(choice.paid.priceVersion,'google-gemini-standard-2026-10-12');assert.match(choice.paid.reason,/미검증/);assert.equal(choice.paid.eta.status,'UNKNOWN');assert.equal(writes,0);
+  assert.equal(choice.paid.executionEnabled,false);assert.equal(choice.paid.quoteIssueReady,true);assert.ok(choice.paid.maxMicroUsd<720896);assert.equal(choice.paid.inputTokensUpper,choice.paid.requestBytes*2+8192);assert.equal(choice.paid.outputTokensUpper,8192);assert.equal(choice.paid.costEstimate.inputTokenCountVerified,false);assert.ok(choice.paid.costEstimate.estimatedPreTaxHighMicroUsd<choice.paid.maxMicroUsd);assert.equal(choice.paid.priceVersion,'google-gemini-standard-2026-10-12');assert.match(choice.paid.reason,/미검증/);assert.equal(choice.paid.eta.status,'UNKNOWN');assert.equal(writes,0);
  }finally{f.db.close();}
 });
 
