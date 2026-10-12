@@ -15,7 +15,10 @@ const remote=()=>({
   {name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:'https://test.cloudflareaccess.com'},
   {name:'ACCESS_OWNER_EMAIL',type:'secret_text'},{name:'KEY_ENCRYPTION_KEY_B64',type:'secret_text'},
   {name:'ENABLE_LIVE_FREE',type:'plain_text',text:'true'},{name:'ALLOW_PAID_API',type:'plain_text',text:'false'},
-  {name:'SITE_DEPLOYED',type:'plain_text',text:'true'},{name:'ASSETS',type:'assets'},
+  {name:'SITE_DEPLOYED',type:'plain_text',text:'true'},
+  {name:'ENABLE_PAID_SUMMARY',type:'plain_text',text:'true'},{name:'PAID_SUMMARY_EXECUTION_APPROVED',type:'plain_text',text:'true'},
+  {name:'PAID_FIRST_GENERATION_TRIAL_ENABLED',type:'plain_text',text:'true'},{name:'PAID_FIRST_TRIAL_USD_COST_REVIEWED',type:'plain_text',text:'true'},
+  {name:'ASSETS',type:'assets'},
  ],
 });
 const transport=()=>Object.assign(Error('PRIVATE_TRANSPORT_DETAIL'),{retryableReadTransport:true});

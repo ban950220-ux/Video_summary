@@ -14,11 +14,15 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
   {name:'ENABLE_LIVE_FREE',type:'plain_text',text:'true'},
   {name:'ALLOW_PAID_API',type:'plain_text',text:'false'},
   {name:'SITE_DEPLOYED',type:'plain_text',text:'true'},
+  {name:'ENABLE_PAID_SUMMARY',type:'plain_text',text:'true'},
+  {name:'PAID_SUMMARY_EXECUTION_APPROVED',type:'plain_text',text:'true'},
+  {name:'PAID_FIRST_GENERATION_TRIAL_ENABLED',type:'plain_text',text:'true'},
+  {name:'PAID_FIRST_TRIAL_USD_COST_REVIEWED',type:'plain_text',text:'true'},
 ]});
 
 test('guard baseline pins the verified active Worker version and source commit',()=>{
-  assert.equal(approvedRemoteBaseline.activeVersionId,'a037172d-37e6-48ab-a7cb-54bdf4f4d538');
-  assert.equal(approvedRemoteBaseline.sourceCommit,'91c2aa919f2fccf9a5879aa0cb2aa77557d48cbb');
+  assert.equal(approvedRemoteBaseline.activeVersionId,'37ffbd37-a256-41a9-816a-e1967c03d68c');
+  assert.equal(approvedRemoteBaseline.sourceCommit,'415825bef1f152376c6e49ed01fffb3793f940a2');
   assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,true);
   const observed=remote();observed.bindings.push({name:'ASSETS',type:'assets'});
   assert.equal(assertRemoteState(observed,approvedRemoteBaseline),true);
@@ -35,6 +39,12 @@ test('offline remote policy requires exactly one ASSETS before and after later d
   after.bindings.find(item=>item.name==='ENABLE_LIVE_FREE').text='true';
   after.bindings.find(item=>item.name==='ALLOW_PAID_API').text='true';
   assert.throws(()=>assertRemoteState(after,baseline,{postDeploy:true}),/RUNTIME_FLAGS_MISMATCH/);
+  after.bindings.find(item=>item.name==='ALLOW_PAID_API').text='false';
+  for(const name of ['ENABLE_PAID_SUMMARY','PAID_SUMMARY_EXECUTION_APPROVED','PAID_FIRST_GENERATION_TRIAL_ENABLED','PAID_FIRST_TRIAL_USD_COST_REVIEWED']){
+    const state=structuredClone(after);state.bindings.find(item=>item.name===name).text='false';
+    assert.throws(()=>assertRemoteState(state,baseline),/RUNTIME_FLAGS_MISMATCH/);
+    assert.throws(()=>assertRemoteState(state,baseline,{postDeploy:true}),/RUNTIME_FLAGS_MISMATCH/);
+  }
   assert.equal(assertRemoteState(remote(),{...baseline,assetsPresent:false}),true);
   for(const mutate of [
     state=>{state.bindings.push({...state.bindings.at(-1)});},

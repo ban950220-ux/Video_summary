@@ -21,6 +21,10 @@ function fakeApi({status=200,observability=approvedRemoteBaseline.observability,
       {name:'ENABLE_LIVE_FREE',type:'plain_text',text:'true'},
       {name:'ALLOW_PAID_API',type:'plain_text',text:'false'},
       {name:'SITE_DEPLOYED',type:'plain_text',text:'true'},
+      {name:'ENABLE_PAID_SUMMARY',type:'plain_text',text:'true'},
+      {name:'PAID_SUMMARY_EXECUTION_APPROVED',type:'plain_text',text:'true'},
+      {name:'PAID_FIRST_GENERATION_TRIAL_ENABLED',type:'plain_text',text:'true'},
+      {name:'PAID_FIRST_TRIAL_USD_COST_REVIEWED',type:'plain_text',text:'true'},
       {name:'ASSETS',type:'assets'},
     ];
     else if(path.endsWith('/subdomain'))result={enabled:true,previews_enabled:false};
