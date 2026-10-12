@@ -9,7 +9,11 @@ export async function readRemoteState({token,fetcher=fetch}={}){
   async function read(path){
     let response;
     try{response=await fetcher(root+path,{method:'GET',headers:{Authorization:`Bearer ${token}`,Accept:'application/json'},signal:AbortSignal.timeout(10000)});}
-    catch{throw Error('Remote deployment guard: REMOTE_READ_FAILED');}
+    catch{
+      const error=Error('Remote deployment guard: REMOTE_READ_FAILED');
+      error.retryableReadTransport=true;
+      throw error;
+    }
     if(!response.ok)throw Error('Remote deployment guard: REMOTE_READ_FAILED');
     let body;
     try{body=await response.json();}catch{throw Error('Remote deployment guard: REMOTE_RESPONSE_INVALID');}

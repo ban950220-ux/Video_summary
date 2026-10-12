@@ -4,9 +4,8 @@ import {execFileSync} from 'node:child_process';
 import {assertProductionTarget} from './guard-production-target.mjs';
 import {assertProductionBranch} from './production-branch.mjs';
 import {assertRemoteDeploymentBaseline} from './read-remote-state.mjs';
-import {readRemoteState} from './read-remote-state.mjs';
-import {approvedRemoteBaseline,assertRemoteState} from './remote-state-policy.mjs';
-import {deploymentEnvironment,runWranglerSafely,assertDeployedVersion,safeDeploymentReceipt} from './deployment-runtime.mjs';
+import {deploymentEnvironment,runWranglerSafely} from './deployment-runtime.mjs';
+import {verifyPostDeploy} from './post-deploy-verification.mjs';
 
 const root=resolve(import.meta.dirname,'..');
 assertProductionTarget(readFileSync(resolve(root,'wrangler.toml'),'utf8'),process.env);
@@ -14,16 +13,10 @@ const branch=execFileSync('git',['branch','--show-current'],{cwd:root,encoding:'
 const head=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();
 assertProductionBranch(process.env,branch,head);
 if(!process.env.WORKERS_CI)throw Error('Production deploy requires guarded Workers Builds runtime.');
-const before=await assertRemoteDeploymentBaseline({token:process.env.CLOUDFLARE_API_TOKEN,ciMatchTag:process.env.WRANGLER_CI_MATCH_TAG});
+let before;
+try{before=await assertRemoteDeploymentBaseline({token:process.env.CLOUDFLARE_API_TOKEN,ciMatchTag:process.env.WRANGLER_CI_MATCH_TAG});}
+catch{throw Error('Production deploy: PRE_DEPLOY_BLOCKED: REMOTE_READ_OR_GUARD_FAILED; no upload attempted.');}
 const childEnvironment=deploymentEnvironment(process.env,before.workerTag);
 const wrangler=resolve(root,'node_modules/wrangler/bin/wrangler.js');
 const deployed=runWranglerSafely(process.execPath,wrangler,root,childEnvironment,head);
-let verified;
-for(let i=0;i<2;i++){
-  const after=await readRemoteState({token:process.env.CLOUDFLARE_API_TOKEN});
-  if(process.env.WRANGLER_CI_MATCH_TAG&&after.workerTag!==process.env.WRANGLER_CI_MATCH_TAG)throw Error('Production deploy: POST_DEPLOY_WORKER_TAG_MISMATCH');
-  assertDeployedVersion(after,deployed);
-  assertRemoteState(after,{...approvedRemoteBaseline,activeVersionId:deployed.versionId},{postDeploy:true});
-  verified=after;
-}
-console.log(safeDeploymentReceipt(verified,deployed));
+console.log(await verifyPostDeploy({token:process.env.CLOUDFLARE_API_TOKEN,ciMatchTag:process.env.WRANGLER_CI_MATCH_TAG,deployed}));

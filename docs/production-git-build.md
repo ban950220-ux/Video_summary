@@ -167,6 +167,27 @@ The review baseline identifies active version
 that version immediately before upload and update the baseline after success. See
 [the remote guard design](remote-deploy-guard-proposal.md).
 
+### Post-deploy read failure after the `91c2aa9` release
+
+Build `36beef3a-ed76-4aea-8002-e77f7854447c` passed its local tests, then
+reported `REMOTE_READ_FAILED` from the first post-deploy parallel GET. This
+failure has no HTTP status and does not establish that upload failed. Separate
+owner readback found active version `a037172d-37e6-48ab-a7cb-54bdf4f4d538`
+at 100% with `source-commit:91c2aa919f2fccf9a5879aa0cb2aa77557d48cbb`.
+The Build itself did not complete its required two postchecks, so its own
+result is unverified. The owner's UI and D1 checks are separate evidence, not
+a retroactive Build success receipt.
+
+The next review candidate retries only post-deploy GET transport failures,
+with at most three read attempts and 0.5/1-second backoff per required
+postcheck. It never re-runs Wrangler. HTTP errors, invalid responses, version
+or metadata mismatches fail immediately. If both postchecks cannot finish,
+the Build reports `DEPLOYED_UNVERIFIED` with a fixed stage code and suppresses
+raw API and Wrangler output. Before any later rollout, independently review
+the current version and exact metadata response, then update the stale pinned
+version and source in the guard. Do not infer the optional API field shapes
+from the dashboard UI.
+
 ### Baseline lifecycle
 
 For this first assets deployment, `assetsPresent=false` requires zero `ASSETS`
