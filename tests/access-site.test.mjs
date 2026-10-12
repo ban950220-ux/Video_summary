@@ -49,7 +49,7 @@ test('site API health protected and identifies MOCK_ONLY not production PASS',as
   const d=await r.json();assert.equal(d.mode,'MOCK_ONLY');assert.equal(d.realCalls,false);
 });
 test('Groq summary ledger status stays behind owner Access',async()=>{
- for(const action of ['groq-summary-status','groq-summary-failure-diagnostic']){
+ for(const action of ['groq-summary-status','groq-summary-failure-diagnostic','groq-summary-pilot']){
   const path='/api/jobs/11111111-1111-4111-8111-111111111111/'+action;
   assert.equal((await call(path,'invalid')).status,401);
   assert.equal((await call(path,jwt({email:'intruder@example.com'}))).status,401);

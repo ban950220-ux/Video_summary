@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {routeApi} from '../src/worker.mjs';
+import {promptAudit} from '../src/groq-summary.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 const statements=file=>readFileSync(new URL(file,import.meta.url),'utf8').split('\n').filter(line=>!line.trim().startsWith('--')).join('\n').split(';').map(sql=>sql.trim()).filter(Boolean);
@@ -65,5 +66,28 @@ test('first Groq summary admission executes every SQL binding against local Work
   await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'deletion',0,'DELETING',?)").bind(id+':deleting',id,new Date().toISOString()).run();
   const deleting=await routeApi(request(path+'/groq-summary-status'),statusEnv);
   assert.equal((await deleting.json()).error.code,'NOT_FOUND');
+ }finally{globalThis.fetch=oldFetch;await mf.dispose();}
+});
+
+test('pilot review, approval and single-call admission execute against Workerd D1',async()=>{
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'pilot-test',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'pilot-test-local'}}]}));
+ const oldFetch=globalThis.fetch;
+ try{
+  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
+  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600,title:'Pilot D1'}),env)).json(),id=created.job.id,path='/api/jobs/'+id,segments=[{id:1,startMs:0,endMs:300000,text:'원문 검증'},{id:2,startMs:300000,endMs:600000,text:'원문 검증'}],raw=segments.map(part=>part.text).join('\n');
+  const audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
+  await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(JSON.stringify(audit),id).run();await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString()).run();
+  const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([raw,segments,audit.audioFileSha256,promptAudit({audit,duration_seconds:600})]))),oldHash=Buffer.from(bytes).toString('hex'),oldId=id+':groq-summary:'+oldHash+':raw:0',oldResult=JSON.stringify({reviewResult:{partialText:JSON.stringify({summary:'잘못된 형식',chapters:[],claims:[],numbers:[],critical:[],conclusion:'원문'}),usage:{inputTokens:1258,outputTokens:962,reasoningTokens:74,totalTokens:2220}}});
+  await DB.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)').bind(id+':groq-summary:approval:0',id,'groq-summary',6600,'STOPPED',new Date().toISOString(),JSON.stringify({jobId:id,sequence:0,transcriptHash:oldHash})).run();
+  await DB.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,?,?,?,?,?,?)').bind(oldId,id,'groq-summary',6600,'FAILED_UNCERTAIN',new Date(Date.now()-120000).toISOString(),'SUMMARY_RESPONSE_INVALID',oldResult).run();
+  await DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2220,0,null,'TEST',new Date().toISOString()).run();
+  const url=path+'/groq-summary-pilot',p=await(await routeApi(request(url),env)).json(),body={evidenceHash:p.evidenceHash,oldOperationId:oldId,newOperationId:p.newOperationId,newTranscriptHash:p.newTranscriptHash,model:p.model,credentialGeneration:p.credentialGeneration};
+  const reviewed=await routeApi(request(url,'POST',{...body,step:'review',acknowledgeInferredFinishReason:true,acknowledgePreviousUsage:2220,acknowledgeDuplicateUsageRisk:true,acknowledgeChangedRange:true}),env);assert.equal(reviewed.status,200,await reviewed.clone().text());
+  const approved=await routeApi(request(url,'POST',{...body,step:'approve',freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,oneCallOnly:true,totalTokenUpperBound:6600}),env);assert.equal(approved.status,200,await approved.clone().text());
+  let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify({summary:[{text:'원문 검증',evidenceIds:[1]}],chapters:[{text:'원문',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'원문'})}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390}});};
+  const first=await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),env);assert.equal(first.status,202,await first.clone().text());
+  const replay=await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),env);assert.equal(replay.status,409);assert.equal(calls,1);
+  assert.deepEqual(await DB.prepare('SELECT state,result_json FROM yta_operations WHERE id=?').bind(oldId).first(),{state:'FAILED_UNCERTAIN',result_json:oldResult});
  }finally{globalThis.fetch=oldFetch;await mf.dispose();}
 });

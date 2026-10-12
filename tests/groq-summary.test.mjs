@@ -72,6 +72,51 @@ test('legacy failed raw response is diagnosed without disclosing text or changin
  }finally{f.db.close();}
 });
 
+test('reviewed pilot admits one strict-schema raw call and leaves legacy failure intact',async()=>{
+ const f=await fixture({large:true}),oldFetch=fetch;let calls=0;
+ try{
+  const stored=f.db.prepare('SELECT raw,segments_json FROM yta_sources WHERE job_id=?').get(f.id),job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(job.audit_json);
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([stored.raw,JSON.parse(stored.segments_json),audit.audioFileSha256,promptAudit({audit,duration_seconds:job.duration_seconds})]))),legacyHash=Buffer.from(digest).toString('hex');
+  const approvalId=f.id+':groq-summary:approval:0',oldId=f.id+':groq-summary:'+legacyHash+':raw:0',raw=JSON.stringify({...valid(1),summary:'PRIVATE_RESPONSE_CONTENT'}),usage={inputTokens:1258,outputTokens:962,reasoningTokens:74,totalTokens:2220};
+  f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)').run(approvalId,f.id,'groq-summary',6600,'STOPPED',new Date().toISOString(),JSON.stringify({...f.approval,sequence:0,transcriptHash:legacyHash}));
+  f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,?,?,?,?,?,?)').run(oldId,f.id,'groq-summary',6600,'FAILED_UNCERTAIN',new Date(Date.now()-120000).toISOString(),'SUMMARY_RESPONSE_INVALID',JSON.stringify({reviewResult:{partialText:raw,usage}}));
+  f.db.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),f.id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2220,0,null,'TEST',new Date().toISOString());
+  const before=f.db.prepare('SELECT * FROM yta_operations WHERE id=?').get(oldId),url=f.path+'/groq-summary-pilot';
+  const preview=await(await routeApi(request(url),f.env)).json();
+  assert.equal(preview.confirmedUsage.totalTokens,2220);assert.equal(preview.firstFailedCheck,'SCHEMA');assert.notEqual(preview.oldRange.lastId,preview.newRange.lastId);assert.equal(preview.newOneCallReservation,6600);assert.equal(preview.remainingAccountTokens,'UNKNOWN');assert.equal(preview.finishReasonEvidence,'CODE_PATH_INFERRED_NOT_SEPARATELY_STORED');assert.ok(!JSON.stringify(preview).includes('PRIVATE_RESPONSE_CONTENT'));
+  const body={evidenceHash:preview.evidenceHash,oldOperationId:oldId,newOperationId:preview.newOperationId,newTranscriptHash:preview.newTranscriptHash,model:preview.model,credentialGeneration:preview.credentialGeneration};
+  const denied=await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),f.env);assert.notEqual(denied.status,200);
+  const reviewed=await routeApi(request(url,'POST',{...body,step:'review',acknowledgeInferredFinishReason:true,acknowledgePreviousUsage:2220,acknowledgeDuplicateUsageRisk:true,acknowledgeChangedRange:true}),f.env);assert.equal(reviewed.status,200,JSON.stringify(await reviewed.clone().json()));
+  const approved=await routeApi(request(url,'POST',{...body,step:'approve',freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,oneCallOnly:true,totalTokenUpperBound:6600}),f.env);assert.equal(approved.status,200,JSON.stringify(await approved.clone().json()));
+  globalThis.fetch=async(_url,options)=>{calls++;assert.equal(JSON.parse(options.body).response_format.json_schema.strict,true);return response();};
+  const [a,b]=await Promise.all([routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),f.env),routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),f.env)]);
+  assert.equal([a.status,b.status].filter(code=>code===202).length,1,JSON.stringify([await a.clone().json(),await b.clone().json()]));assert.equal(calls,1);assert.deepEqual(f.db.prepare('SELECT * FROM yta_operations WHERE id=?').get(oldId),before);
+  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(preview.newOperationId).state,'DONE');
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM yta_operations WHERE provider='groq-summary' AND state='DONE'").get().count,1);
+  assert.equal((await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),f.env)).status,409);assert.equal(calls,1);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('pilot provider failure consumes the one call and cannot be retried',async()=>{
+ const f=await fixture(),oldFetch=fetch;let calls=0;
+ try{
+  const source=f.db.prepare('SELECT raw,segments_json FROM yta_sources WHERE job_id=?').get(f.id),job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(job.audit_json),oldHash=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([source.raw,JSON.parse(source.segments_json),audit.audioFileSha256,promptAudit({audit,duration_seconds:job.duration_seconds})])))).toString('hex'),oldId=f.id+':groq-summary:'+oldHash+':raw:0',usage={inputTokens:1258,outputTokens:962,reasoningTokens:74,totalTokens:2220};
+  f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)').run(f.id+':groq-summary:approval:0',f.id,'groq-summary',6600,'STOPPED',new Date().toISOString(),JSON.stringify({...f.approval,sequence:0,transcriptHash:oldHash}));
+  f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,?,?,?,?,?,?)').run(oldId,f.id,'groq-summary',6600,'FAILED_UNCERTAIN',new Date(Date.now()-120000).toISOString(),'SUMMARY_RESPONSE_INVALID',JSON.stringify({reviewResult:{partialText:JSON.stringify({...valid(1),summary:'bad shape'}),usage}}));
+  f.db.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),f.id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2220,0,null,'TEST',new Date().toISOString());
+  const url=f.path+'/groq-summary-pilot',p=await(await routeApi(request(url),f.env)).json(),body={evidenceHash:p.evidenceHash,oldOperationId:oldId,newOperationId:p.newOperationId,newTranscriptHash:p.newTranscriptHash,model:p.model,credentialGeneration:p.credentialGeneration};
+  assert.equal((await routeApi(request(url,'POST',{...body,step:'review',acknowledgeInferredFinishReason:true,acknowledgePreviousUsage:2220,acknowledgeDuplicateUsageRisk:true,acknowledgeChangedRange:true}),f.env)).status,200);
+  assert.equal((await routeApi(request(url,'POST',{...body,step:'approve',freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,oneCallOnly:true,totalTokenUpperBound:6600}),f.env)).status,200);
+  f.env.GROQ_API_KEY='ROTATED_OFFLINE_KEY';assert.equal((await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),f.env)).status,409);f.env.GROQ_API_KEY='NOT_REAL_TEST_KEY';
+  const originalAudit=f.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(f.id).audit_json;f.db.prepare("UPDATE jobs SET audit_json=json_set(audit_json,'$.audioBoundaryReview','CHANGED') WHERE id=?").run(f.id);assert.ok((await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),f.env)).status>=400);f.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(originalAudit,f.id);
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'deletion',0,'DELETING',?)").run(f.id+':deleting',f.id,new Date().toISOString());assert.equal((await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),f.env)).status,404);f.db.prepare('DELETE FROM yta_operations WHERE id=?').run(f.id+':deleting');
+  globalThis.fetch=async()=>{calls++;throw Error('offline simulated transport loss');};
+  assert.ok((await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),f.env)).status>=400);assert.equal(calls,1);
+  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(p.newOperationId).state,'FAILED_UNCERTAIN');
+  assert.equal((await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),f.env)).status,409);assert.equal(calls,1);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
 test('pre-schema approval cannot authorize a request under the new contract',async()=>{
  const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('no provider call');};
  try{
