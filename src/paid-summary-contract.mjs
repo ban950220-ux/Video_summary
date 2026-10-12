@@ -10,7 +10,9 @@ export const PAID_SUMMARY_OUTPUT_TOKENS=8192;
 export const PAID_SUMMARY_INPUT_OVERHEAD_BYTES=8192;
 export const PAID_SUMMARY_INPUT_BYTE_MULTIPLIER=2;
 export const paidExecutionEnabled=env=>env.ENABLE_PAID_SUMMARY==='true'&&env.PAID_SUMMARY_EXECUTION_APPROVED==='true'&&env.PAID_MODEL_ACCESS_VERIFIED==='true'&&env.PAID_TAX_MAX_BPS_VERIFIED==='true'&&env.ALLOW_PAID_API==='false';
-export const firstTrialExecutionEnabled=env=>env.ENABLE_PAID_SUMMARY==='true'&&env.PAID_SUMMARY_EXECUTION_APPROVED==='true'&&env.PAID_FIRST_GENERATION_TRIAL_ENABLED==='true'&&env.PAID_TAX_MAX_BPS_VERIFIED==='true'&&env.ALLOW_PAID_API==='false';
+// A scoped review of official USD text-model charges plus observed prepaid VAT,
+// not a statement that the invoice, KRW conversion or every future fee is known.
+export const firstTrialExecutionEnabled=env=>env.ENABLE_PAID_SUMMARY==='true'&&env.PAID_SUMMARY_EXECUTION_APPROVED==='true'&&env.PAID_FIRST_GENERATION_TRIAL_ENABLED==='true'&&env.PAID_FIRST_TRIAL_USD_COST_REVIEWED==='true'&&env.ALLOW_PAID_API==='false';
 export const paidExecutionAllowed=(env,firstTrial=false)=>firstTrial?firstTrialExecutionEnabled(env):paidExecutionEnabled(env);
 const encoder=new TextEncoder();
 const item={type:'object',properties:{text:{type:'string'},evidenceIds:{type:'array',items:{type:'integer'}}},required:['text','evidenceIds'],additionalProperties:false};

@@ -5,9 +5,13 @@ The paid path is disabled unless `ENABLE_PAID_SUMMARY`,
 `PAID_TAX_MAX_BPS_VERIFIED` are all `true`. `ALLOW_PAID_API` stays `false`
 so the existing Groq Free path remains usable.
 For the first generation only, `PAID_FIRST_GENERATION_TRIAL_ENABLED` replaces
-the prior-generation-success flag, while `PAID_TAX_MAX_BPS_VERIFIED` and the
-other budget and operator gates remain mandatory. No generation success is
-asserted before the first call. All new flags are absent from production vars.
+the prior-generation-success flag. Its separate
+`PAID_FIRST_TRIAL_USD_COST_REVIEWED` means only that this one Standard text
+request's official model-token ceiling plus the observed 10% prepaid VAT
+arithmetic is within the user's approved USD app reservation. It does not
+mean an invoice, KRW conversion, or every future fee is verified. The other
+operator and budget gates remain mandatory. No generation success is asserted
+before the first call. All new flags are absent from production vars.
 This review branch changes none of those production settings and does not apply
 `0008_paid_summary_budget.sql` to production. The 98-minute private transcript
 and the user's provider account were not read or called for this work.
@@ -91,16 +95,19 @@ account-specific billing treatment has not been established, so this
 contract does not send it or claim it is free.
 
 The distinct `FIRST_GENERATION_UNTESTED` approval displays and persists the
-owner-reported facts, official price, metadata `NOT_REQUESTED`, generation
-`UNTESTED`, and account-specific billing `UNVERIFIED`. Migration 0009 adds a
+owner-reported facts, official price, scoped USD cost review, metadata
+`NOT_REQUESTED`, generation `UNTESTED`, and actual invoice and KRW amount
+`UNVERIFIED`. Migration 0009 adds a
 single global trial row. It binds the exact job, source SHA-256, serialized
 request SHA-256, quote SHA-256, model, key generation, expiry, **one** call,
 and **720896 microUSD**. Approval first claims the singleton in
 `PENDING_APPROVAL`, preventing a concurrent second trial approval; only a
 matching saved budget approval advances it to `APPROVED`. A failed approval
 leaves a non-executable pending row for explicit reconciliation. The final
-guard consumes the approved row with a conditional D1
-update before the only fetch. It cannot be reissued or retried. A lost or
+guard consumes the approved row with a conditional D1 update that also
+rechecks the current owner, job, source, key, deletion marker, approval and
+reservation. It checks approval and trial expiry again when that write returns,
+before the only fetch. It cannot be reissued or retried. A lost or
 uncertain provider result leaves it consumed; readback must establish the
 outcome. This migration is not applied to production.
 
@@ -115,11 +122,13 @@ foreign-transaction fee on a new purchase has no intended trigger here;
 unexpected provider usage adjustments or a separate account-specific charge
 remain unverified. [KRW Cloud Billing conversion](https://docs.cloud.google.com/billing/docs/resources/currency)
 depends on account currency and the applicable monthly exchange rate. The
-$0.720896 USD app buffer exceeds the model-plus-10%-VAT arithmetic, but it is
-not a provider-enforced invoice cap or a guaranteed KRW amount. No new purchase
-or top-up is in scope. `PAID_TAX_MAX_BPS_VERIFIED` stays false until the
-account-specific charge bound is established, so a fresh app trial approval
-and its execution remain blocked.
+$0.720896 USD app buffer exceeds the model-plus-10%-VAT arithmetic by
+$0.3244032. This establishes the narrow one-request USD cost review; proving
+that every unknown future fee is absent is not required for that review. The
+app amount is not a provider-enforced invoice cap or a guaranteed KRW amount.
+No new purchase or top-up is in scope. The separate trial review flag remains
+unset in production; ordinary execution still uses its own
+`PAID_TAX_MAX_BPS_VERIFIED` gate.
 
 The browser sends a server-issued quote ID, user maximum microUSD, call count,
 expiry, and explicit confirmation. It cannot submit a price or model. The
