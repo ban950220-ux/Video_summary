@@ -121,11 +121,12 @@ That is historical. Read-only Build
 confirmed the omitted/null distinction and the former pinned version
 `1fcd78b0-363c-4cc1-8b7e-1a6571ef455e` from
 `fce76164541f2785a0e89953d92e58202aa97701`. The review branch now pins
-`caf22f64-997c-427c-8373-4f487bc4a5aa` from
-`c302e8599c4b98f0bd25ec89743f5ff1838273fd` and retains the same exact
+`a037172d-37e6-48ab-a7cb-54bdf4f4d538` from
+`91c2aa919f2fccf9a5879aa0cb2aa77557d48cbb` and retains the same exact
 metadata checks. `remoteSettingsReviewed=true` carries forward the earlier
-reviewed shape; it does not assert a fresh metadata review.
-runtime and Access checks, a fresh pre-deploy read, and separate rollout
+reviewed shape; it does not assert a fresh review of the current remote
+metadata. The next preflight must read and match every required field.
+The runtime and Access checks, a fresh pre-deploy read, and separate rollout
 authorization remain required. The Cloudflare Builds deploy command was
 restored to `npm run deploy:production` after the diagnostic. Do not trigger
 a new production build under that command as a diagnostic.
@@ -162,8 +163,8 @@ An empty/absent field shown by this command is evidence to review, not
 automatic approval. The exact observed production response shape was
 independently reconciled before the gate changed.
 
-The review baseline identifies active version
-`caf22f64-997c-427c-8373-4f487bc4a5aa`. A later deployment must recheck
+The review candidate identifies active version
+`a037172d-37e6-48ab-a7cb-54bdf4f4d538`. A later deployment must recheck
 that version immediately before upload and update the baseline after success. See
 [the remote guard design](remote-deploy-guard-proposal.md).
 
@@ -183,10 +184,10 @@ with at most three read attempts and 0.5/1-second backoff per required
 postcheck. It never re-runs Wrangler. HTTP errors, invalid responses, version
 or metadata mismatches fail immediately. If both postchecks cannot finish,
 the Build reports `DEPLOYED_UNVERIFIED` with a fixed stage code and suppresses
-raw API and Wrangler output. Before any later rollout, independently review
-the current version and exact metadata response, then update the stale pinned
-version and source in the guard. Do not infer the optional API field shapes
-from the dashboard UI.
+raw API and Wrangler output. This candidate now pins the owner's version and
+source readback. Before any later rollout, the fresh preflight must compare the
+current version and every exact metadata field against this baseline and block
+on a mismatch. Do not infer optional API field shapes from the dashboard UI.
 
 ### Baseline lifecycle
 
@@ -293,9 +294,10 @@ output into Git or chat because it can contain runtime variable values.
 
 Before a later production deployment, inspect the selected Worker, target URL,
 active version, DB binding, Access policy, and names (not values) of variables
-and secrets in Cloudflare. Record the currently active version; it was reported
-as `caf22f64-997c-427c-8373-4f487bc4a5aa` at 100% with source commit
-`c302e8599c4b98f0bd25ec89743f5ff1838273fd` in the latest owner review, but must be checked again immediately
+and secrets in Cloudflare. Record the currently active version; the owner
+reported `a037172d-37e6-48ab-a7cb-54bdf4f4d538` at 100% with source commit
+`91c2aa919f2fccf9a5879aa0cb2aa77557d48cbb`, but the guard must check it
+and the exact metadata again immediately
 before deploying. Run the build checks and Wrangler `--dry-run` first. If the
 existing token cannot deploy this Worker, stop and review its existing scope;
 do not switch to a broader token automatically. `npm run release:gate` still

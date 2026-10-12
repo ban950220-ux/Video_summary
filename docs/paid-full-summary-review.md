@@ -11,13 +11,35 @@ request's official model-token ceiling plus the observed 10% prepaid VAT
 arithmetic is within the user's approved USD app reservation. It does not
 mean an invoice, KRW conversion, or every future fee is verified. The other
 operator and budget gates remain mandatory. No generation success is asserted
-before the first call. All new flags are absent from production vars.
+before the first call. All new flags are omitted from the tracked Wrangler vars.
 This review branch changes none of those production settings and does not apply
-`0008_paid_summary_budget.sql` to production. The 98-minute private transcript
+`0008_paid_summary_budget.sql` or `0009_paid_first_trial.sql` to production. The 98-minute private transcript
 and the user's provider account were not read or called for this work.
 `npm run deploy:production` invokes only `wrangler deploy`; it does not apply
-the D1 migration. Production currently lacks the three paid-summary tables,
-so their application and schema readback require a separate authorized step.
+the D1 migrations. The prior review found the three paid-summary tables absent
+from production; their current state has not been freshly read back here.
+Applying 0008 and the new singleton trial table in 0009 and checking the schema
+require a separate authorized step.
+
+## Dormant rollout switches
+
+The first-generation trial requires the four runtime values below to equal
+the literal string `true`. They are absent from `wrangler.toml`; an absent
+runtime value fails closed, and this review does not set any of them. The
+current remote binding values were not read in this review:
+
+| Runtime value | First-trial meaning |
+| --- | --- |
+| `ENABLE_PAID_SUMMARY` | Open the paid-summary feature gate. |
+| `PAID_SUMMARY_EXECUTION_APPROVED` | Operator permits paid execution. |
+| `PAID_FIRST_GENERATION_TRIAL_ENABLED` | Use the separate, globally one-time `UNTESTED` trial contract. |
+| `PAID_FIRST_TRIAL_USD_COST_REVIEWED` | Review only this exact Standard text model's official maximum USD charge plus observed 10% prepaid VAT arithmetic against $0.720896. |
+
+`ALLOW_PAID_API` must remain the literal `false`. The ordinary paid path
+also requires `PAID_MODEL_ACCESS_VERIFIED=true` and
+`PAID_TAX_MAX_BPS_VERIFIED=true`; both are absent from tracked vars and this first-trial
+review does not claim either. The 0009 migration only adds
+`yta_paid_first_trial`; no migration runs during `npm run deploy:production`.
 
 ## Official catalog checked 2026-10-12
 

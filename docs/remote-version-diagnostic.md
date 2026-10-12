@@ -1,6 +1,6 @@
 # Read-only active version diagnostic
 
-The read-only preflight has an opt-in active-version diagnostic. The review branch pins Worker version `caf22f64-997c-427c-8373-4f487bc4a5aa` and source `c302e8599c4b98f0bd25ec89743f5ff1838273fd` from the latest owner review. `remoteSettingsReviewed=true` carries forward the separately reviewed metadata shape from read-only Build `1323e142-ee46-47d2-b541-df604c1a7a50`; it is not a new metadata review.
+The read-only preflight has an opt-in active-version diagnostic. This review candidate pins Worker version `a037172d-37e6-48ab-a7cb-54bdf4f4d538` and source `91c2aa919f2fccf9a5879aa0cb2aa77557d48cbb` from the owner's separate version/source readback. `remoteSettingsReviewed=true` carries forward the separately reviewed metadata shape from read-only Build `1323e142-ee46-47d2-b541-df604c1a7a50`; it is not a new review of all current remote metadata. A fresh preflight must compare the actual metadata and fail on any mismatch.
 
 In an authorized Workers Builds context with the existing read-only Build token, run:
 
