@@ -116,6 +116,11 @@ Read-only Build `e9c72f29-3051-4685-a16c-c5b2fdf2381e` at source
 After independent review of that response, `remoteSettingsReviewed=true` was
 set without changing any expected field or the active version. A post-deploy API
 shape change fails the postcheck rather than being silently accepted.
+That is historical. The current pinned version is
+`1fcd78b0-363c-4cc1-8b7e-1a6571ef455e` from
+`fce76164541f2785a0e89953d92e58202aa97701`, and
+`remoteSettingsReviewed=false` remains the deployment gate while the newer
+preflight's omitted/null/invalid metadata is reviewed.
 Pinned Wrangler 4.149.0 normalizes an omitted `compatibility_flags` config
 entry to `[]` in its upload metadata. It is not yet known whether Cloudflare
 will return the newly uploaded version's flags as omitted or as `[]`. If the
@@ -258,7 +263,8 @@ output into Git or chat because it can contain runtime variable values.
 Before a later production deployment, inspect the selected Worker, target URL,
 active version, DB binding, Access policy, and names (not values) of variables
 and secrets in Cloudflare. Record the currently active version; it was reported
-as `a33b9720` during this preparation, but must be checked again immediately
+as `1fcd78b0-363c-4cc1-8b7e-1a6571ef455e` at 100% with source commit
+`fce76164541f2785a0e89953d92e58202aa97701` in the latest owner review, but must be checked again immediately
 before deploying. Run the build checks and Wrangler `--dry-run` first. If the
 existing token cannot deploy this Worker, stop and review its existing scope;
 do not switch to a broader token automatically. `npm run release:gate` still

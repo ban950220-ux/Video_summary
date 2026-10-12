@@ -31,7 +31,7 @@ test('preflight emits only approved booleans, rates, presence and counts',()=>{
  assert.equal(report.target.accessVarsValid,false);
  assert.equal(report.scriptSettings.logpushMatchesProposed,true);
  assert.equal(report.scriptSettings.tailConsumersMatchProposed,false);
- assert.equal(report.reviewGateEnabled,true);
+ assert.equal(report.reviewGateEnabled,false);
  assert.equal(report.diagnosticReadSucceeded,true);
  assert.equal(report.matchesProposedBaseline,false);
  assert.equal(report.mismatchCode,'ROUTES_MISMATCH');
@@ -64,7 +64,7 @@ test('diagnostic ignores object key order and reports complete, unique bindings 
  assert.equal(report.metadata.optionalFieldsMatchProposed,true);
  assert.equal(report.scriptSettings.observabilityMatchesProposed,true);
  assert.equal(report.matchesProposedBaseline,true);
- assert.equal(report.reviewGateEnabled,true);
+ assert.equal(report.reviewGateEnabled,false);
  for(const mutate of [
   x=>x.bindings.push({...x.bindings[1]}),
   x=>x.bindings.splice(1,1),

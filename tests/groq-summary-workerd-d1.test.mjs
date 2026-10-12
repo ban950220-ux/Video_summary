@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {routeApi} from '../src/worker.mjs';
 import {promptAudit} from '../src/groq-summary.mjs';
+import {encryptProviderKey} from '../src/vault.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 const statements=file=>readFileSync(new URL(file,import.meta.url),'utf8').split('\n').filter(line=>!line.trim().startsWith('--')).join('\n').split(';').map(sql=>sql.trim()).filter(Boolean);
@@ -90,4 +91,38 @@ test('pilot review, approval and single-call admission execute against Workerd D
   const replay=await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),env);assert.equal(replay.status,409);assert.equal(calls,1);
   assert.deepEqual(await DB.prepare('SELECT state,result_json FROM yta_operations WHERE id=?').bind(oldId).first(),{state:'FAILED_UNCERTAIN',result_json:oldResult});
  }finally{globalThis.fetch=oldFetch;await mf.dispose();}
+});
+
+test('pilot final D1 guard blocks concurrent key, deletion, audit and approval changes before provider fetch',async()=>{
+ for(const change of ['key','deletion','audit','approval']){
+  const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'pilot-race-'+change,modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'pilot-race-'+change}}]})),oldFetch=globalThis.fetch;
+  try{
+   const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+   const root=Buffer.alloc(32,7),encrypted=await encryptProviderKey(root,'groq','OFFLINE_STORED_TEST_KEY');
+   await DB.prepare('INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES(?,?,?,?,?,?)').bind('owner','groq',encrypted.version,encrypted.ivB64,encrypted.ciphertextB64,new Date().toISOString()).run();
+   const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',KEY_ENCRYPTION_KEY_B64:root.toString('base64')};
+   const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600,title:'Pilot race'}),env)).json(),id=created.job.id,path='/api/jobs/'+id,segments=[{id:1,startMs:0,endMs:300000,text:'원문 검증'},{id:2,startMs:300000,endMs:600000,text:'원문 검증'}],raw=segments.map(part=>part.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
+   await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(JSON.stringify(audit),id).run();await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString()).run();
+   const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([raw,segments,audit.audioFileSha256,promptAudit({audit,duration_seconds:600})]))),oldHash=Buffer.from(digest).toString('hex'),oldId=id+':groq-summary:'+oldHash+':raw:0',oldResult=JSON.stringify({reviewResult:{partialText:JSON.stringify({summary:'잘못된 형식',chapters:[],claims:[],numbers:[],critical:[],conclusion:'원문'}),usage:{inputTokens:1258,outputTokens:962,reasoningTokens:74,totalTokens:2220}}});
+   await DB.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)').bind(id+':groq-summary:approval:0',id,'groq-summary',6600,'STOPPED',new Date().toISOString(),JSON.stringify({jobId:id,sequence:0,transcriptHash:oldHash})).run();
+   await DB.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,?,?,?,?,?,?)').bind(oldId,id,'groq-summary',6600,'FAILED_UNCERTAIN',new Date(Date.now()-120000).toISOString(),'SUMMARY_RESPONSE_INVALID',oldResult).run();
+   await DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2220,0,null,'TEST',new Date().toISOString()).run();
+   const url=path+'/groq-summary-pilot',p=await(await routeApi(request(url),env)).json(),body={evidenceHash:p.evidenceHash,oldOperationId:oldId,newOperationId:p.newOperationId,newTranscriptHash:p.newTranscriptHash,model:p.model,credentialGeneration:p.credentialGeneration};
+   assert.equal((await routeApi(request(url,'POST',{...body,step:'review',acknowledgeInferredFinishReason:true,acknowledgePreviousUsage:2220,acknowledgeDuplicateUsageRisk:true,acknowledgeChangedRange:true}),env)).status,200,change);
+   assert.equal((await routeApi(request(url,'POST',{...body,step:'approve',freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,oneCallOnly:true,totalTokenUpperBound:6600}),env)).status,200,change);
+   const mutate=async()=>{
+    if(change==='key')await DB.prepare('UPDATE provider_credentials SET updated_at=?,ciphertext_b64=? WHERE owner_id=? AND provider=?').bind(new Date(Date.now()+1000).toISOString(),'ROTATED_CIPHERTEXT','owner','groq').run();
+    if(change==='deletion')await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'deletion',0,'DELETING',?)").bind(id+':deleting',id,new Date().toISOString()).run();
+    if(change==='audit')await DB.prepare("UPDATE jobs SET audit_json=json_set(audit_json,'$.audioBoundaryReview','CHANGED') WHERE id=?").bind(id).run();
+    if(change==='approval')await DB.prepare("UPDATE yta_operations SET state='STOPPED' WHERE id=?").bind(id+':groq-summary-pilot:approval:'+oldHash).run();
+   };
+   let injected=false,calls=0;
+   env.DB={prepare(sql){const stmt=DB.prepare(sql);if(sql.startsWith('SELECT 1 AS ok FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=?'))return {bind(...args){const bound=stmt.bind(...args);return {async first(){if(!injected){injected=true;await mutate();}return bound.first();}}}};return stmt;}};
+   globalThis.fetch=async()=>{calls++;throw Error('provider must not be reached');};
+   const reply=await routeApi(request(url,'POST',{...body,step:'execute',executeOnce:true}),env);
+   assert.equal(injected,true,change);assert.equal(calls,0,change);assert.notEqual(reply.status,202,change);
+   assert.equal((await DB.prepare('SELECT state FROM yta_operations WHERE id=?').bind(p.newOperationId).first()).state,'BLOCKED',change);
+   assert.deepEqual(await DB.prepare('SELECT state,result_json FROM yta_operations WHERE id=?').bind(oldId).first(),{state:'FAILED_UNCERTAIN',result_json:oldResult},change);
+  }finally{globalThis.fetch=oldFetch;await mf.dispose();}
+ }
 });

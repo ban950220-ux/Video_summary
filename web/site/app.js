@@ -300,20 +300,28 @@ function showGroqSummaryChoice(job,target,requestId){
 }
 function showGroqPilotChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),url='/api/jobs/'+job.id+'/groq-summary-pilot',host=el('div');target.append(host);
+ let phase='idle',pollTimer=null,last=null;
+ const label=()=>({idle:'검토 전',reviewed:'검토 기록 저장 · 승인 대기',approved:'1회 승인 저장 · 별도 실행 대기',sending:'전송 중 · 원장 접수 확인 중',claimed:'서버 원장 접수 · 결과 대기',saved:'첫 구간 결과 저장 · 1회 종료',uncertain:'응답 불명 · 재전송 금지',blocked:'1회 종료 · 저장 상태 검토 필요'})[phase];
+ const status=el('p',{attrs:{role:'status','aria-live':'polite'}});host.append(status);
+ const refresh=async()=>{try{await render();}catch(error){if(current()){status.textContent='상태 조회 불가 · 재전송 금지';toast(safeError(error));}}};
  const render=async()=>{
-  const p=await api(url);if(!current())return;empty(host);
+  const p=await api(url);if(!current())return;last=p;empty(host);
+  if(p.attemptState==='CLAIMED')phase='claimed';else if(p.attemptState==='DONE')phase='saved';else if(p.attemptState)phase='blocked';else if(['idle','reviewed','approved'].includes(phase))phase=p.approved?'approved':p.reviewed?'reviewed':'idle';
+  status.textContent=label();host.append(status);
   const range=r=>`원문 ${r.firstId}–${r.lastId} · ${(r.startMs/1000).toFixed(3)}–${(r.endMs/1000).toFixed(3)}초`;
   host.append(el('p',{text:`기존 실패 ${p.oldOperationId} · 응답 SHA-256 ${p.oldResponseSha256} · 진단 ${p.firstFailedCheck}/${p.summaryType}. 완료된 응답이라는 근거는 코드 경로의 추론이며 finish_reason 자체는 별도 저장되지 않았습니다.`}),el('p',{text:`기존 사용량 ${p.confirmedUsage.totalTokens}토큰 (입력 ${p.confirmedUsage.inputTokens}, 출력 ${p.confirmedUsage.outputTokens}, 추론 ${p.confirmedUsage.reasoningTokens}) · 기존 범위 ${range(p.oldRange)}`}),el('p',{text:`새 strict JSON 계약 ${p.newTranscriptHash} · 새 범위 ${range(p.newRange)} · ${p.model} · 1회 예약 상한 ${p.newOneCallReservation}토큰 (입력 ${p.newMaxInputTokens}, 출력 ${p.newMaxCompletionTokens}). Groq Free 계정 잔여량 UNKNOWN. 이전 호출과 중복 사용이 발생할 수 있습니다.`}));
-  if(p.attemptState){host.append(el('p',{text:`새 호출 상태 ${p.attemptState}. 후속 단계는 자동 실행되지 않습니다. 이력을 검토하세요.`}));return;}
+  const readButton=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});readButton.onclick=refresh;
+  if(p.attemptState||['sending','claimed','uncertain','saved','blocked'].includes(phase)){host.append(el('p',{text:`새 호출 상태 ${p.attemptState??'UNKNOWN'}. 후속 단계는 자동 실행되지 않습니다. 이력을 검토하세요.`}),readButton);return;}
   const body={evidenceHash:p.evidenceHash,oldOperationId:p.oldOperationId,newOperationId:p.newOperationId,newTranscriptHash:p.newTranscriptHash,model:p.model,credentialGeneration:p.credentialGeneration};
-  const action=(label,step,extra)=>{const button=el('button',{className:'btn secondary small',text:label});button.onclick=async()=>{button.disabled=true;try{await api(url,{method:'POST',body:{...body,step,...extra}});if(current())await render();}catch(error){toast(safeError(error));button.disabled=false;}};host.append(button);};
+  const action=(title,step,extra)=>{const button=el('button',{className:'btn secondary small',text:title});button.onclick=async()=>{button.disabled=true;if(step==='execute'){phase='sending';status.textContent=label();pollTimer=setInterval(()=>refresh(),1500);}try{await api(url,{method:'POST',body:{...body,step,...extra}});if(current()){if(step==='execute')phase='saved';await render();}}catch(error){toast(safeError(error));if(step==='execute'){phase='uncertain';status.textContent=label();if(current())await refresh();}else button.disabled=false;}finally{if(step==='execute'){clearInterval(pollTimer);pollTimer=null;}}};host.append(button);};
   if(!p.reviewed){action('이전 응답·사용량과 새 구간 검토 기록','review',{acknowledgeInferredFinishReason:true,acknowledgePreviousUsage:p.confirmedUsage.totalTokens,acknowledgeDuplicateUsageRisk:true,acknowledgeChangedRange:true});return;}
   host.append(el('p',{text:'검토 기록 저장됨. 다음 승인은 Groq Free·결제 비활성·잔여량 UNKNOWN·유료/Gemini 전환 없음·정확히 1회 호출을 확인한 뒤 기록합니다.'}));
+  if(!p.approved&&p.approvalExpiresAt){host.append(el('p',{text:'1회 복구 승인이 만료되거나 중단됐습니다. 이 승인으로는 실행할 수 없으며 새 승인을 자동 생성하지 않습니다. 이력을 검토하세요.'}),readButton);return;}
   if(!p.approved){const form=el('form',{className:'fields'}),checks=['현재 키의 Groq Free 계정과 결제 비활성을 확인했습니다.','계정 잔여량 UNKNOWN 및 중복 사용 위험을 이해합니다.','유료 또는 Gemini 전환 없이 새 첫 구간만 1회 요청합니다.'].map(label=>{const input=el('input',{attrs:{type:'checkbox',required:'true'}}),row=el('label',{text:label});row.prepend(input);form.append(row);return input;});const button=el('button',{className:'btn secondary small',text:'1회 복구 승인 기록'});form.append(button);form.onsubmit=async event=>{event.preventDefault();button.disabled=true;try{await api(url,{method:'POST',body:{...body,step:'approve',freeTierConfirmed:checks[0].checked,billingDisabled:checks[0].checked,unknownBalanceAcknowledged:checks[1].checked,noPaidFallback:checks[2].checked,noGeminiFallback:checks[2].checked,oneCallOnly:checks[2].checked,totalTokenUpperBound:p.newOneCallReservation}});if(current())await render();}catch(error){toast(safeError(error));button.disabled=false;}};host.append(form);return;}
   host.append(el('p',{text:`승인 만료 ${fmtRetryDate(p.approvalExpiresAt)}. 실행을 누르면 새 첫 구간 1회만 보냅니다. 응답을 못 받더라도 자동 재시도하지 않습니다.`}));
   action('승인된 첫 구간 1회 실행','execute',{executeOnce:true});
  };
- render().catch(error=>{if(current())host.append(el('p',{text:safeError(error)}));});
+ render().catch(error=>{if(current())status.textContent=safeError(error);});
 }
 function showUnknownGroqProbeChoice(job,chunk,target,requestId){
  const button=el('button',{className:'btn secondary small',text:'조각 '+(chunk.index+1)+' 무료 1회 탐침 검토'});

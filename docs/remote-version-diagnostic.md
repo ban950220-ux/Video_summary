@@ -1,6 +1,6 @@
 # Read-only active version diagnostic
 
-This branch adds one opt-in field to the existing remote baseline preflight report. It does not change Worker runtime code, the remote baseline, deployment commands, or `remoteSettingsReviewed`.
+The read-only preflight has an opt-in active-version diagnostic. The current review branch pins the separately confirmed Worker version and source SHA in the offline baseline while keeping `remoteSettingsReviewed=false`; this diagnostic does not change the Cloudflare Builds command or deploy a Worker.
 
 In an authorized Workers Builds context with the existing read-only Build token, run:
 

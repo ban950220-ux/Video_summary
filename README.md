@@ -20,7 +20,7 @@ Worker and its existing D1 database. See [the Git Build handoff](docs/production
 for the guarded production command and required Cloudflare settings. This branch
 does not deploy. The CI release gate remains blocked pending remote evidence.
 
-Remote v0.7 acceptance and a verified summary for 2hUkTmwYm3A remain NOT_RUN. [Full-video acceptance](docs/example-2hUkTmwYm3A-acceptance.md) requires all audio chunks, reviewed transcript, sourced summary, and production reopen/export. No unverified capability is marked PASS. The example's provided full MP3 was only locally sliced and inspected, not transcribed by a real API.
+For 2hUkTmwYm3A, the existing production job has completed 20/20 real transcription chunks. Its 1,226 timed segments and combined TXT were saved to D1 and read back. The first Groq summary call returned a schema-invalid response and remains `FAILED_UNCERTAIN`; the final summary and end-to-end login/reopen/export acceptance are pending. Continue from the preserved D1 source rather than repeating MP3 upload or transcription. See [full-video acceptance](docs/example-2hUkTmwYm3A-acceptance.md).
 
 ## Current limitations
 

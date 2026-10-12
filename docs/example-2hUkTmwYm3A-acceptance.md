@@ -1,62 +1,69 @@
-# Full-video acceptance plan: 2hUkTmwYm3A
+# Full-video acceptance: 2hUkTmwYm3A
 
-The acceptance target is the complete user-supplied video, approximately
-98m12.864s, not a 30-minute transcript or the 2% fixture. The owned full MP3
-was previously inspected locally: 56,076,980 bytes, MP3 frame duration
-5892.888s, 20 planned chunks, and 5949.672s of uploads including overlap.
-These numbers prove slicing only. No real provider call or full summary has
-been completed.
+## Confirmed production state (2026-10-12 handoff)
 
-1. After separate rollout approval, confirm the protected `holy-rice-b914`
-   production version, owner-only Cloudflare Access, existing `DB` binding,
-   runtime variable/Secret **names**, and `ALLOW_PAID_API=false`. Keep
-   `ENABLE_LIVE_FREE=false` until the specific free-only execution is approved.
-   Do not publish credential values.
-2. Transfer the already owned full MP3 from Library in the authorized workflow.
-   Record its SHA-256 and byte size, then check the same file hash on resume;
-   inspect its duration, every MP3 frame,
-   20 chunk boundaries, <=8 MB per chunk, and overlap before any upload. The
-   scanner now rejects a large unparsed tail. Use the full file and the same
-   analysis ID when resuming; a short fixture is not acceptable evidence.
-3. In the provider consoles, check that Groq and Gemini billing and automatic
-   recharge are disabled, the account is free-only, and the *current* remaining
-   allowance and request count cover the proposed calls. The app's grant is an
-   owner attestation, not an independent provider balance check. For the known
-   MP3, Groq requires 20 requests and at most about 5,970 reserved audio seconds
-   after per-chunk rounding; confirm the exact plan before setting a grant.
-   Grants expire after one hour. If no safe verified allowance is available,
-   stop before calling a provider. Do not enable paid API calls.
-4. Create one audio job, save its full 20-chunk plan, and upload each chunk once.
-   `audio-progress` shows `DONE` chunks; the browser skips those on resume.
-   A blocked quota reservation can resume after a fresh verified grant without
-   repeating completed calls. A timeout or uncertain provider outcome is
-   deliberately not retried: inspect provider usage and the operation record
-   before choosing a new job. Only run `audio-finish` when all 20 are `DONE`.
-5. Review the saved source, its first and last timestamps, gap warnings, and
-   transitions at all chunk boundaries. All planned chunks processed does not
-   prove every spoken word was captured. Listen to suspicious or silent spans;
-   mark the transcript incomplete if the content is missing.
-6. Call `summary-plan` for the *full* stored source. It reports the number of
-   raw groups and first-pass conservative Gemini units without sending content.
-   The later synthesis cost is unknown until intermediate reports exist. Each
-   request is capped below the 250,000-unit app grant. If the first pass exceeds
-   one grant, explicitly approve staged processing and refresh a verified
-   free-only grant as needed. Each stage has a durable operation ID, so a
-   completed stage is reused after interruption. Invalid or uncertain results
-   are not automatically called again. No input segment is silently dropped.
-7. Require a final coherent Korean report with a chapter and original segment
-   evidence from every raw group. Review the meaning of citations, coverage
-   across the whole 98-minute timeline, numerical claims, speaker uncertainty,
-   and any gap or partial markers. Existence of an evidence ID is not factual
-   verification. Reject a report that treats partial transcription as full.
-8. Confirm the same report and full source can be reopened after a fresh login
-   and page reload, searched by video ID/title, and exported. Verify the D1
-   job/source records and operation ledger show one successful provider call
-   per completed chunk/stage, with no automatic replay. Only then report the
-   actual example as accepted; local test/CI success is not this acceptance.
+The user-supplied 98m12.864s MP3 has SHA-256
+`DDCA27C16C14F8D9AE48CBFBDC5FB09B93779E2DDBA4BAC184907C612A15CAB7`
+and 56,076,980 bytes. The existing owner job
+`a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9` has completed all 20 of 20
+transcription chunks. Its 1,226 timed segments and combined TXT were saved to
+D1 and read back. This status comes from the verified production handoff; the
+current code checkout does not contain the private MP3 or D1 transcript.
+Re-uploading the MP3 or repeating transcription is not a prerequisite for
+the remaining summary work.
 
-Current blockers: rollout has not been approved or performed, the full MP3 has
-not been transferred into this environment, provider free-plan status and
-remaining quotas are not independently verified, and the 98-minute transcript
-and final report have not been generated or inspected. Hosted Worker resource
-limits and production persistence still need the above live acceptance.
+The first Groq summary request was sent once. Its `raw:0` operation is
+`FAILED_UNCERTAIN` with `SUMMARY_RESPONSE_INVALID`. The saved response is
+valid JSON whose top-level `summary` is a string where an evidence-linked
+array was required. The recorded usage is 2,220 tokens (1,258 input, 962
+output, including 74 reasoning). The previous approval is stopped. A separate
+`finish_reason` receipt was not saved; completion of the response envelope is
+inferred from the adapter path and requires human review. No final summary is
+saved, and production login/reopen of a completed summary and TXT export have
+not been accepted as a complete end-to-end result.
+
+## Remaining acceptance
+
+1. Complete the independent code and remote baseline review. Confirm the
+   owner-only Access policy, existing D1 binding, free-only settings, secret
+   names, and the exact production Worker version. Keep the Cloudflare Builds
+   deploy command on its read-only preflight setting until the rollout sequence
+   is approved. Do not copy credential values.
+2. Use the existing job's preserved D1 transcript and failed response. Inspect
+   the old response hash and 2,220-token usage, the old and new `raw:0` segment
+   ID/time ranges, and the strict schema diagnostic. Record human review,
+   then separately approve at most one new Groq Free call with a 4,800-token
+   input bound, 1,800-token completion cap and 6,600-token reservation.
+   Account free balance remains `UNKNOWN`; confirm billing is disabled and
+   there is no paid or Gemini fallback. Do not treat the old approval as new
+   authorization.
+3. Run the new first stage only after the reviewed rollout. A timeout,
+   unknown result or invalid response leaves a durable lock and must not be
+   automatically retried. A successful first stage must not start another
+   stage automatically. Review each later window and free capacity before any
+   further calls.
+4. Require a coherent Korean report with chapter and original segment evidence
+   covering the full 98-minute timeline. Check numerical claims, speaker
+   uncertainty, gaps and partial markers against the preserved source.
+   Evidence ID validation alone does not prove factual accuracy.
+5. Verify the final report and full source after a fresh owner login and page
+   reload, search by video ID/title, export TXT, and read back the corresponding
+   D1 job, source and operation ledger. Only then mark the video end-to-end
+   summary accepted. Retain the PC and Library originals; temporary service
+   audio/result cleanup needs its separate explicit confirmation.
+
+Code and mocked Chromium/SQLite/Workerd tests are development evidence, not
+proof that the remaining real summary, deployment and login/export steps
+succeeded.
+
+## Review-branch verification (mock only)
+
+On 2026-10-12, `npm run check` and all 244 local tests passed. Workerd D1
+tests injected stored Groq key rotation, a deletion marker, an audit change,
+and pilot approval cancellation immediately before the final single-statement
+dispatch guard; each blocked the provider mock with zero calls and kept the
+old failed operation intact. Local Chromium exercised separate review,
+approval and one-call execution; slow responses, double clicks, tab changes,
+reopening, lost POST responses, and a successful POST followed by failed GET
+all produced zero automatic follow-up calls. The expired approval UI offered
+status review rather than a new approval. These tests did not call production.
