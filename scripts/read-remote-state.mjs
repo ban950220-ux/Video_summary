@@ -1,4 +1,5 @@
 import {approvedRemoteBaseline,assertRemoteState} from './remote-state-policy.mjs';
+import {readWorkerVersionLineage} from './worker-version-lineage-diagnostic.mjs';
 
 const accountId='fe9d7e2a164274b1ff6cef150a75cb0b';
 const workerName='holy-rice-b914';
@@ -57,8 +58,13 @@ export async function assertRemoteDeploymentBaseline(options){
   let state;
   for(let i=0;i<2;i++){
     state=await readRemoteState(options);
-    assertRemoteState(state,baseline);
     if(options.ciMatchTag!==undefined&&state.workerTag!==options.ciMatchTag)throw Error('Remote deployment guard: WORKER_TAG_MISMATCH');
+    try{assertRemoteState(state,baseline);}
+    catch(error){
+      if(error?.message!=='Remote deployment guard: SOURCE_COMMIT_MISMATCH')throw error;
+      const evidence=await readWorkerVersionLineage({token:options.token,fetcher:options.fetcher});
+      assertRemoteState(state,baseline,{preDeployLineage:evidence});
+    }
   }
   return state;
 }

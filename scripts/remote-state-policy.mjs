@@ -54,8 +54,14 @@ export const approvedRemoteBaseline={
   scriptSettings:{logpush:false,tail_consumers:null,observability:baselineObservability},
   observability:baselineObservability,
 };
+export const approvedPreDeployLineage={
+ activeVersionId:'37ffbd37-a256-41a9-816a-e1967c03d68c',
+ priorVersionId:'bf955e63-0b85-4535-ad39-2858742f89e4',
+ sourceCommit:'415825bef1f152376c6e49ed01fffb3793f940a2',
+ scriptEtag:'eb6b6cbff792f3149a6f3795e54a9d717fd03b893a2ff57f906d3221f5c5262f',
+};
 
-export function assertRemoteState(remote,baseline,{postDeploy=false}={}){
+export function assertRemoteState(remote,baseline,{postDeploy=false,preDeployLineage=null}={}){
   if(baseline?.remoteSettingsReviewed!==true)fail('REMOTE_SETTINGS_BASELINE_UNVERIFIED');
   if(typeof baseline.assetsPresent!=='boolean')fail('BINDINGS_BASELINE_INVALID');
   if(!remote||!baseline||!Array.isArray(remote.routes)||!Array.isArray(remote.domains)||!Array.isArray(baseline.routes)||!Array.isArray(baseline.domains)||typeof remote.compatibilityFlagsPresent!=='boolean'||typeof baseline.compatibilityFlagsPresent!=='boolean'||(remote.compatibilityFlagsPresent&&!Array.isArray(remote.compatibilityFlags))||(baseline.compatibilityFlagsPresent&&!Array.isArray(baseline.compatibilityFlags)))fail('METADATA_INCOMPLETE');
@@ -83,6 +89,11 @@ export function assertRemoteState(remote,baseline,{postDeploy=false}={}){
     if(bindings.get(name)?.text!==value)fail('RUNTIME_FLAGS_MISMATCH');
   }
   if(typeof bindings.get('ACCESS_AUD')?.text!=='string'||bindings.get('ACCESS_AUD').text.length<12||!/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(bindings.get('ACCESS_TEAM_DOMAIN')?.text??''))fail('ACCESS_VARS_MISSING');
-  if(!postDeploy&&(typeof baseline.sourceCommit!=='string'||!/^[0-9a-f]{40}$/.test(baseline.sourceCommit)||remote.deploymentMessage!==`source-commit:${baseline.sourceCommit}`))fail('SOURCE_COMMIT_MISMATCH');
+  if(!postDeploy&&(typeof baseline.sourceCommit!=='string'||!/^[0-9a-f]{40}$/.test(baseline.sourceCommit)||remote.deploymentMessage!==`source-commit:${baseline.sourceCommit}`)){
+   const expected=approvedPreDeployLineage,evidence=preDeployLineage;
+   // Script ETag proves only script content. Current assets and settings are
+   // checked separately above; this exception never applies after upload.
+   if(baseline.activeVersionId!==expected.activeVersionId||baseline.sourceCommit!==expected.sourceCommit||remote.activeVersions[0].id!==expected.activeVersionId||typeof remote.deploymentMessage!=='string'||!evidence||evidence.activeVersionId!==expected.activeVersionId||evidence.priorVersionId!==expected.priorVersionId||evidence.activeDeploymentSourceAnnotation!=='OTHER'||evidence.priorDeploymentSourceAnnotation!=='EXPECTED'||evidence.activeScriptEtag!==expected.scriptEtag||evidence.priorScriptEtag!==expected.scriptEtag||evidence.scriptContentEqual!==true||evidence.codeLineageEvidence!=='SAME_SCRIPT_AS_ANNOTATED_PRIOR'||evidence.sourceAnnotationGuardMatch!==false)fail('SOURCE_COMMIT_MISMATCH');
+  }
   return true;
 }

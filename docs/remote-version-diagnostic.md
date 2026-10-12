@@ -64,4 +64,18 @@ not prove the postcheck without confirming which deploy command ran.
 This documentation-only review-branch commit is reserved for one Cloudflare
 Build trigger after the browser operator confirms the review branch and the
 temporary `npm run preflight:version-lineage` deploy command. The diagnostic
-result must be reviewed separately; this note does not record a Build result.
+result must be reviewed separately; the trigger commit itself did not prove a
+Build result.
+
+Build `b8903046-5c3d-4357-982c-43874f7addcd` later reported that the
+Dashboard settings version `37ffbd37-a256-41a9-816a-e1967c03d68c` has an
+`OTHER` deployment annotation, while the Wrangler version
+`bf955e63-0b85-4535-ad39-2858742f89e4` has the expected
+`source-commit:415825bef1f152376c6e49ed01fffb3793f940a2` annotation.
+Both version-detail reads returned the same script ETag
+`eb6b6cbff792f3149a6f3795e54a9d717fd03b893a2ff57f906d3221f5c5262f`.
+The version API did not expose an asset-set identifier, so this evidence
+establishes only script-content equality. The narrow pre-deploy guard path
+re-reads those exact versions and the prior annotation twice, while retaining
+the current settings, Access, D1, and assets-binding checks. The post-deploy
+guard still requires the new deployment's exact source annotation.

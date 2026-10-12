@@ -1,12 +1,12 @@
 // Workers Builds diagnostic only. All requests are fixed Cloudflare GETs.
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {approvedRemoteBaseline} from './remote-state-policy.mjs';
+import {approvedRemoteBaseline,approvedPreDeployLineage} from './remote-state-policy.mjs';
 
 const accountId='fe9d7e2a164274b1ff6cef150a75cb0b';
 const workerName='holy-rice-b914';
 const apiRoot=`https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${workerName}`;
-export const expectedPriorVersionId='bf955e63-0b85-4535-ad39-2858742f89e4';
+export const expectedPriorVersionId=approvedPreDeployLineage.priorVersionId;
 const etag=/^[0-9a-f]{64}$/i;
 const message=`source-commit:${approvedRemoteBaseline.sourceCommit}`;
 
@@ -35,20 +35,25 @@ export function safeWorkerLineageReport(deployments,current,prior){
  };
 }
 
-export async function runWorkerVersionLineageDiagnostic({env=process.env,fetcher=fetch,write=console.log}={}){
- if(!env.WORKERS_CI||!env.CLOUDFLARE_API_TOKEN){write('WORKER_VERSION_DIAGNOSTIC_FAILED: BUILD_CONTEXT_OR_TOKEN_UNAVAILABLE');return false;}
+export async function readWorkerVersionLineage({token,fetcher=fetch}={}){
+ if(typeof token!=='string'||!token)throw Error('WORKER_VERSION_DIAGNOSTIC_FAILED: TOKEN_UNAVAILABLE');
  async function read(path){
-  const response=await fetcher(apiRoot+path,{method:'GET',headers:{Authorization:`Bearer ${env.CLOUDFLARE_API_TOKEN}`,Accept:'application/json'},signal:AbortSignal.timeout(10000)});
+  const response=await fetcher(apiRoot+path,{method:'GET',headers:{Authorization:`Bearer ${token}`,Accept:'application/json'},signal:AbortSignal.timeout(10000)});
   if(!response.ok)throw Error('READ_FAILED');
   const body=await response.json();
   if(body?.success!==true||!body.result||typeof body.result!=='object')throw Error('RESPONSE_INVALID');
   return body.result;
  }
+ const deployments=(await read('/deployments?per_page=100')).deployments;
+ if(!Array.isArray(deployments)||deployments[0]?.versions?.length!==1||deployments[0]?.versions[0]?.version_id!==approvedRemoteBaseline.activeVersionId||deployments[0]?.versions[0]?.percentage!==100)throw Error('ACTIVE_VERSION_MISMATCH');
+ const [current,prior]=await Promise.all([read(`/versions/${approvedRemoteBaseline.activeVersionId}`),read(`/versions/${expectedPriorVersionId}`)]);
+ return safeWorkerLineageReport(deployments,current,prior);
+}
+
+export async function runWorkerVersionLineageDiagnostic({env=process.env,fetcher=fetch,write=console.log}={}){
+ if(!env.WORKERS_CI||!env.CLOUDFLARE_API_TOKEN){write('WORKER_VERSION_DIAGNOSTIC_FAILED: BUILD_CONTEXT_OR_TOKEN_UNAVAILABLE');return false;}
  try{
-  const deployments=(await read('/deployments?per_page=100')).deployments;
-  if(!Array.isArray(deployments)||deployments[0]?.versions?.length!==1||deployments[0]?.versions[0]?.version_id!==approvedRemoteBaseline.activeVersionId||deployments[0]?.versions[0]?.percentage!==100)throw Error('ACTIVE_VERSION_MISMATCH');
-  const [current,prior]=await Promise.all([read(`/versions/${approvedRemoteBaseline.activeVersionId}`),read(`/versions/${expectedPriorVersionId}`)]);
-  write(JSON.stringify(safeWorkerLineageReport(deployments,current,prior)));
+  write(JSON.stringify(await readWorkerVersionLineage({token:env.CLOUDFLARE_API_TOKEN,fetcher})));
   return true;
  }catch{write('WORKER_VERSION_DIAGNOSTIC_FAILED: READ_OR_SCOPE_INVALID');return false;}
 }

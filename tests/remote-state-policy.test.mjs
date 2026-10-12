@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {approvedRemoteBaseline,assertRemoteState} from '../scripts/remote-state-policy.mjs';
+import {approvedRemoteBaseline,approvedPreDeployLineage,assertRemoteState} from '../scripts/remote-state-policy.mjs';
 
 const observability=approvedRemoteBaseline.observability;
 const optionalScriptFields=approvedRemoteBaseline.optionalScriptFields;
@@ -26,6 +26,20 @@ test('guard baseline pins the verified active Worker version and source commit',
   assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,true);
   const observed=remote();observed.bindings.push({name:'ASSETS',type:'assets'});
   assert.equal(assertRemoteState(observed,approvedRemoteBaseline),true);
+});
+
+test('the one settings version accepts only the pinned annotated predecessor and exact script hash',()=>{
+ const state=remote();state.bindings.push({name:'ASSETS',type:'assets'});state.deploymentMessage='Dashboard settings update';
+ const proof={activeVersionId:approvedPreDeployLineage.activeVersionId,priorVersionId:approvedPreDeployLineage.priorVersionId,activeDeploymentSourceAnnotation:'OTHER',priorDeploymentSourceAnnotation:'EXPECTED',activeScriptEtag:approvedPreDeployLineage.scriptEtag,priorScriptEtag:approvedPreDeployLineage.scriptEtag,scriptContentEqual:true,codeLineageEvidence:'SAME_SCRIPT_AS_ANNOTATED_PRIOR',sourceAnnotationGuardMatch:false,assetSetIdentifier:'NOT_EXPOSED_BY_VERSION_GET'};
+ assert.throws(()=>assertRemoteState(state,baseline),/SOURCE_COMMIT_MISMATCH/);
+ assert.equal(assertRemoteState(state,baseline,{preDeployLineage:proof}),true);
+ for(const [key,value] of [['activeVersionId','other'],['priorVersionId','other'],['activeDeploymentSourceAnnotation','MISSING'],['priorDeploymentSourceAnnotation','OTHER'],['activeScriptEtag','a'.repeat(64)],['priorScriptEtag','a'.repeat(64)],['scriptContentEqual',false],['codeLineageEvidence','UNVERIFIED'],['sourceAnnotationGuardMatch',true]]){
+  assert.throws(()=>assertRemoteState(state,baseline,{preDeployLineage:{...proof,[key]:value}}),/SOURCE_COMMIT_MISMATCH/,key);
+ }
+ const changed=structuredClone(state);changed.activeVersions[0].id='other';assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/ACTIVE_VERSION_MISMATCH/);
+ changed.activeVersions[0].id=baseline.activeVersionId;changed.bindings.find(item=>item.name==='DB').id='other';assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/D1_MISMATCH/);
+ changed.bindings.find(item=>item.name==='DB').id=baseline.databaseId;changed.bindings.find(item=>item.name==='ACCESS_AUD').text='';assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/ACCESS_VARS_MISSING/);
+ changed.bindings.find(item=>item.name==='ACCESS_AUD').text='test-audience-value';changed.bindings.pop();assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/BINDINGS_UNEXPECTED/);
 });
 
 test('offline remote policy requires exactly one ASSETS before and after later deploys',()=>{
