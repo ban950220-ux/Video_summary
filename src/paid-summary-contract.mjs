@@ -49,6 +49,10 @@ export async function checkedPaidWireBody(body,quote){
 export function validatePaidFullReport(raw,source){
  let parsed;try{parsed=JSON.parse(raw);}catch{throw new ProviderError('PAID_RESPONSE_INVALID','종합 요약 JSON을 검토하세요.');}
  if(!parsed||Array.isArray(parsed)||Object.keys(parsed).sort().join(',')!==['summary','chapters','claims','numbers','critical','conclusion'].sort().join(','))throw new ProviderError('PAID_RESPONSE_INVALID','종합 요약 구조를 검토하세요.');
- let report;try{report=validateAnalysis(parsed,source.segments,'gemini');assertGrounding(report,source.segments);const duration=source.segments.at(-1).endMs,windows=[];for(let start=0;start<duration;start+=600_000){const ids=source.segments.filter(s=>s.startMs<start+600_000&&s.endMs>start).map(s=>s.id);if(ids.length)windows.push({ids});}assertGroupCoverage(report,windows);}catch{throw new ProviderError('PAID_RESPONSE_UNGROUNDED','근거·시간 범위가 빠진 종합 요약은 저장하지 않습니다.');}
+ const invalid=code=>{const error=new ProviderError('PAID_RESPONSE_UNGROUNDED','근거·시간 범위가 빠진 종합 요약은 저장하지 않습니다.');error.safeValidationCode=code;throw error;};
+ let report;try{report=validateAnalysis(parsed,source.segments,'gemini');}catch(error){invalid(error?.message==='REPORT_EVIDENCE_INVALID'?'PAID_REPORT_EVIDENCE_INVALID':'PAID_REPORT_SCHEMA_INVALID');}
+ try{assertGrounding(report,source.segments);}catch(error){invalid(error?.message==='UNSUPPORTED_NUMBER'?'PAID_REPORT_NUMBER_UNSUPPORTED':error?.message==='UNSUPPORTED_QUOTE'?'PAID_REPORT_QUOTE_UNSUPPORTED':'PAID_REPORT_GROUNDING_INVALID');}
+ const duration=source.segments.at(-1).endMs,windows=[];for(let start=0;start<duration;start+=600_000){const ids=source.segments.filter(s=>s.startMs<start+600_000&&s.endMs>start).map(s=>s.id);if(ids.length)windows.push({ids});}
+ try{assertGroupCoverage(report,windows);}catch{invalid('PAID_REPORT_WINDOW_COVERAGE');}
  return {...report,kind:'GEMINI_PAID_FULL_EVIDENCE_LINKED',outputKind:'FULL_VIDEO_SYNTHESIS',synthesisComplete:true,evidenceValidation:'REFERENCES_COVERAGE_NUMBERS_QUOTES_ONLY'};
 }

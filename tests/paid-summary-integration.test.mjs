@@ -13,7 +13,7 @@ import {consumeFirstTrial} from '../src/paid-summary-trial.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 async function fixture(){
- const db=new DatabaseSync(':memory:');for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0008_paid_summary_budget.sql','../migrations/0009_paid_first_trial.sql'])db.exec(readFileSync(new URL(file,import.meta.url),'utf8'));
+ const db=new DatabaseSync(':memory:');for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0008_paid_summary_budget.sql','../migrations/0009_paid_first_trial.sql','../migrations/0010_paid_summary_receipts.sql'])db.exec(readFileSync(new URL(file,import.meta.url),'utf8'));
  const DB={prepare(sql){const make=args=>({bind(...next){return make(next);},async run(){return {meta:{changes:db.prepare(sql).run(...args).changes}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};
  const id='22222222-2222-4222-8222-222222222222',path='/api/jobs/'+id,segments=[{id:1,startMs:0,endMs:1000,text:'첫 발언'},{id:2,startMs:1000,endMs:2000,text:'둘째 발언'}],audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
  db.prepare("INSERT INTO jobs(id,owner_id,title,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json) VALUES(?,'owner','Paid mock','audio','TRANSCRIBED',2,?,?,?,?)").run(id,new Date().toISOString(),new Date().toISOString(),'null',JSON.stringify(audit));
@@ -225,9 +225,52 @@ test('unknown provider result remains reserved and invalid output with receipt i
    f.env.PAID_SUMMARY_TEST_RUNNER=async({beforeFetch})=>{await beforeFetch();sends++;if(mode==='unknown')throw Error('mock lost response');return {text:JSON.stringify({...report,chapters:[]}),usage:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20}};};
    const reply=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.ok(reply.status>=409);assert.equal(sends,1);
    const status=await(await routeApi(request(f.path+'/paid-summary-status'),f.env)).json();assert.equal(status.finalReportSaved,false);assert.equal(status.reservations[0].state,mode==='unknown'?'UNCERTAIN':'SETTLED');assert.equal(status.reservations[0].reserved_micro_usd,issued.quote.maxCallMicroUsd);
+   if(mode==='invalid'){
+    const receipt=f.db.prepare('SELECT state,error_code,response_complete,response_sha256,response_json,validation_version FROM yta_paid_summary_receipts').get();assert.equal(receipt.state,'VALIDATION_FAILED');assert.equal(receipt.error_code,'PAID_REPORT_WINDOW_COVERAGE');assert.equal(receipt.response_complete,1);assert.equal(receipt.response_sha256,createHash('sha256').update(receipt.response_json).digest('hex'));assert.ok(receipt.response_json.includes('promptTokenCount'));
+    const recovery=await routeApi(request(f.path+'/paid-summary-revalidate','POST',{reservationId:issued.quoteId+':call:0',confirmNoProviderCall:true}),f.env);assert.equal(recovery.status,409);assert.equal((await recovery.json()).error.code,'PAID_RESPONSE_UNGROUNDED');assert.equal(f.db.prepare('SELECT revalidation_version,revalidation_code FROM yta_paid_summary_receipts').get().revalidation_code,'PAID_REPORT_WINDOW_COVERAGE');assert.equal(sends,1);
+   }
    const again=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.equal(again.status,409);assert.equal(sends,1);
   }finally{f.db.close();}
  }
+});
+
+test('saved response survives a failed report write and revalidates once without provider or ledger changes',async()=>{
+ const f=await fixture();try{
+  const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();await routeApi(request(f.path+'/paid-summary-approve','POST',{quoteId:issued.quoteId,maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true}),f.env);
+  Object.assign(f.env,{ENABLE_PAID_SUMMARY:'true',ALLOW_PAID_API:'false',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true'});
+  let calls=0;f.env.PAID_SUMMARY_TEST_RUNNER=async({beforeFetch})=>{await beforeFetch();calls++;return {text:JSON.stringify(report),usage:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20}};};
+  const original=f.env.DB;let failed=false;f.env.DB={prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('UPDATE jobs SET report_json='))return statement;return {bind(...args){const bound=statement.bind(...args);return {async run(){if(!failed){failed=true;return {meta:{changes:0}};}return bound.run();}};}};}};
+  const first=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.equal((await first.json()).error.code,'PAID_SAVE_SCOPE_CHANGED');assert.equal(calls,1);
+  const before=f.db.prepare('SELECT state,outcome,usage_json,token_estimate_micro_usd FROM yta_paid_summary_reservations').get();assert.equal(before.state,'SETTLED');assert.equal(before.outcome,'REPORT_NOT_SAVED');assert.equal(f.db.prepare('SELECT state FROM yta_paid_summary_receipts').get().state,'SAVE_FAILED');
+  f.env.DB=original;
+  const unauthorized=await handleSiteRequest(new Request('https://private.example.com'+f.path+'/paid-summary-revalidate',{method:'POST',headers:{Origin:'https://private.example.com','Content-Type':'application/json'},body:'{}'}),{...f.env,ACCESS_TEAM_DOMAIN:'https://paid-test.cloudflareaccess.com',ACCESS_AUD:'paid-test-audience',ACCESS_OWNER_EMAIL:'owner@example.com'});assert.equal(unauthorized.status,401);
+  const originalRaw=f.db.prepare('SELECT raw FROM yta_sources WHERE job_id=?').get(f.id).raw;f.db.prepare("UPDATE yta_sources SET raw='changed' WHERE job_id=?").run(f.id);
+  assert.equal((await routeApi(request(f.path+'/paid-summary-revalidate','POST',{reservationId:issued.quoteId+':call:0',confirmNoProviderCall:true}),f.env)).status,409);f.db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(originalRaw,f.id);
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'deletion',0,'DELETING',?)").run(f.id+':deleting',f.id,new Date().toISOString());assert.equal((await routeApi(request(f.path+'/paid-summary-revalidate','POST',{reservationId:issued.quoteId+':call:0',confirmNoProviderCall:true}),f.env)).status,404);f.db.prepare('DELETE FROM yta_operations WHERE id=?').run(f.id+':deleting');assert.equal(calls,1);
+  const attempts=await Promise.all([0,1].map(()=>routeApi(request(f.path+'/paid-summary-revalidate','POST',{reservationId:issued.quoteId+':call:0',confirmNoProviderCall:true}),f.env)));assert.equal(attempts.filter(response=>response.status===200).length,1);assert.equal(attempts.filter(response=>response.status===409).length,1);assert.equal((await attempts.find(response=>response.status===200).json()).providerCalled,false);
+  const again=await routeApi(request(f.path+'/paid-summary-revalidate','POST',{reservationId:issued.quoteId+':call:0',confirmNoProviderCall:true}),f.env);assert.equal(again.status,200);assert.equal(calls,1);assert.deepEqual(f.db.prepare('SELECT state,outcome,usage_json,token_estimate_micro_usd FROM yta_paid_summary_reservations').get(),before);assert.equal(f.db.prepare('SELECT state,revalidation_code FROM yta_paid_summary_receipts').get().revalidation_code,'REPORT_SAVED');
+ }finally{f.db.close();}
+});
+
+test('an older settled run without a receipt remains unrecoverable',async()=>{
+ const f=await fixture();try{
+  const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();await routeApi(request(f.path+'/paid-summary-approve','POST',{quoteId:issued.quoteId,maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true}),f.env);
+  f.db.prepare("INSERT INTO yta_paid_summary_reservations(id,approval_id,call_index,reserved_micro_usd,token_estimate_micro_usd,usage_json,outcome,state,created_at) VALUES(?,?,0,?,14247,?,'REPORT_NOT_SAVED','SETTLED',?)").run(issued.quoteId+':call:0',issued.quoteId,issued.quote.maxCallMicroUsd,JSON.stringify({promptTokenCount:50524,candidatesTokenCount:1077,thoughtsTokenCount:0}),new Date().toISOString());
+  const status=await(await routeApi(request(f.path+'/paid-summary-status'),f.env)).json();assert.equal(status.receipt,null);assert.equal(status.finalReportSaved,false);
+  const attempt=await routeApi(request(f.path+'/paid-summary-revalidate','POST',{reservationId:issued.quoteId+':call:0',confirmNoProviderCall:true}),f.env);assert.equal(attempt.status,409);assert.equal((await attempt.json()).error.code,'PAID_RECEIPT_SCOPE_CHANGED');assert.equal(f.db.prepare('SELECT COUNT(*) n FROM yta_paid_summary_reservations').get().n,1);
+ }finally{f.db.close();}
+});
+
+test('failed receipt write settles known usage but never offers recovery',async()=>{
+ const f=await fixture();try{
+  const issued=await(await routeApi(request(f.path+'/paid-summary-quote','POST'),f.env)).json();await routeApi(request(f.path+'/paid-summary-approve','POST',{quoteId:issued.quoteId,maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmNoAutomaticFallback:true}),f.env);
+  Object.assign(f.env,{ENABLE_PAID_SUMMARY:'true',ALLOW_PAID_API:'false',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true'});
+  let calls=0;f.env.PAID_SUMMARY_TEST_RUNNER=async({beforeFetch})=>{await beforeFetch();calls++;return {text:JSON.stringify(report),usage:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20}};};
+  const original=f.env.DB;f.env.DB={prepare(sql){const statement=original.prepare(sql);if(!sql.startsWith('INSERT OR IGNORE INTO yta_paid_summary_receipts'))return statement;return {bind(){return {async run(){return {meta:{changes:0}};}};}};}};
+  const reply=await routeApi(request(f.path+'/paid-summary-execute','POST',{approvalId:issued.quoteId}),f.env);assert.equal((await reply.json()).error.code,'PAID_RECEIPT_SCOPE_CHANGED');assert.equal(calls,1);
+  f.env.DB=original;const status=await(await routeApi(request(f.path+'/paid-summary-status'),f.env)).json();assert.equal(status.reservations[0].outcome,'REPORT_NOT_SAVED');assert.equal(status.receipt,null);assert.equal(status.finalReportSaved,false);
+  assert.equal((await routeApi(request(f.path+'/paid-summary-revalidate','POST',{reservationId:issued.quoteId+':call:0',confirmNoProviderCall:true}),f.env)).status,409);assert.equal(calls,1);
+ }finally{f.db.close();}
 });
 
 test('concurrent paid mock execution claims one call and a lost response reconciles through status',async()=>{
@@ -246,12 +289,27 @@ test('paid adapter uses stored encrypted key and official model endpoint only af
  const f=await fixture();try{
   const current={segments:f.segments,raw:f.segments.map(s=>s.text).join('\n')},planned=fullSummaryRequest(current,{audioProcessingCoverage:1}),body=planned.body,quote={requestBytes:planned.requestBytes,inputTokensUpper:planned.inputChargeCeiling,outputTokensUpper:planned.outputChargeCeiling,requestSha256:createHash('sha256').update(JSON.stringify(body)).digest('hex')};
   f.env.ENABLE_PAID_SUMMARY='true';f.env.ALLOW_PAID_API='false';f.env.PAID_SUMMARY_EXECUTION_APPROVED='true';f.env.PAID_MODEL_ACCESS_VERIFIED='true';f.env.PAID_TAX_MAX_BPS_VERIFIED='true';let guard=false,calls=0;
-  const result=await runPaidGeminiFullSummary({env:f.env,body,quote,beforeFetch:()=>{guard=true;},fetchFn:async(url,options)=>{calls++;assert.equal(guard,true);assert.equal(options.body,JSON.stringify(body));assert.match(url,/models\/gemini-3\.1-flash-lite:generateContent$/);assert.equal(options.headers['x-goog-api-key'],'OFFLINE_MOCK_KEY');return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(report)}]}}],usageMetadata:{promptTokenCount:100,candidatesTokenCount:80,thoughtsTokenCount:10}});}});
-  assert.equal(calls,1);assert.equal(result.usage.thoughtsTokenCount,10);
+  let recorded=false;const result=await runPaidGeminiFullSummary({env:f.env,body,quote,beforeFetch:()=>{guard=true;},recordResponse:({responseText,complete})=>{assert.equal(complete,true);assert.match(responseText,/promptTokenCount/);recorded=true;},fetchFn:async(url,options)=>{calls++;assert.equal(guard,true);assert.equal(options.body,JSON.stringify(body));assert.match(url,/models\/gemini-3\.1-flash-lite:generateContent$/);assert.equal(options.headers['x-goog-api-key'],'OFFLINE_MOCK_KEY');return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(report)}]}}],usageMetadata:{promptTokenCount:100,candidatesTokenCount:80,thoughtsTokenCount:10}});}});
+  assert.equal(calls,1);assert.equal(recorded,true);assert.equal(result.usage.thoughtsTokenCount,10);
   await assert.rejects(runPaidGeminiFullSummary({env:f.env,body:{...body,contents:[{role:'user',parts:[{text:'changed'}]}]},quote,beforeFetch:()=>{guard=true;},fetchFn:async()=>{calls++;throw Error('must not send');}}),{code:'PAID_WIRE_SCOPE_CHANGED'});assert.equal(calls,1);
   const sameBytes=structuredClone(body);sameBytes.contents[0].parts[0].text=sameBytes.contents[0].parts[0].text.replace('첫','셋');
   await assert.rejects(runPaidGeminiFullSummary({env:f.env,body:sameBytes,quote,beforeFetch:()=>{guard=true;},fetchFn:async()=>{calls++;throw Error('must not send');}}),{code:'PAID_WIRE_SCOPE_CHANGED'});assert.equal(calls,1);
   const overOutput=structuredClone(body);overOutput.generationConfig.maxOutputTokens=8193;
   await assert.rejects(runPaidGeminiFullSummary({env:f.env,body:overOutput,quote,beforeFetch:()=>{guard=true;},fetchFn:async()=>{calls++;throw Error('must not send');}}),{code:'PAID_WIRE_SCOPE_CHANGED'});assert.equal(calls,1);
+ }finally{f.db.close();}
+});
+
+test('adapter records bounded response bytes before parsing and rejects partial, oversized and non-STOP output',async()=>{
+ const f=await fixture();try{
+  Object.assign(f.env,{ENABLE_PAID_SUMMARY:'true',ALLOW_PAID_API:'false',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true'});
+  const planned=fullSummaryRequest({segments:f.segments,raw:f.segments.map(s=>s.text).join('\n')},{audioProcessingCoverage:1}),body=planned.body,quote={requestBytes:planned.requestBytes,inputTokensUpper:planned.inputChargeCeiling,outputTokensUpper:planned.outputChargeCeiling,requestSha256:createHash('sha256').update(JSON.stringify(body)).digest('hex')};
+  const cases=[
+   {name:'bad-json',response:()=>new Response('{bad',{headers:{'content-length':'4'}}),code:'PAID_RESPONSE_INVALID',complete:true},
+   {name:'max-tokens',response:()=>Response.json({candidates:[{finishReason:'MAX_TOKENS',content:{parts:[{text:'partial'}]}}],usageMetadata:{promptTokenCount:20,candidatesTokenCount:10}}),code:'PAID_PROVIDER_UNCERTAIN',complete:true},
+   {name:'empty',response:()=>Response.json({candidates:[{finishReason:'STOP',content:{parts:[]}}],usageMetadata:{promptTokenCount:20,candidatesTokenCount:0}}),code:'PAID_PROVIDER_UNCERTAIN',complete:true},
+   {name:'large',response:()=>new Response('a'.repeat(256001),{headers:{'content-length':'10'}}),code:'PAID_RESPONSE_TOO_LARGE',complete:false},
+   {name:'partial',response:()=>new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('{"candidates":'));controller.error(Error('lost response'));}})),code:'PAID_PROVIDER_UNCERTAIN',complete:false},
+  ];
+  for(const item of cases){let stored=null;await assert.rejects(runPaidGeminiFullSummary({env:f.env,body,quote,beforeFetch:()=>{},fetchFn:async()=>item.response(),recordResponse:response=>{stored=response;},recordEnvelope:()=>{assert.ok(stored?.complete);}}),{code:item.code},item.name);assert.equal(stored?.complete,item.complete,item.name);if(item.name==='large')assert.ok(stored.responseBytes>256000);}
  }finally{f.db.close();}
 });

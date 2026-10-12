@@ -139,6 +139,15 @@ test('library reopen renders paid full report with evidence and TXT export',asyn
  const actions=target.children.find(item=>item.className==='library-actions');assert.ok(actions);const txt=actions.children.find(item=>item.textContent==='TXT 내보내기');assert.equal(txt.href,'/api/jobs/job-a/export?format=txt');assert.equal(actions.children.some(item=>item.textContent==='요약 부분 출력 검토'),false);
 });
 
+test('audio library labels the legacy free action separately from paid quote choice',()=>{
+ const node=tag=>({tag,children:[],dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}});
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__libraryCard=libraryCard;');
+ const context={document:{createElement:node,querySelector:()=>null},window:{},location:{hash:''}};runInNewContext(source,context);
+ const card=context.__libraryCard({id:'job-a',title:'98 minute',source_type:'audio',status:'TRANSCRIPT_UNVERIFIED',created_at:new Date().toISOString(),duration_seconds:5892,report:null});
+ const labels=card.children.flatMap(item=>item.children||[]).map(item=>item.textContent).filter(Boolean).join(' ');
+ assert.match(labels,/기존 Gemini 무료 요약 생성/);assert.match(labels,/전체 요약 선택·유료 견적/);assert.equal(card.children.flatMap(item=>item.children||[]).some(item=>item.textContent==='요약 생성'),false);
+});
+
 test('lost checkpoint recovery POST and failed status GET leave only read-only reconciliation',async()=>{
  const node=tag=>({tag,children:[],hidden:false,dataset:{},disabled:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
  const preview={responseSha256:'a'.repeat(64),contractHash:'b'.repeat(64),firstRange:{firstId:1,lastId:20},summaryCount:4,chapterCount:20,storedUtf16Length:1954,failedOperationId:'failed-raw0',confirmedUsage:{totalTokens:2169},evidenceHash:'c'.repeat(64)};

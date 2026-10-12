@@ -11,7 +11,7 @@ const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,
 test('first trial quote, atomic D1 claim and mock final save work in local Workerd',async()=>{
  const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'paid-summary-test',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'paid-summary-local'}}]}));
  try{
-  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0008_paid_summary_budget.sql','../migrations/0009_paid_first_trial.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0008_paid_summary_budget.sql','../migrations/0009_paid_first_trial.sql','../migrations/0010_paid_summary_receipts.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
   const id='33333333-3333-4333-8333-333333333333',path='/api/jobs/'+id,segments=[{id:1,startMs:0,endMs:1000,text:'첫 발언'},{id:2,startMs:1000,endMs:2000,text:'둘째 발언'}],audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
   await DB.prepare("INSERT INTO jobs(id,owner_id,title,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json) VALUES(?,'owner','Workerd paid mock','audio','TRANSCRIBED',2,?,?,?,?)").bind(id,new Date().toISOString(),new Date().toISOString(),'null',JSON.stringify(audit)).run();
   await DB.prepare("INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,'GROQ_OWNED_AUDIO',?)").bind(id,segments.map(s=>s.text).join('\n'),JSON.stringify(segments),new Date().toISOString()).run();

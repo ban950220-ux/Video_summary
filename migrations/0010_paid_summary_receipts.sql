@@ -1,0 +1,25 @@
+-- Private provider-response evidence. Apply separately before enabling paid execution.
+CREATE TABLE IF NOT EXISTS yta_paid_summary_receipts(
+ reservation_id TEXT PRIMARY KEY,
+ job_id TEXT NOT NULL,
+ owner_id TEXT NOT NULL CHECK(owner_id='owner'),
+ source_sha256 TEXT NOT NULL,
+ request_sha256 TEXT NOT NULL,
+ quote_sha256 TEXT NOT NULL,
+ response_sha256 TEXT,
+ response_bytes INTEGER NOT NULL,
+ response_json TEXT,
+ response_complete INTEGER NOT NULL CHECK(response_complete IN (0,1)),
+ http_status INTEGER,
+ model_version TEXT,
+ finish_reason TEXT,
+ usage_json TEXT,
+ state TEXT NOT NULL CHECK(state IN ('RECEIVED','INCOMPLETE','ENVELOPE_INVALID','VALIDATION_FAILED','SAVE_FAILED','SAVED')),
+ error_code TEXT,
+ validation_version TEXT,
+ revalidation_version TEXT,
+ revalidation_code TEXT,
+ revalidated_at TEXT,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);
