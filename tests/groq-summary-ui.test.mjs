@@ -41,7 +41,8 @@ test('pilot UI retains an uncertain send and never offers renewal of expired app
  const seed=()=>({oldOperationId:'old',oldResponseSha256:'a'.repeat(64),firstFailedCheck:'SCHEMA',summaryType:'string',confirmedUsage:{inputTokens:1258,outputTokens:962,reasoningTokens:74,totalTokens:2220},oldRange:{firstId:1,lastId:9,startMs:0,endMs:9000},newRange:{firstId:1,lastId:6,startMs:0,endMs:6000},newTranscriptHash:'b'.repeat(64),model:'openai/gpt-oss-120b',newOneCallReservation:6600,newMaxInputTokens:4800,newMaxCompletionTokens:1800,evidenceHash:'c'.repeat(64),newOperationId:'new',credentialGeneration:'opaque',reviewed:true,approved:true,approvalExpiresAt:Date.now()+600000,attemptState:null});
  const mount=async(mode)=>{
   const p=seed(),calls=[],node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
-  if(mode==='expired'){p.approved=false;p.approvalExpiresAt=Date.now()-1;}
+  if(mode==='expired'){p.approved=false;p.approvalRecordExists=true;p.approvalExpiresAt=Date.now()-1;}
+  if(mode==='rotated'){p.reviewed=false;p.approved=false;p.reviewRecordExists=true;p.approvalRecordExists=true;}
   let failGet=false;
   const fetcher=async(_path,options)=>{if(options.method==='POST'){calls.push(JSON.parse(options.body).step);p.attemptState='CLAIMED';if(mode==='lost')throw Error('POST response lost');if(mode==='getlost')failGet=true;return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({})};}if(failGet)throw Error('GET response lost');return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({...p})};};
   const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,setInterval:()=>0,clearInterval,detailRequestIsCurrent,fmtRetryDate:()=> 'soon'};
@@ -53,5 +54,6 @@ test('pilot UI retains an uncertain send and never offers renewal of expired app
   if(mode==='lost')assert.equal(host.children.some(item=>item.tag==='button'&&item.textContent==='승인된 첫 구간 1회 실행'),false);
   else assert.equal(run.disabled,true);
  }
- const {target,calls}=await mount('expired');assert.equal(target.children[0].children.some(item=>item.tag==='form'),false);assert.equal(target.children[0].children.some(item=>item.textContent?.includes('승인이 만료되거나 중단')),true);assert.equal(calls.length,0);
+ const expired=await mount('expired');assert.equal(expired.target.children[0].children.some(item=>item.tag==='form'),false);assert.equal(expired.target.children[0].children.some(item=>item.textContent?.includes('재승인은 생성할 수 없습니다')),true);assert.equal(expired.calls.length,0);
+ const rotated=await mount('rotated');assert.equal(rotated.target.children[0].children.some(item=>item.textContent?.includes('기존 검토 기록과 현재 키 세대')),true);assert.equal(rotated.target.children[0].children.some(item=>item.textContent?.includes('이전 응답·사용량과 새 구간 검토 기록')),false);assert.equal(rotated.target.children[0].children.some(item=>item.tag==='form'),false);assert.equal(rotated.calls.length,0);
 });
