@@ -3,10 +3,9 @@ import assert from 'node:assert/strict';
 import {approvedRemoteBaseline,assertRemoteState} from '../scripts/remote-state-policy.mjs';
 
 const observability=approvedRemoteBaseline.observability;
-const version='a'.repeat(8)+'-1111-4111-8111-'+'b'.repeat(12);
 const optionalScriptFields=approvedRemoteBaseline.optionalScriptFields;
-const baseline={...approvedRemoteBaseline,activeVersionId:version,remoteSettingsReviewed:true};
-const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVersions:[{id:version,percentage:100}],deploymentMessage:`source-commit:${baseline.sourceCommit}`,workersDev:true,previewUrls:false,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,observability:structuredClone(observability),optionalScriptFields:structuredClone(optionalScriptFields),scriptSettings:{logpush:false,tail_consumers:null,observability:structuredClone(observability)},bindings:[
+const baseline=approvedRemoteBaseline;
+const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVersions:[{id:baseline.activeVersionId,percentage:100}],deploymentMessage:`source-commit:${baseline.sourceCommit}`,workersDev:true,previewUrls:false,routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,observability:structuredClone(observability),optionalScriptFields:structuredClone(optionalScriptFields),scriptSettings:{logpush:false,tail_consumers:null,observability:structuredClone(observability)},bindings:[
   {name:'DB',type:'d1',id:baseline.databaseId},
   {name:'ACCESS_AUD',type:'plain_text',text:'test-audience-value'},
   {name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:'https://test.cloudflareaccess.com'},
@@ -20,8 +19,9 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
 test('guard baseline pins the verified active Worker version and source commit',()=>{
   assert.equal(approvedRemoteBaseline.activeVersionId,'1fcd78b0-363c-4cc1-8b7e-1a6571ef455e');
   assert.equal(approvedRemoteBaseline.sourceCommit,'fce76164541f2785a0e89953d92e58202aa97701');
-  assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,false);
-  assert.throws(()=>assertRemoteState(remote(),approvedRemoteBaseline),/REMOTE_SETTINGS_BASELINE_UNVERIFIED/);
+  assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,true);
+  const observed=remote();observed.bindings.push({name:'ASSETS',type:'assets'});
+  assert.equal(assertRemoteState(observed,approvedRemoteBaseline),true);
 });
 
 test('offline remote policy requires exactly one ASSETS before and after later deploys',()=>{
@@ -61,8 +61,12 @@ test('offline remote policy fails closed on active version, DB, Access, preview 
     state=>{state.optionalScriptFields.limits={present:true,value:null};},
     state=>{state.optionalScriptFields.placement_mode={present:true,value:'smart'};},
     state=>{state.compatibilityFlagsPresent=true;state.compatibilityFlags=[];},
+    state=>{state.compatibilityFlags=null;},
     state=>{state.observability.logs.destinations=[];},
+    state=>{state.observability.logs.destinations=null;},
     state=>{state.observability.issues={enabled:false};},
+    state=>{state.observability.issues=null;},
+    state=>{delete state.scriptSettings.tail_consumers;},
     state=>{state.scriptSettings.observability.logs.persist=false;},
   ]){const state=remote();state.bindings.push({name:'ASSETS',type:'assets'});mutate(state);assert.throws(()=>assertRemoteState(state,baseline),/Remote deployment guard/);}
   const incomplete=remote();incomplete.bindings.push({name:'ASSETS',type:'assets'});delete incomplete.observability.logs.invocation_logs;

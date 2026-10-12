@@ -42,8 +42,10 @@ export const approvedRemoteBaseline={
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:true,
-  // Keep deployment blocked until the incomplete remote metadata is reconciled and reviewed.
-  remoteSettingsReviewed:false,
+  // Read-only Build 1323e142-ee46-47d2-b541-df604c1a7a50 reviewed this
+  // exact shape: omitted optional metadata, explicit null script tail consumers.
+  // assertRemoteState still rejects null/[] where omission was observed.
+  remoteSettingsReviewed:true,
   runtimeFlags:{ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'},
   optionalScriptFields:{limits:{present:false},placement_mode:{present:false},streaming_tail_consumers:{present:false}},
   scriptSettings:{logpush:false,tail_consumers:null,observability:baselineObservability},

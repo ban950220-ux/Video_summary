@@ -1,6 +1,6 @@
 # Read-only active version diagnostic
 
-The read-only preflight has an opt-in active-version diagnostic. The current review branch pins the separately confirmed Worker version and source SHA in the offline baseline while keeping `remoteSettingsReviewed=false`; this diagnostic does not change the Cloudflare Builds command or deploy a Worker.
+The read-only preflight has an opt-in active-version diagnostic. The current review branch pins the separately confirmed Worker version and source SHA. `remoteSettingsReviewed=true` now records the separately reviewed read-only Build `1323e142-ee46-47d2-b541-df604c1a7a50`; it does not deploy a Worker.
 
 In an authorized Workers Builds context with the existing read-only Build token, run:
 
@@ -14,7 +14,7 @@ Use the result as diagnostic evidence for reviewing the pinned remote baseline. 
 
 ## 2026-10-12 access and schema review
 
-The earlier authorized Workers Builds read-only preflight reported
+An earlier authorized Workers Builds read-only preflight reported
 `diagnosticReadSucceeded=true`, `matchesProposedBaseline=false`, and
 `mismatchCode=METADATA_INCOMPLETE`. That run reached its GET endpoints; its
 result is not evidence of a permission denial. The sanitized field diagnosis
@@ -26,9 +26,25 @@ active version's API fields are omitted, null, or inaccessible.
 
 Cloudflare's [Get Worker Script Settings API reference](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/settings/methods/get/)
 marks `logpush`, `observability`, and `tail_consumers` as optional response
-fields. Therefore, requiring `tail_consumers` to be explicitly null and
-every observability subfield to be present is stricter than that endpoint's
-documented response contract. The gate must remain closed until an authorized
-read identifies the actual current field presence and a reviewed policy
-defines how to compare an omitted field. Do not infer null, empty arrays, or
-default values from omission.
+fields. The guard intentionally pins the observed shape, rather than treating
+all optional forms as equivalent. Never infer null, empty arrays, or default
+values from omission.
+
+Build `1323e142-ee46-47d2-b541-df604c1a7a50` ran the existing GET-only
+preflight from production source `fce76164541f2785a0e89953d92e58202aa97701`.
+It reported `diagnosticReadSucceeded=true`, active version
+`1fcd78b0-363c-4cc1-8b7e-1a6571ef455e` at 100%, and the matching source
+annotation. Its `ACTIVE_VERSION_MISMATCH` compares against that old source's
+stale pinned UUID (`28cfd3f4…`), not against the current review baseline.
+The sanitized report independently marked compatibility date/flags,
+observability, optional script fields, logpush, tail consumers, and script
+observability as matching their proposed values. It classified
+`compatibility_flags`, limits, placement, streaming-tail consumers,
+observability destinations and issues as omitted, while script-settings
+`tail_consumers` was explicitly null. The current guard already distinguishes
+those shapes and rejects a change from omission to null or an empty array.
+Review-branch tests reconstruct the observed shape against the current pinned
+UUID/source and check every target, binding, Access, runtime, exposure and
+metadata condition. Cloudflare Builds restored `npm run deploy:production`
+after the diagnostic without a deployment; a later build under that command
+must wait for separate rollout authorization and fresh remote prechecks.

@@ -26,9 +26,10 @@ not been accepted as a complete end-to-end result.
 
 1. Complete the independent code and remote baseline review. Confirm the
    owner-only Access policy, existing D1 binding, free-only settings, secret
-   names, and the exact production Worker version. Keep the Cloudflare Builds
-   deploy command on its read-only preflight setting until the rollout sequence
-   is approved. Do not copy credential values.
+   names, and the exact production Worker version. The approved GET-only
+   diagnostic finished without deploying, and the Cloudflare Builds command
+   is back at `npm run deploy:production`; do not start a production build
+   before separate rollout authorization. Do not copy credential values.
 2. Use the existing job's preserved D1 transcript and failed response. Inspect
    the old response hash and 2,220-token usage, the old and new `raw:0` segment
    ID/time ranges, and the strict schema diagnostic. Record human review,

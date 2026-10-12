@@ -118,9 +118,14 @@ set without changing any expected field or the active version. A post-deploy API
 shape change fails the postcheck rather than being silently accepted.
 That is historical. The current pinned version is
 `1fcd78b0-363c-4cc1-8b7e-1a6571ef455e` from
-`fce76164541f2785a0e89953d92e58202aa97701`, and
-`remoteSettingsReviewed=false` remains the deployment gate while the newer
-preflight's omitted/null/invalid metadata is reviewed.
+`fce76164541f2785a0e89953d92e58202aa97701`. The later read-only Build
+`1323e142-ee46-47d2-b541-df604c1a7a50`
+confirmed the omitted/null distinction and the current pinned version/source.
+The review branch records `remoteSettingsReviewed=true` for that exact shape;
+runtime and Access checks, a fresh pre-deploy read, and separate rollout
+authorization remain required. The Cloudflare Builds deploy command was
+restored to `npm run deploy:production` after the diagnostic. Do not trigger
+a new production build under that command as a diagnostic.
 Pinned Wrangler 4.149.0 normalizes an omitted `compatibility_flags` config
 entry to `[]` in its upload metadata. It is not yet known whether Cloudflare
 will return the newly uploaded version's flags as omitted or as `[]`. If the
@@ -133,14 +138,16 @@ a wildcard.
 
 ### Read-only baseline preflight
 
-`npm run preflight:remote-baseline` is the current Workers Builds deploy command.
-It uses the existing `CLOUDFLARE_API_TOKEN` and requires `WORKERS_CI`,
+`npm run preflight:remote-baseline` is the GET-only diagnostic command used
+temporarily in the approved one-off Build. The current Workers Builds deploy
+command is `npm run deploy:production`; do not start a new Build for diagnosis.
+The diagnostic uses the existing `CLOUDFLARE_API_TOKEN` and requires `WORKERS_CI`,
 reuses the guard's fixed Cloudflare GET endpoints, and never calls Wrangler,
-uploads code, deploys, or writes D1. The actual deploy command remains disabled.
+uploads code, deploys, or writes D1.
 Exit code 0 and `diagnosticReadSucceeded=true` mean only that the read succeeded.
 `matchesProposedBaseline` and a fixed `mismatchCode` separately report the
-guard's diagnostic comparison. The reviewed gate is true in the source, while
-the current Build command still runs only this read-only preflight.
+guard's diagnostic comparison. The review branch records the current baseline;
+the deployed main source still contains its older pinned version.
 The `bindings` result reports availability, unique names, and complete
 expected names/types without listing them. Object key order does not affect
 comparisons. The JSON output contains only comparison booleans, observability
@@ -152,9 +159,9 @@ An empty/absent field shown by this command is evidence to review, not
 automatic approval. The exact observed production response shape was
 independently reconciled before the gate changed.
 
-Its approved baseline currently identifies active version
-`d899f6db-0cab-475b-9fdb-da8c5c8e4301`. A later deployment must update the
-baseline after independently confirming the then-active version. See
+The review baseline identifies active version
+`1fcd78b0-363c-4cc1-8b7e-1a6571ef455e`. A later deployment must recheck
+that version immediately before upload and update the baseline after success. See
 [the remote guard design](remote-deploy-guard-proposal.md).
 
 ### Baseline lifecycle

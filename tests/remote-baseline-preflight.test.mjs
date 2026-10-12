@@ -31,7 +31,7 @@ test('preflight emits only approved booleans, rates, presence and counts',()=>{
  assert.equal(report.target.accessVarsValid,false);
  assert.equal(report.scriptSettings.logpushMatchesProposed,true);
  assert.equal(report.scriptSettings.tailConsumersMatchProposed,false);
- assert.equal(report.reviewGateEnabled,false);
+ assert.equal(report.reviewGateEnabled,true);
  assert.equal(report.diagnosticReadSucceeded,true);
  assert.equal(report.matchesProposedBaseline,false);
  assert.equal(report.mismatchCode,'ROUTES_MISMATCH');
@@ -58,13 +58,41 @@ test('diagnostic ignores object key order and reports complete, unique bindings 
  state.bindings.find(item=>item.name==='ACCESS_TEAM_DOMAIN').text='https://test.cloudflareaccess.com';
  state.deploymentMessage='source-commit:'+approvedRemoteBaseline.sourceCommit;
  state.bindings.push({name:'ASSETS',type:'assets'});
- const report=safeRemoteBaselineReport(state,{WRANGLER_CI_MATCH_TAG:secret});
+ const report=safeRemoteBaselineReport(state,{WRANGLER_CI_MATCH_TAG:secret,REMOTE_PREFLIGHT_VERSION_DIAGNOSTIC:'true'});
  assert.deepEqual(report.bindings,{available:true,unique:true,complete:true});
+ assert.deepEqual(report.versionDiagnostic,{activeVersionId:approvedRemoteBaseline.activeVersionId,sourceCommit:approvedRemoteBaseline.sourceCommit});
+ assert.deepEqual(report.target,{workerMatched:true,productionEnvironment:true,buildTagMatched:true,activeVersionMatchesExpected:true,d1MatchesExpected:true,accessBindingsPresent:true,accessVarsValid:true,runtimeFlagsMatch:true});
+ assert.deepEqual(report.exposure,{workersDev:true,previewUrls:false,routeCount:0,domainCount:0});
+ assert.equal(report.metadata.compatibilityDateMatchesExpected,true);
+ assert.deepEqual(report.metadata.compatibilityFlags,{kind:'OMITTED',count:'OMITTED'});
+ assert.equal(report.metadata.compatibilityFlagsMatchExpected,true);
+ assert.equal(report.metadata.observability.kind,'OBJECT');
+ assert.equal(report.metadata.observability.enabled,true);
+ assert.equal(report.metadata.observability.headSamplingRate,1);
+ assert.equal(report.metadata.observability.redactQueryString,false);
+ assert.equal(report.metadata.observability.logs.kind,'OBJECT');
+ assert.equal(report.metadata.observability.logs.enabled,true);
+ assert.equal(report.metadata.observability.logs.headSamplingRate,1);
+ assert.equal(report.metadata.observability.logs.invocationLogs,true);
+ assert.equal(report.metadata.observability.logs.persist,true);
+ assert.equal(report.metadata.observability.logs.destinationCount,'OMITTED');
+ assert.equal(report.metadata.observability.traces.kind,'OBJECT');
+ assert.equal(report.metadata.observability.traces.enabled,false);
+ assert.equal(report.metadata.observability.traces.headSamplingRate,1);
+ assert.equal(report.metadata.observability.traces.persist,true);
+ assert.equal(report.metadata.observability.traces.destinationCount,'OMITTED');
+ assert.equal(report.metadata.observability.issues.kind,'OMITTED');
+ for(const key of ['limits','placementMode','streamingTailConsumers'])assert.deepEqual(report.metadata[key],{present:false,kind:'OMITTED'});
  assert.equal(report.metadata.observabilityMatchesProposed,true);
  assert.equal(report.metadata.optionalFieldsMatchProposed,true);
+ assert.equal(report.scriptSettings.logpush,false);
+ assert.equal(report.scriptSettings.logpushMatchesProposed,true);
+ assert.equal(report.scriptSettings.tailConsumerCount,'NULL');
+ assert.equal(report.scriptSettings.tailConsumersMatchProposed,true);
+ assert.deepEqual(report.scriptSettings.observability,report.metadata.observability);
  assert.equal(report.scriptSettings.observabilityMatchesProposed,true);
  assert.equal(report.matchesProposedBaseline,true);
- assert.equal(report.reviewGateEnabled,false);
+ assert.equal(report.reviewGateEnabled,true);
  for(const mutate of [
   x=>x.bindings.push({...x.bindings[1]}),
   x=>x.bindings.splice(1,1),
