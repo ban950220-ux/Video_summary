@@ -7,7 +7,7 @@ import {assertGrounding} from './groq-summary.mjs';
 // This is a code candidate, not evidence that this owner's account can call the model.
 export const PAID_SUMMARY_CATALOG=Object.freeze({model:'gemini-3.1-flash-lite',priceVersion:'google-gemini-standard-2026-10-12',priceSource:'https://ai.google.dev/gemini-api/docs/pricing',modelSource:'https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite',inputLimit:1_048_576,outputLimit:65_536,inputPriceMicroUsdPerMillion:250_000,outputPriceMicroUsdPerMillion:1_500_000});
 export const PAID_SUMMARY_OUTPUT_TOKENS=8192;
-export const paidExecutionEnabled=env=>env.ENABLE_PAID_SUMMARY==='true'&&env.ALLOW_PAID_API==='true'&&env.PAID_MODEL_ACCESS_VERIFIED==='true'&&env.PAID_TAX_MAX_BPS_VERIFIED==='true';
+export const paidExecutionEnabled=env=>env.ENABLE_PAID_SUMMARY==='true'&&env.PAID_SUMMARY_EXECUTION_APPROVED==='true'&&env.PAID_MODEL_ACCESS_VERIFIED==='true'&&env.PAID_TAX_MAX_BPS_VERIFIED==='true'&&env.ALLOW_PAID_API==='false';
 const encoder=new TextEncoder();
 const item={type:'object',properties:{text:{type:'string'},evidenceIds:{type:'array',items:{type:'integer'}}},required:['text','evidenceIds'],additionalProperties:false};
 export const PAID_SUMMARY_SCHEMA={type:'object',properties:Object.fromEntries(['summary','chapters','claims','numbers','critical'].map(key=>[key,{type:'array',items:item}])),required:['summary','chapters','claims','numbers','critical','conclusion'],additionalProperties:false};

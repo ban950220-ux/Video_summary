@@ -1,7 +1,9 @@
 # Paid full-summary review contract (offline only)
 
-The paid path is disabled unless `ENABLE_PAID_SUMMARY`, `ALLOW_PAID_API`,
-`PAID_MODEL_ACCESS_VERIFIED`, and `PAID_TAX_MAX_BPS_VERIFIED` are all `true`.
+The paid path is disabled unless `ENABLE_PAID_SUMMARY`,
+`PAID_SUMMARY_EXECUTION_APPROVED`, `PAID_MODEL_ACCESS_VERIFIED`, and
+`PAID_TAX_MAX_BPS_VERIFIED` are all `true`. `ALLOW_PAID_API` stays `false`
+so the existing Groq Free path remains usable.
 This review branch changes none of those production settings and does not apply
 `0008_paid_summary_budget.sql` to production. The 98-minute private transcript
 and the user's provider account were not read or called for this work.
