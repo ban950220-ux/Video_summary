@@ -686,6 +686,7 @@ test('1,954-character stored strict report recovers without a provider call and 
   assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE provider='groq-summary-recovery'").get().n,0);
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(newResult,newId);
   const recovered=await routeApi(request(url,'POST',body),f.env);assert.equal(recovered.status,200,await recovered.clone().text());assert.equal((await recovered.json()).automaticContinuation,false);
+  const choice=await(await routeApi(request(f.path+'/summary-choice'),f.env)).json();assert.equal(choice.summary.savedRawStages,1);assert.equal(choice.summary.remainingRawStages,choice.summary.rawStages-1);
   assert.equal(providerCalls,0);
   assert.deepEqual({...f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(oldId)},{state:'FAILED_UNCERTAIN',error_code:'SUMMARY_RESPONSE_INVALID',result_json:oldResult});
   assert.deepEqual({...f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(newId)},{state:'FAILED_UNCERTAIN',error_code:'SUMMARY_CHECKPOINT_TOO_LARGE',result_json:newResult});

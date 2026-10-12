@@ -314,6 +314,11 @@ async function checkpointRecoveryContext(env,{id,job,source,transcriptHash,legac
  if(row&&!(row.state==='DONE'&&row.result_json===JSON.stringify(record)))stop('SUMMARY_RECOVERY_SCOPE_CHANGED','기존 복구 기록과 현재 근거가 다릅니다.');
  return {evidence,evidenceHash,record,recovered:Boolean(row),recoveredAt:row?.created_at??null,idForRecovery,failedId,failedResultJson:failed.result_json,legacyFailedId:legacyEvidence?oldId:null};
 }
+export async function validatedRecoveredFirstCheckpoint(env,{id,job,source,transcriptHash,legacyTranscriptHash}){
+ const row=await env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(recoveryId(id,transcriptHash),id).first();
+ if(!row)return false;
+ return (await checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash})).recovered;
+}
 async function handleCheckpointRecovery(request,env,context){
  const {id,job,source,transcriptHash}=context,review=await checkpointRecoveryContext(env,context);
  if(request.method==='GET')return json({...review.evidence,evidenceHash:review.evidenceHash,recovered:review.recovered,recoveryRecordExists:review.recovered,automaticContinuation:false,providerCalls:0});

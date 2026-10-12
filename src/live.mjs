@@ -5,7 +5,7 @@ import {normalizeSegments,auditGaps,validateAnalysis,reportPrompt,markdownReport
 import {scanMp3,prepareMp3Chunk,mergeAudioSegments,boundaryMarkersFromRetained} from './audio.mjs';
 import {recordCapacity,reserveObservedCapacity,capacityBounds,persistWait,ensureCapacitySchema,capacityIdentityMatches,capacityIdentity} from './observed-capacity.mjs';
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,summaryUnits,evidenceIds,assertGroupCoverage} from './summary-plan.mjs';
-import {handleGroqSummaryAction,completeSource,partitionGroqTranscript,promptAudit,GROQ_SUMMARY_INPUT_BOUND,GROQ_SUMMARY_COMPLETION_CAP,GROQ_SUMMARY_MODEL} from './groq-summary.mjs';
+import {handleGroqSummaryAction,completeSource,validatedRecoveredFirstCheckpoint,partitionGroqTranscript,promptAudit,GROQ_SUMMARY_INPUT_BOUND,GROQ_SUMMARY_COMPLETION_CAP,GROQ_SUMMARY_MODEL} from './groq-summary.mjs';
 const liveTables=['yta_sources','yta_quota','yta_operations','yta_audio'];
 export async function ensureLiveSchema(env){
  if(!env.DB)throw new ProviderError('DB_REQUIRED','D1 연결 필요');
@@ -360,9 +360,10 @@ export async function routeLive(request,env){
   if(action==='summary-choice'&&request.method==='GET'){
    const source=await sourceOf(env,id),complete=job.audit?.audioProcessingCoverage===1&&Array.isArray(source?.segments)&&source.segments.length>0;
    const groups=complete?partitionGroqTranscript(source.segments,promptAudit(job)):[];
-   const transcriptHash=complete?(await completeSource(env,job,sourceOf)).transcriptHash:null,stagePrefix=id+':groq-summary:'+transcriptHash+':';
+   const sourceScope=complete?await completeSource(env,job,sourceOf):null,transcriptHash=sourceScope?.transcriptHash??null,stagePrefix=id+':groq-summary:'+transcriptHash+':';
    const rows=complete?(await env.DB.prepare("SELECT id,state FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(id,stagePrefix,stagePrefix).all()).results||[]:[];
-   const savedRaw=groups.filter((_,index)=>rows.some(row=>row.id===stagePrefix+'raw:'+index&&row.state==='DONE')).length;
+   const recovered=complete&&await validatedRecoveredFirstCheckpoint(env,{id,job,source,transcriptHash,legacyTranscriptHash:sourceScope.legacyTranscriptHash});
+   const savedRaw=groups.filter((_,index)=>rows.some(row=>row.id===stagePrefix+'raw:'+index&&row.state==='DONE')||(index===0&&recovered)).length;
    return json({jobId:id,transcription:{complete,remainingChunks:complete?0:'UNKNOWN',repeatRequired:false},summary:{complete:!!job.report,rawStages:groups.length,savedRawStages:savedRaw,remainingRawStages:groups.length-savedRaw,requestedOutput:'FULL_VIDEO_SYNTHESIS',intermediateOutput:'RAW_CHECKPOINT_BUNDLE'},free:{model:GROQ_SUMMARY_MODEL,inputTokensUpperPerCall:GROQ_SUMMARY_INPUT_BOUND,outputTokensUpperPerCall:GROQ_SUMMARY_COMPLETION_CAP,accountRemaining:'UNKNOWN',eta:{status:'UNKNOWN',reason:'검증된 남은 계정 용량과 실제 단계별 대기 시간이 없습니다.'},automaticPaidFallback:false},paid:{executionEnabled:false,quoteStatus:'UNAVAILABLE',reason:'검증된 모델·가격 버전·세금 범위가 없어 금액 승인을 제시할 수 없습니다.',model:null,priceVersion:null,priceSource:null,inputTokensUpper:null,outputTokensUpper:null,maxRetries:null,maxTaxBps:null,maxMicroUsd:null,eta:{status:'UNKNOWN',reason:'검증된 모델 및 제공자 처리 시간 관측치가 없습니다.'},automaticFreeFallback:false}});
   }
   if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id),...boundaryAuditView(job.audit)});

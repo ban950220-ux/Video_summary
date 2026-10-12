@@ -1,6 +1,6 @@
 -- Dormant paid-summary contract and conservative reservation ledger. No provider dispatch uses these tables.
 CREATE TABLE IF NOT EXISTS yta_paid_summary_approvals(
- id TEXT PRIMARY KEY, job_id TEXT NOT NULL, owner_id TEXT NOT NULL CHECK(owner_id='owner'),
+ id TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE, owner_id TEXT NOT NULL CHECK(owner_id='owner'),
  source_sha256 TEXT NOT NULL, quote_sha256 TEXT NOT NULL, quote_json TEXT NOT NULL, model TEXT NOT NULL,
  price_version TEXT NOT NULL, credential_generation TEXT NOT NULL,
  max_micro_usd INTEGER NOT NULL CHECK(max_micro_usd>0), max_call_micro_usd INTEGER NOT NULL CHECK(max_call_micro_usd>0), max_calls INTEGER NOT NULL CHECK(max_calls>0),
