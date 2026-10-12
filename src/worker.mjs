@@ -73,10 +73,13 @@ async function listJobs(env,url){
   const q=(url.searchParams.get('q')||'').trim().slice(0,100);
   const pattern='%'+q.replace(/[\\%_]/g,c=>'\\'+c)+'%';
   const stmt=q
-    ? env.DB.prepare("SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json FROM jobs WHERE owner_id = ? AND (title LIKE ? ESCAPE '\\' OR video_id LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ? OFFSET ?").bind('owner',pattern,pattern,limit,offset)
-    : env.DB.prepare('SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json FROM jobs WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?').bind('owner',limit,offset);
+    ? env.DB.prepare("SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json FROM jobs WHERE owner_id = ? AND (title LIKE ? ESCAPE '\\' OR video_id LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ? OFFSET ?").bind('owner',pattern,pattern,limit,offset)
+    : env.DB.prepare('SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json FROM jobs WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?').bind('owner',limit,offset);
   const rows=(await stmt.all()).results??[];
-  return json({jobs:rows.map(({report_json,...row})=>({...row,summary:JSON.parse(report_json||'null')?.summary??[]})),limit,offset,hasMore:rows.length===limit,source:'D1'});
+  return json({jobs:rows.map(({report_json,audit_json,...row})=>{
+    const audit=JSON.parse(audit_json||'null');
+    return {...row,summary:JSON.parse(report_json||'null')?.summary??[],nativePollReady:row.source_type==='url'&&row.status==='NATIVE_PENDING'&&typeof audit?.providerJobId==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(audit.providerJobId),audioTranscriptComplete:row.source_type==='audio'&&audit?.audioProcessing==='ALL_PLANNED_CHUNKS_PROCESSED'&&audit.audioProcessingCoverage===1};
+  }),limit,offset,hasMore:rows.length===limit,source:'D1'});
 }
 async function credentialEvent(env,provider,event){
   await env.DB.prepare('INSERT INTO provider_credential_events(id,owner_id,provider,event_type,at) VALUES(?,?,?,?,?)')

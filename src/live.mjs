@@ -385,7 +385,7 @@ export async function routeLive(request,env){
    return json(await storeTranscriptResult(env,job,response.segments,'SUPADATA_NATIVE', {providerCompleteness:'NOT_INDEPENDENTLY_VERIFIED'}));
   }
   if(action==='native-poll'&&request.method==='POST'){
-   if(job.status!=='NATIVE_PENDING'||!job.audit?.providerJobId)throw new InputError('조회할 자막 대기 작업이 없습니다.');
+   if(job.source_type!=='url'||job.status!=='NATIVE_PENDING'||typeof job.audit?.providerJobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(job.audit.providerJobId))throw new InputError('조회할 Supadata 자막 대기 작업이 없습니다.');
    const active=await grantEnv(env,'supadata');
    const reserve=await env.DB.prepare('UPDATE yta_quota SET consumed=consumed+1,request_count=request_count+1 WHERE provider=? AND consumed+1<=allowance AND request_count<request_limit AND expires_at>?').bind('supadata',Date.now()).run();
    if(reserve.meta?.changes!==1)throw new ProviderError('QUOTA_EXHAUSTED','조회용 무료 할당 부족');

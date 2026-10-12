@@ -69,6 +69,8 @@ test('checkpoint recovery UI requires explicit review and never starts a provide
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCheckpointRecoveryChoice({id:'job-a'},target,0);
  await new Promise(resolve=>setTimeout(resolve,0));
  const host=target.children[0],form=host.children.find(item=>item.tag==='form');assert.ok(form);assert.equal(calls.length,1);
+ assert.match(host.children[0].textContent,/Groq Free 첫 구간 보고서 복구 · 전체 요약 아님/);
+ assert.equal(form.children.at(-1).textContent,'Groq Free 첫 구간 저장 보고서만 복구');
  await form.onsubmit({preventDefault(){}});assert.equal(calls.length,1);
  for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
  await form.onsubmit({preventDefault(){}});
@@ -157,7 +159,8 @@ test('paid choice offers no-call revalidation only for a complete stored receipt
   const status={approval:{id:'approval-a',state:'APPROVED'},reservations:[{id:'reservation-a',state:'SETTLED',outcome:'REPORT_NOT_SAVED'}],executionReady:false,receipt:hasReceipt?{revalidationAvailable:true,response_bytes:1234,error_code:'PAID_REPORT_WINDOW_COVERAGE'}:null};
   const fetcher=async(path,options)=>{calls.push({path,method:options.method,body:options.body&&JSON.parse(options.body)});const result=path.endsWith('summary-choice')?choice:status;return {ok:true,headers:{get:()=> 'application/json'},json:async()=>result};};
   const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent,clearTimeout,setTimeout:()=>0};runInNewContext(source,context);context.__state.view='library';context.__showSummaryChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
-  const host=target.children[0],button=host.children.find(item=>item.textContent==='보존 응답만 재검증 · 제공자 호출 없음');assert.equal(!!button,hasReceipt);
+  const host=target.children[0],button=host.children.find(item=>item.textContent==='Gemini 유료 전체 응답 영수증 재검증 · 제공자 호출 없음');assert.equal(!!button,hasReceipt);
+  if(hasReceipt)assert.match(host.children.find(item=>item.textContent?.includes('응답 영수증')).textContent,/Gemini 유료 전체 요약/);
   assert.equal(calls.some(call=>call.method==='POST'),false);
  }
 });
@@ -172,7 +175,7 @@ test('paid receipt recovery stays available without a new quote and retains cost
   const fetcher=async(path,options)=>{calls.push({path,method:options.method});if(path.endsWith('/summary-choice'))return {ok:true,headers:{get:()=> 'application/json'},json:async()=>choice};if(path.endsWith('/paid-summary-revalidate')){saved=true;if(lost)throw Error('response lost');return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({job:reportJob,costReconciliation:'REVIEW_REQUIRED'})};}if(path.endsWith('/paid-summary-status'))return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({approval:{id:'approval-a',state:'APPROVED'},reservations:[{id:'reservation-a',state:'UNCERTAIN'}],receipt:saved?{revalidationAvailable:false}:{revalidationAvailable:true,response_bytes:1234},finalReportSaved:saved,costReconciliation:saved?'REVIEW_REQUIRED':null})};if(path==='/api/jobs/job-a')return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({job:reportJob})};throw Error('unexpected request '+path);};
   const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showSummaryChoice=showSummaryChoice;globalThis.__state=state;');
   const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent,clearTimeout,setTimeout:()=>0};runInNewContext(source,context);context.__state.view='library';context.__showSummaryChoice({id:'job-a'},target,0);await tick();
-  assert.doesNotMatch(collect(target),/서버 유료 견적 발급/);const button=target.children[0].children.find(item=>item.textContent==='보존 응답만 재검증 · 제공자 호출 없음');assert.ok(button);await button.onclick();await tick();
+  assert.doesNotMatch(collect(target),/서버 유료 견적 발급/);const button=target.children[0].children.find(item=>item.textContent==='Gemini 유료 전체 응답 영수증 재검증 · 제공자 호출 없음');assert.ok(button);await button.onclick();await tick();
   assert.equal(saved,true);assert.match(collect(target),/비용 원장은 검토가 필요/);assert.match(collect(target),/저장된 결론/);assert.equal(calls.filter(call=>call.method==='POST').length,1);assert.equal(calls.some(call=>call.path.endsWith('/paid-summary-quote')),false);
  }
 });

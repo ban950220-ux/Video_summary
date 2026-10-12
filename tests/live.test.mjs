@@ -19,6 +19,26 @@ async function job(env){return (await(await routeApi(request('/api/jobs','POST',
 async function grant(env,allowance=250000){const r=await routeApi(request('/api/live/quota','PUT',{provider:'gemini',allowance,requestLimit:5,billingDisabled:true,freeOnly:true}),env);assert.equal(r.status,200);}
 async function consent(env,id,sha){const r=await routeApi(request('/api/jobs/'+id+'/audio-consent','POST',{provider:'gemini',fileSha256:sha,consent:true}),env);assert.equal(r.status,200);}
 const valid=()=>({summary:[{text:'테스트 발언',evidenceIds:[1]}],chapters:[{text:'시작 발언',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실 미검증'});
+test('history exposes native polling only for a valid pending URL job and rejects other POSTs before quota',async()=>{
+ const {db,env}=setup();
+ try{
+  const url=(await(await routeApi(request('/api/jobs','POST',{sourceType:'url',url:'https://www.youtube.com/watch?v=2hUkTmwYm3A',durationSeconds:60}),env)).json()).job;
+  const audio=(await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:60}),env)).json()).job;
+  const listed=async()=>(await(await routeApi(request('/api/jobs'),env)).json()).jobs;
+  assert.equal((await listed()).some(item=>item.nativePollReady),false);
+  db.prepare('UPDATE jobs SET status=?,audit_json=? WHERE id=?').run('NATIVE_PENDING',JSON.stringify({providerJobId:'native-123'}),url.id);
+  db.prepare('UPDATE jobs SET status=?,audit_json=? WHERE id=?').run('NATIVE_PENDING',JSON.stringify({providerJobId:'native-123',audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1}),audio.id);
+  let rows=await listed();assert.equal(rows.find(item=>item.id===url.id).nativePollReady,true);assert.equal(rows.find(item=>item.id===audio.id).nativePollReady,false);assert.equal(rows.find(item=>item.id===audio.id).audioTranscriptComplete,true);
+  const wrongType=await routeApi(request('/api/jobs/'+audio.id+'/native-poll','POST',{}),env);assert.equal(wrongType.status,400);assert.match((await wrongType.json()).error.message,/Supadata/);
+  db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify({providerJobId:'invalid/id'}),url.id);
+  rows=await listed();assert.equal(rows.find(item=>item.id===url.id).nativePollReady,false);
+  assert.equal((await routeApi(request('/api/jobs/'+url.id+'/native-poll','POST',{}),env)).status,400);
+  db.prepare('UPDATE jobs SET status=? WHERE id=?').run('NEED_UPLOAD',url.id);
+  assert.equal((await listed()).find(item=>item.id===url.id).nativePollReady,false);
+  assert.equal((await routeApi(request('/api/jobs/'+url.id+'/native-poll','POST',{}),env)).status,400);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_quota').get().n,0);
+ }finally{db.close();}
+});
 async function freeBatchFixture(){
  const {db,env}=setup(),bytes=new Uint8Array(383*417);for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);
  const seconds=scanMp3(bytes).durationSeconds,created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds*2}),env)).json(),id=created.job.id,path='/api/jobs/'+id,fileSha256='b'.repeat(64);
