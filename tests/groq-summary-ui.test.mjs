@@ -97,6 +97,21 @@ test('remaining summary choice shows unknown ETA and no paid execution control',
  assert.match(labels,/남은 전사 0조각/);assert.match(labels,/전체 영상의 단일 종합 요약/);assert.match(labels,/소요 시간 UNKNOWN/);assert.match(labels,/가격 버전 미검증/);
  assert.equal(host.children.some(item=>item.tag==='button'&&/유료/.test(item.textContent||'')),false);
 });
+test('paid choice issues server quote then records explicit caps without provider execution',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},replaceWith(){},setAttribute(key,value){this[key]=value;}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
+ const choice={transcription:{complete:true,remainingChunks:0},summary:{complete:false,savedRawStages:0,rawStages:4,remainingRawStages:4},free:{model:'mock-free',inputTokensUpperPerCall:4800,outputTokensUpperPerCall:1800,eta:{reason:'관측치 없음'}},paid:{executionEnabled:false,quoteIssueReady:true,reason:'계정 사용 가능성 미검증',model:'gemini-3.1-flash-lite',priceVersion:'v1',inputTokensUpper:1048576,outputTokensUpper:65536,maxRetries:0,maxTaxBps:10000,maxMicroUsd:720896}};
+ const issued={quoteId:'server-id',quote:{model:'gemini-3.1-flash-lite',priceVersion:'v1',priceInputMicroUsdPerMillion:250000,priceOutputMicroUsdPerMillion:1500000,inputTokensUpper:1048576,outputTokensUpper:65536,plannedCalls:1,maxRetries:0,maxTaxBps:10000,maxCallMicroUsd:720896,maxMicroUsd:720896,maxCalls:1,expiresAt:Date.now()+600000}};
+ const calls=[],fetcher=async(path,options)=>{calls.push({path,method:options.method,body:options.body&&JSON.parse(options.body)});const result=path.endsWith('/summary-choice')?choice:path.endsWith('/paid-summary-quote')?issued:path.endsWith('/paid-summary-status')?{approval:null,reservations:[]}:path.endsWith('/paid-summary-approve')?{id:'server-id',automaticExecution:false}:null;return {ok:true,headers:{get:()=> 'application/json'},json:async()=>result};};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showSummaryChoice=showSummaryChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent,clearTimeout,setTimeout:()=>0};
+ runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showSummaryChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
+ const choiceHost=target.children[0],issue=choiceHost.children.find(item=>item.tag==='button'&&item.textContent?.includes('견적 발급'));assert.ok(issue);await issue.onclick();
+ const paidHost=target.children[0],form=paidHost.children.find(item=>item.tag==='form');assert.ok(form);for(const row of form.children.filter(item=>item.tag==='label'))for(const input of row.children.filter(item=>item.tag==='input'))if(input.type==='checkbox')input.checked=true;
+ await form.onsubmit({preventDefault(){}});
+ assert.deepEqual(calls.filter(call=>call.method==='POST').map(call=>call.path),['/api/jobs/job-a/paid-summary-quote','/api/jobs/job-a/paid-summary-approve']);
+ const approval=calls.find(call=>call.path.endsWith('/paid-summary-approve')).body;assert.equal(approval.quoteId,'server-id');assert.equal(approval.maxMicroUsd,720896);assert.equal(approval.maxCalls,1);assert.equal(approval.confirmNoAutomaticFallback,true);
+ assert.equal(paidHost.children.some(item=>item.tag==='button'&&item.textContent?.includes('1회 실행')),false);
+});
 
 test('lost checkpoint recovery POST and failed status GET leave only read-only reconciliation',async()=>{
  const node=tag=>({tag,children:[],hidden:false,dataset:{},disabled:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';

@@ -17,14 +17,14 @@ function fixture(){
  return {db,DB,env:{DB},jobId,snapshot};
 }
 
-test('stored transcript choice remains read-only and never presents an unverified paid price',async()=>{
+test('stored transcript choice remains read-only and labels catalog price as an unverified candidate',async()=>{
  const f=fixture();try{
   let writes=0;const env={DB:{prepare(sql){if(!/^SELECT\b/i.test(sql.trim())){writes++;throw Error('unexpected write');}return f.DB.prepare(sql);}},ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false'};
   const response=await routeApi(new Request('https://test.invalid/api/jobs/'+f.jobId+'/summary-choice'),env),choice=await response.json();
   assert.equal(response.status,200,JSON.stringify(choice));assert.equal(choice.transcription.remainingChunks,0);assert.equal(choice.summary.savedRawStages,0);
   assert.equal(choice.summary.requestedOutput,'FULL_VIDEO_SYNTHESIS');assert.equal(choice.summary.intermediateOutput,'RAW_CHECKPOINT_BUNDLE');
   assert.equal(choice.free.eta.status,'UNKNOWN');assert.equal(choice.free.automaticPaidFallback,false);
-  assert.equal(choice.paid.executionEnabled,false);assert.equal(choice.paid.maxMicroUsd,null);assert.equal(choice.paid.priceVersion,null);assert.equal(choice.paid.eta.status,'UNKNOWN');assert.equal(writes,0);
+  assert.equal(choice.paid.executionEnabled,false);assert.equal(choice.paid.quoteIssueReady,true);assert.equal(choice.paid.maxMicroUsd,720896);assert.equal(choice.paid.priceVersion,'google-gemini-standard-2026-10-12');assert.match(choice.paid.reason,/미검증/);assert.equal(choice.paid.eta.status,'UNKNOWN');assert.equal(writes,0);
  }finally{f.db.close();}
 });
 
