@@ -414,6 +414,42 @@ test('hierarchical Groq stages preserve source evidence and resume completed che
   assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE provider='groq-summary' AND state='DONE'").get().n,calls);
  }finally{globalThis.fetch=old;f.db.close();}
 });
+test('four mergeable raw checkpoints keep approval and synthesis available',async()=>{
+ const f=await fixture({large:true}),old=fetch,calls=[];
+ try{
+  const groups=partitionGroqTranscript(f.segments,promptAudit({duration_seconds:600,audit:JSON.parse(f.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(f.id).audit_json)}));
+  assert.equal(groups.length,4);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);
+  for(const [i,group] of groups.entries()){
+   const report={summary:[{text:'구간 요약',evidenceIds:[group[0].id]}],chapters:group.map(segment=>({text:'구간 장면',evidenceIds:[segment.id]})),claims:[],numbers:[],critical:[],conclusion:'검증된 구간'};
+   f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?, 'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+f.plan.transcriptHash+':raw:'+i,f.id,new Date(Date.now()-62000).toISOString(),JSON.stringify({hash:f.plan.transcriptHash,key:'raw:'+i,report}));
+  }
+  const review=await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json();
+  assert.equal(review.bundleAvailable,undefined);assert.equal(review.approved,true);
+  const bundle=await routeApi(request(f.path+'/groq-summary-bundle'),f.env);assert.equal((await bundle.json()).error.code,'SUMMARY_BUNDLE_NOT_READY');
+  globalThis.fetch=async(_url,options)=>{calls.push(options);const ids=JSON.parse(JSON.parse(options.body).messages[1].content.split('시간 순서별 부분 보고서:\n')[1]).flatMap(part=>part.idRange?Array.from({length:part.idRange[1]-part.idRange[0]+1},(_,i)=>part.idRange[0]+i):part.ids);return response({summary:[{text:'종합 요약',evidenceIds:[ids[0]]}],chapters:[{text:'종합 장',evidenceIds:ids}],claims:[],numbers:[],critical:[],conclusion:'전체 종합'});};
+  const next=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal(next.status,202,await next.clone().text());assert.equal(calls.length,1);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('saved intermediate merge does not turn a short synthesis into a bundle',async()=>{
+ const f=await fixture({large:true}),old=fetch;
+ try{
+  const audit=promptAudit({duration_seconds:600,audit:JSON.parse(f.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(f.id).audit_json)}),groups=partitionGroqTranscript(f.segments,audit);
+  assert.equal(groups.length,4);
+  const make=(group,n)=>({summary:[{text:'요'.repeat(n),evidenceIds:[group[0].id]}],chapters:group.map(segment=>({text:'구간 장',evidenceIds:[segment.id]})),claims:[],numbers:[],critical:[],conclusion:'결'.repeat(n)});
+  let reports,parts;
+  for(let n=10;n<250;n+=5){reports=groups.map(group=>make(group,n));parts=groups.map((group,i)=>({ids:group.map(segment=>segment.id),startMs:group[0].startMs,endMs:group.at(-1).endMs,report:reports[i]}));const bound=k=>groqInputUpperBound(groqSummaryMessages(groqMergePrompt(parts.slice(0,k),audit,{final:true})));if(bound(2)<=4800&&bound(3)>4800&&bound(1)<=4800)break;}
+  assert.ok(groqInputUpperBound(groqSummaryMessages(groqMergePrompt(parts.slice(0,2),audit,{final:true})))<=4800);
+  assert.ok(groqInputUpperBound(groqSummaryMessages(groqMergePrompt(parts.slice(0,3),audit,{final:true})))>4800);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);
+  for(const [i,report] of reports.entries())f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?, 'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+f.plan.transcriptHash+':raw:'+i,f.id,new Date(Date.now()-62000).toISOString(),JSON.stringify({hash:f.plan.transcriptHash,key:'raw:'+i,report}));
+  let calls=0;globalThis.fetch=async(_url,options)=>{calls++;const ids=JSON.parse(JSON.parse(options.body).messages[1].content.split('시간 순서별 부분 보고서:\n')[1]).flatMap(part=>part.idRange?Array.from({length:part.idRange[1]-part.idRange[0]+1},(_,i)=>part.idRange[0]+i):part.ids);return response({summary:[{text:'중간 종합',evidenceIds:[ids[0]]}],chapters:[{text:'중간 장',evidenceIds:ids}],claims:[],numbers:[],critical:[],conclusion:'중간 결과'});};
+  const first=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal(first.status,202,await first.clone().text());assert.equal(calls,1);
+  const review=await routeApi(request(f.path+'/groq-summary-approval'),f.env),body=await review.json();assert.equal(review.status,200);assert.equal(body.bundleAvailable,undefined);assert.equal(body.approved,true);
+  f.db.prepare("UPDATE yta_operations SET created_at=? WHERE job_id=? AND provider='groq-summary' AND state='DONE'").run(new Date(Date.now()-62000).toISOString(),f.id);
+  const next=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal(next.status,202,await next.clone().text());assert.equal(calls,2);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
 test('429, truncation, unsupported number and invalid evidence stop approval without automatic retries',async()=>{
  for(const mode of ['429','truncated','invalid','unsupported-number']){
   const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;return mode==='429'?Response.json({}, {status:429,headers:{'retry-after':'60'}}):mode==='truncated'?response(valid(1),{choices:[{finish_reason:'length',message:{content:JSON.stringify(valid(1))}}]}):mode==='unsupported-number'?response({...valid(1),numbers:[{text:'999명',evidenceIds:[1]}]}):response(valid(999));};
@@ -710,6 +746,8 @@ test('1,226 source segments and 1,954-character chapter-rich checkpoints compose
   const exported=await routeApi(request(f.path+'/groq-summary-bundle?format=txt'),f.env),txt=await exported.text();
   assert.equal(exported.status,200);assert.match(exported.headers.get('content-disposition'),/\.txt"$/);
   assert.ok(txt.includes('전체 종합 요약 미완료'));assert.ok(txt.includes(originals[0].chapters[0].text));assert.ok(txt.includes('#1226'));
+  assert.ok(txt.includes('보존된 겹침 경계 불확실성: 14개'));assert.ok(txt.includes('영향 근거 ID: #2, #35'));
+  assert.ok(txt.includes(`#1226 @ ${segments.at(-1).startMs}–${segments.at(-1).endMs}ms`));
   assert.ok([null,'null'].includes(f.db.prepare('SELECT report_json FROM jobs WHERE id=?').get(f.id).report_json));
  }finally{globalThis.fetch=oldFetch;f.db.close();}
 });

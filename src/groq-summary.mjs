@@ -342,7 +342,7 @@ function assembledCheckpointReport({rows,id,hash,groups,source,audit}){
  assertGroupCoverage(parts[0].report,groups.map(group=>({ids:group.map(part=>part.id)})));
  return parts[0].report;
 }
-async function rawCheckpointBundle({rows,id,hash,groups,source}){
+async function rawCheckpointBundle({rows,id,hash,groups,source,audit}){
  const parts=[];
  for(let i=0;i<groups.length;i++){
   const group=groups[i],key='raw:'+i,row=rows.find(item=>item.id===stageId(id,hash,key));
@@ -352,17 +352,26 @@ async function rawCheckpointBundle({rows,id,hash,groups,source}){
   const report=checkedReport(JSON.stringify(saved.report),group,[{ids:group.map(part=>part.id)}]);
   parts.push({ids:group.map(part=>part.id),startMs:group[0].startMs,endMs:group.at(-1).endMs,report});
  }
+ if(!needsLosslessComposition(parts,audit)){
+  try{partitionGroqSynthesis(parts,audit);return null;}
+  catch(error){if(error?.code!=='SUMMARY_STAGE_TOO_LONG')throw error;}
+ }
  assertNoSavedMergeForComposition(rows);
  const report=composeRawReports(parts,source,groups);
  const bundleHash=await sha(JSON.stringify([BUNDLE_CONTRACT_VERSION,hash,...groups.map((_,i)=>rows.find(row=>row.id===stageId(id,hash,'raw:'+i)).result_json)]));
  return {outputKind:'RAW_CHECKPOINT_BUNDLE',bundleContractVersion:BUNDLE_CONTRACT_VERSION,transcriptHash:hash,bundleHash,sourceCheckpointCount:parts.length,finalSummaryComplete:false,persistedRawCheckpoints:true,report};
 }
-function bundleExport(bundle,source){
- const lines=['# 구간별 요약 묶음 · 전체 종합 요약 미완료','','- 묶음 계약: '+bundle.bundleContractVersion,'- 원본 계약 해시: '+bundle.transcriptHash,'- 묶음 SHA-256: '+bundle.bundleHash,'- 저장된 구간 보고서: '+bundle.sourceCheckpointCount+'개','- 별도 모델 종합 요약: 미완료','','## 구간별 요약 항목',''];
- for(const item of bundle.report.summary)lines.push('- '+item.text+' (원문 #'+item.evidenceIds.join(', #')+')');
- lines.push('','## 시간순 구간별 장','');for(const item of bundle.report.chapters)lines.push('- '+item.text+' (원문 #'+item.evidenceIds.join(', #')+')');
- for(const [key,label] of [['claims','구간별 주장'],['numbers','구간별 수치'],['critical','구간별 비판 항목']]){lines.push('','## '+label,'');for(const item of bundle.report[key])lines.push('- '+item.text+' (원문 #'+item.evidenceIds.join(', #')+')');}
- lines.push('','## 구간별 결론 원순서','',bundle.report.conclusion,'','## 저장된 전체 전사','',source.raw);
+function bundleExport(bundle,source,audit){
+ const byId=new Map(source.segments.map(segment=>[segment.id,segment]));
+ const refs=item=>item.evidenceIds.map(id=>{const segment=byId.get(id);return '#'+id+(segment?` @ ${segment.startMs}–${segment.endMs}ms`:'');}).join(', ');
+ const ambiguous=(Array.isArray(audit?.audioBoundaryAmbiguities)?audit.audioBoundaryAmbiguities:[]).filter(item=>Number.isSafeInteger(item?.segmentId)&&item.segmentId>0);
+ const lines=['# 구간별 요약 묶음 · 전체 종합 요약 미완료','','- 묶음 계약: '+bundle.bundleContractVersion,'- 원본 계약 해시: '+bundle.transcriptHash,'- 묶음 SHA-256: '+bundle.bundleHash,'- 저장된 구간 보고서: '+bundle.sourceCheckpointCount+'개','- 별도 모델 종합 요약: 미완료','- 보존된 겹침 경계 불확실성: '+ambiguous.length+'개; 영향 근거 ID: '+(ambiguous.map(item=>'#'+item.segmentId).join(', ')||'없음'),'','## 구간별 요약 항목',''];
+ for(const item of bundle.report.summary)lines.push('- '+item.text+' (원문 '+refs(item)+')');
+ lines.push('','## 시간순 구간별 장','');for(const item of bundle.report.chapters)lines.push('- '+item.text+' (원문 '+refs(item)+')');
+ for(const [key,label] of [['claims','구간별 주장'],['numbers','구간별 수치'],['critical','구간별 비판 항목']]){lines.push('','## '+label,'');for(const item of bundle.report[key])lines.push('- '+item.text+' (원문 '+refs(item)+')');}
+ lines.push('','## 구간별 결론 원순서','',bundle.report.conclusion,'','## 시각이 보존된 전사 구간','');
+ for(const segment of source.segments)lines.push(`- #${segment.id} @ ${segment.startMs}–${segment.endMs}ms: ${segment.text}`);
+ lines.push('','## 저장된 전체 전사','',source.raw);
  return lines.join('\n');
 }
 async function saveFinalReport(env,id,job,source,report,ownedJob){
@@ -434,10 +443,10 @@ export async function handleGroqSummaryAction(request,env,{id,action,job,sourceO
  if(recovery?.recovered){const index=rows.findIndex(row=>row.id===recovery.failedId);if(index<0||rows[index].state!=='FAILED_UNCERTAIN')stop('SUMMARY_RECOVERY_SCOPE_CHANGED','복구된 첫 단계의 원본 실패가 변경됐습니다.');rows[index]={id:recovery.failedId,state:'DONE',result_json:JSON.stringify({hash:transcriptHash,key:'raw:0',report:recovery.record.report,recoveredWithoutProviderCall:true})};}
  if(rows.some(row=>row.state!=='DONE'))stop('SUMMARY_OPERATION_REVIEW_REQUIRED','이전 단계의 불명확한 호출을 검토하세요.');
  if(action==='groq-summary-bundle'&&request.method==='GET'){
-  const bundle=await rawCheckpointBundle({rows,id,hash:transcriptHash,groups,source});
+  const bundle=await rawCheckpointBundle({rows,id,hash:transcriptHash,groups,source,audit});
   if(!bundle)stop('SUMMARY_BUNDLE_NOT_READY','검증된 구간 보고서가 아직 모두 저장되지 않았습니다.');
   const format=new URL(request.url).searchParams.get('format');
-  if(format==='txt'||format==='md')return new Response(bundleExport(bundle,source),{headers:{'content-type':format==='txt'?'text/plain; charset=utf-8':'text/markdown; charset=utf-8','cache-control':'no-store','content-disposition':`attachment; filename="checkpoint-bundle-${id}.${format}"`}});
+  if(format==='txt'||format==='md')return new Response(bundleExport(bundle,source,job.audit),{headers:{'content-type':format==='txt'?'text/plain; charset=utf-8':'text/markdown; charset=utf-8','cache-control':'no-store','content-disposition':`attachment; filename="checkpoint-bundle-${id}.${format}"`}});
   return json(bundle);
  }
  const completed=rows.length;if(completed>totalRequests)stop('SUMMARY_OPERATION_REVIEW_REQUIRED','저장된 요약 단계 수를 검토하세요.');
@@ -448,11 +457,11 @@ export async function handleGroqSummaryAction(request,env,{id,action,job,sourceO
  if(action==='groq-summary-plan'&&request.method==='GET')return json({approved:false,...proposed,rawStages:groups.length});
  if(action==='groq-summary-approval'&&request.method==='GET'){
   if(await read('CHECKPOINT',()=>assembledCheckpointReport({rows,id,hash:transcriptHash,groups,source,audit})))return json({approved:false,finalizationReady:true,jobId:id,transcriptHash,completed,remainingAccountTokens:'UNKNOWN'});
-  if(completed>=groups.length){const bundle=await rawCheckpointBundle({rows,id,hash:transcriptHash,groups,source});if(bundle)return json({approved:false,bundleAvailable:true,jobId:id,transcriptHash,outputKind:'RAW_CHECKPOINT_BUNDLE',bundleContractVersion:BUNDLE_CONTRACT_VERSION,bundleHash:bundle.bundleHash,rawStages:groups.length,finalSummaryComplete:false,automaticContinuation:false});}
+  if(completed>=groups.length){const bundle=await rawCheckpointBundle({rows,id,hash:transcriptHash,groups,source,audit});if(bundle)return json({approved:false,bundleAvailable:true,jobId:id,transcriptHash,outputKind:'RAW_CHECKPOINT_BUNDLE',bundleContractVersion:BUNDLE_CONTRACT_VERSION,bundleHash:bundle.bundleHash,rawStages:groups.length,finalSummaryComplete:false,automaticContinuation:false});}
   return json(previous?.state==='APPROVED'&&previous.expiresAt>Date.now()&&completed<previous.windowStart+previous.maxRequests?approvalPublic(previous):{approved:false,...proposed,credentialGeneration:await read('CREDENTIAL',()=>credentialGeneration(env,id,transcriptHash,scopeTag))});
  }
  if(action==='groq-summary-approval'&&request.method==='POST'){
-  if(completed>=groups.length&&await rawCheckpointBundle({rows,id,hash:transcriptHash,groups,source}))stop('SUMMARY_SYNTHESIS_PLAN_REQUIRED','구간별 묶음 이후 전체 종합 요약의 별도 계획·계약이 필요합니다.');
+  if(completed>=groups.length&&await rawCheckpointBundle({rows,id,hash:transcriptHash,groups,source,audit}))stop('SUMMARY_SYNTHESIS_PLAN_REQUIRED','구간별 묶음 이후 전체 종합 요약의 별도 계획·계약이 필요합니다.');
   let body;try{body=await request.json();}catch{throw new InputError('요약 승인 JSON 오류');}
   if(env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true'||maxRequests<1||body?.jobId!==id||body.transcriptHash!==transcriptHash||body.model!==GROQ_SUMMARY_MODEL||body.outputKind!=='FULL_VIDEO_SYNTHESIS'||body.windowStart!==windowStart||body.totalRequests!==totalRequests||body.maxRequests!==maxRequests||body.maxInputTokensPerRequest!==GROQ_SUMMARY_INPUT_BOUND||body.maxCompletionTokensPerRequest!==GROQ_SUMMARY_COMPLETION_CAP||body.totalTokenUpperBound!==totalTokenUpperBound||body.freeTierConfirmed!==true||body.billingDisabled!==true||body.unknownBalanceAcknowledged!==true||body.noPaidFallback!==true||body.noGeminiFallback!==true||body.summaryOnly!==true)throw new InputError('정확한 Groq Free 요약 범위·무료 상태·상한·키 세대를 확인하세요.');
   const reviewedIdentity=await verifyCredentialGeneration(env,body.credentialGeneration,id,transcriptHash,scopeTag);
