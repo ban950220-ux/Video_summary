@@ -18,9 +18,27 @@ valid JSON whose top-level `summary` is a string where an evidence-linked
 array was required. The recorded usage is 2,220 tokens (1,258 input, 962
 output, including 74 reasoning). The previous approval is stopped. A separate
 `finish_reason` receipt was not saved; completion of the response envelope is
-inferred from the adapter path and requires human review. No final summary is
-saved, and production login/reopen of a completed summary and TXT export have
-not been accepted as a complete end-to-end result.
+inferred from the adapter path and requires human review. After separate
+owner review and one-call approval, a new strict-contract `raw:0` request
+returned a valid 1,954-character JSON report with 4 summary items, 20 chapters
+and a 66-character conclusion for segments 1–20 (0–90.602 s). Schema,
+grounding and range checks passed, but the operation ended
+`FAILED_UNCERTAIN` / `SUMMARY_CHECKPOINT_TOO_LARGE` because a hypothetical
+two-report merge exceeded the 4,800 conservative input bound. The new call
+used 2,169 tokens (1,157 input, 1,012 output, including 59 reasoning).
+Both failures and usage events must remain intact. No final summary is saved,
+and production login/reopen of a completed summary and TXT export have not
+been accepted as a complete end-to-end result.
+
+The offline size reproducer uses the reported shape and length, not the
+private response text. Its 1,954 UTF-16 characters are 4,234 UTF-8 bytes;
+the strict schema contributes 807 bytes to the request body. Repeating the
+report in the hypothetical self-pair produces an 11,357-byte request body,
+plus the existing 512-byte safety margin = 11,869, or 7,069 above 4,800.
+These are exact numbers for the synthetic fixture, not a byte measurement of
+the private production response. The prompt's “500 characters” instruction
+does not enforce a schema length limit, and the 1,012 output tokens reported
+by Groq are a different unit from this conservative UTF-8 input bound.
 
 ## Remaining acceptance
 
@@ -30,23 +48,25 @@ not been accepted as a complete end-to-end result.
    diagnostic finished without deploying, and the Cloudflare Builds command
    is back at `npm run deploy:production`; do not start a production build
    before separate rollout authorization. Do not copy credential values.
-2. Use the existing job's preserved D1 transcript and failed response. Inspect
-   the old response hash and 2,220-token usage, the old and new `raw:0` segment
-   ID/time ranges, and the strict schema diagnostic. Record human review,
-   then separately approve at most one new Groq Free call with a 4,800-token
-   input bound, 1,800-token completion cap and 6,600-token reservation.
-   Account free balance remains `UNKNOWN`; confirm billing is disabled and
-   there is no paid or Gemini fallback. Do not treat the old approval as new
-   authorization.
-3. Run the new first stage only after the reviewed rollout. A timeout,
-   unknown result or invalid response leaves a durable lock and must not be
-   automatically retried. A successful first stage must not start another
-   stage automatically. Review each later window and free capacity before any
-   further calls.
+2. Review the proposed no-call recovery of the new stored response. Its
+   source, owner job, strict contract hash, response hash, original failed row
+   and 2,169-token usage must all match. The old 2,220-token failure and the
+   new 2,169-token failure remain unchanged. Recovery records a separate
+   checked checkpoint and does not approve or start another model request.
+3. After a reviewed rollout, separately approve each further Groq Free window.
+   The app retains the 4,800 conservative input bound, 1,800 completion cap,
+   6,600 reservation ceiling, 61-second pacing and daily cap. Account free
+   balance remains `UNKNOWN`; confirm billing is disabled. A timeout or
+   unknown result leaves a durable lock and must not be automatically retried.
 4. Require a coherent Korean report with chapter and original segment evidence
    covering the full 98-minute timeline. Check numerical claims, speaker
    uncertainty, gaps and partial markers against the preserved source.
-   Evidence ID validation alone does not prove factual accuracy.
+   Evidence ID validation alone does not prove factual accuracy. For a long
+   source or an oversized valid checkpoint, the proposed offline code joins
+   every validated raw report locally and marks the result
+   `LOSSLESS_RAW_CHECKPOINTS`. This retains the raw chapters, summary items,
+   references and conclusions in time order without claiming an additional
+   model synthesis. Reports above 1 MB stop for review instead of truncation.
 5. Verify the final report and full source after a fresh owner login and page
    reload, search by video ID/title, export TXT, and read back the corresponding
    D1 job, source and operation ledger. Only then mark the video end-to-end
@@ -59,7 +79,7 @@ succeeded.
 
 ## Review-branch verification (mock only)
 
-On 2026-10-12, `npm run check` and all 244 local tests passed. Workerd D1
+On 2026-10-12, `npm run check` and all 249 local tests passed. Workerd D1
 tests injected stored Groq key rotation, a deletion marker, an audit change,
 and pilot approval cancellation immediately before the final single-statement
 dispatch guard; each blocked the provider mock with zero calls and kept the
@@ -67,4 +87,9 @@ old failed operation intact. Local Chromium exercised separate review,
 approval and one-call execution; slow responses, double clicks, tab changes,
 reopening, lost POST responses, and a successful POST followed by failed GET
 all produced zero automatic follow-up calls. The expired approval UI offered
-status review rather than a new approval. These tests did not call production.
+status review rather than a new approval. Additional SQLite and Workerd D1
+tests revalidated a synthetic stored 1,954-character report without a model
+call, retained both usage records, and kept the recovery write separate from
+later approval and execution. A 1,226-segment / 90-checkpoint fixture retained
+all 1,226 chapter references in a locally composed report and TXT export.
+These tests did not call production.

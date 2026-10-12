@@ -57,3 +57,22 @@ test('pilot UI retains an uncertain send and never offers renewal of expired app
  const expired=await mount('expired');assert.equal(expired.target.children[0].children.some(item=>item.tag==='form'),false);assert.equal(expired.target.children[0].children.some(item=>item.textContent?.includes('재승인은 생성할 수 없습니다')),true);assert.equal(expired.calls.length,0);
  const rotated=await mount('rotated');assert.equal(rotated.target.children[0].children.some(item=>item.textContent?.includes('기존 검토 기록과 현재 키 세대')),true);assert.equal(rotated.target.children[0].children.some(item=>item.textContent?.includes('이전 응답·사용량과 새 구간 검토 기록')),false);assert.equal(rotated.target.children[0].children.some(item=>item.tag==='form'),false);assert.equal(rotated.calls.length,0);
 });
+
+test('checkpoint recovery UI requires explicit review and never starts a provider or summary stage',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}});
+ const target=node('div'),toast=node('div');target.dataset.jobId='job-a';
+ const preview={jobId:'job-a',responseSha256:'a'.repeat(64),contractHash:'b'.repeat(64),firstRange:{firstId:1,lastId:20},summaryCount:4,chapterCount:20,storedUtf16Length:1954,failedOperationId:'failed-raw0',confirmedUsage:{totalTokens:2169},evidenceHash:'c'.repeat(64),recovered:false};
+ let recovered=false;const calls=[];
+ const fetcher=async(path,options)=>{calls.push({path,method:options.method,body:options.body&&JSON.parse(options.body)});if(options.method==='POST'){recovered=true;return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({recovered:true,automaticContinuation:false})};}return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({...preview,recovered})};};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqCheckpointRecoveryChoice=showGroqCheckpointRecoveryChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,clearInterval,detailRequestIsCurrent};
+ runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCheckpointRecoveryChoice({id:'job-a'},target,0);
+ await new Promise(resolve=>setTimeout(resolve,0));
+ const host=target.children[0],form=host.children.find(item=>item.tag==='form');assert.ok(form);assert.equal(calls.length,1);
+ await form.onsubmit({preventDefault(){}});assert.equal(calls.length,1);
+ for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
+ await form.onsubmit({preventDefault(){}});
+ assert.deepEqual(calls.map(call=>call.method),['GET','POST','GET']);
+ assert.equal(calls[1].body.confirmNoProviderCall,true);assert.equal(calls[1].body.confirmNoAutomaticContinuation,true);
+ assert.equal(host.children.some(item=>item.tag==='form'),false);
+});

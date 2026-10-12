@@ -126,3 +126,26 @@ test('pilot final D1 guard blocks concurrent key, deletion, audit and approval c
   }finally{globalThis.fetch=oldFetch;await mf.dispose();}
  }
 });
+
+test('stored oversized strict checkpoint recovery is atomic on local Workerd D1 and sends no model request',async()=>{
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'checkpoint-recovery-test',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'checkpoint-recovery-local'}}]})),oldFetch=globalThis.fetch;
+ try{
+  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
+  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600,title:'Local checkpoint recovery'}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
+  const segments=Array.from({length:25},(_,i)=>({id:i+1,startMs:i*24000,endMs:(i+1)*24000,text:'가'.repeat(23)})),raw=segments.map(part=>part.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
+  await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(JSON.stringify(audit),id).run();
+  await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString()).run();
+  const plan=await(await routeApi(request(path+'/groq-summary-plan'),env)).json(),report={summary:[{text:'요약',evidenceIds:[1]}],chapters:[{text:'장면'.repeat(900),evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'결론'};
+  const result=JSON.stringify({reviewResult:{partialText:JSON.stringify(report),usage:{inputTokens:1157,outputTokens:1012,reasoningTokens:59,totalTokens:2169}}}),failedId=id+':groq-summary:'+plan.transcriptHash+':raw:0';
+  await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,?,?,'FAILED_UNCERTAIN',?,?,?)").bind(failedId,id,'groq-summary',6600,new Date().toISOString(),'SUMMARY_CHECKPOINT_TOO_LARGE',result).run();
+  await DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2169,0,null,'TEST',new Date().toISOString()).run();
+  let calls=0;globalThis.fetch=async()=>{calls++;throw Error('model dispatch forbidden');};
+  const url=path+'/groq-summary-checkpoint-recovery',preview=await(await routeApi(request(url),env)).json();
+  const body={step:'recover',evidenceHash:preview.evidenceHash,failedOperationId:failedId,contractHash:preview.contractHash,responseSha256:preview.responseSha256,acknowledgeOriginalUsage:2169,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true};
+  const saved=await routeApi(request(url,'POST',body),env);assert.equal(saved.status,200,await saved.clone().text());assert.equal(calls,0);
+  assert.equal((await DB.prepare('SELECT state FROM yta_operations WHERE id=?').bind(failedId).first()).state,'FAILED_UNCERTAIN');
+  assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery' AND state='DONE'").bind(id).first()).n,1);
+  assert.equal((await routeApi(request(url,'POST',body),env)).status,409);
+ }finally{globalThis.fetch=oldFetch;await mf.dispose();}
+});
