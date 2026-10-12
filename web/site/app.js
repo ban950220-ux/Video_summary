@@ -1,6 +1,7 @@
 import {planMp3,prepareMp3Chunk} from '/audio.mjs';
 import {runAudioChunks,runSummaryStages,runApprovedFreeBatch,runApprovedGroqSummary,detailRequestIsCurrent,beginDetailAction} from '/audio-runner.mjs';
 import {audioProgressPlan,cleanedAudioComplete,fmtRetryDate} from '/audio-progress-plan.mjs';
+import {groqSummaryProgress} from '/groq-summary-progress.mjs';
 // Private owner-only site, no third-party scripts and no API keys in browser storage.
 const $=(sel)=>document.querySelector(sel);
 const state={view:'analyze',mode:'url',page:0,hasMore:false,provider:null,connections:[]};
@@ -137,32 +138,150 @@ function showFreeBatchChoice(job,target,requestId){
  target.append(button);
 }
 function showGroqSummaryChoice(job,target,requestId){
- const button=el('button',{className:'btn secondary small',text:'Groq Free 요약 범위 검토'});
- button.onclick=async()=>{button.disabled=true;try{
-  if(!detailCurrent(job.id,requestId,target))return;
-  const scope=await api('/api/jobs/'+job.id+'/groq-summary-approval');
-  if(!detailCurrent(job.id,requestId,target))return;
+ const current=()=>detailCurrent(job.id,requestId,target);
+ const statusUrl='/api/jobs/'+job.id+'/groq-summary-status';
+ const approvalUrl='/api/jobs/'+job.id+'/groq-summary-approval';
+ const runUrl='/api/jobs/'+job.id+'/groq-summary';
+ const reviewButton=el('button',{className:'btn secondary small',text:'Groq Free 요약 범위 검토'});
+ const statusBox=el('section',{className:'summary-progress',attrs:{role:'status','aria-live':'polite','aria-atomic':'true'}});
+ const headline=el('strong'),detail=el('p'),refreshButton=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});
+ const scopeHost=el('div');
+ statusBox.append(headline,detail,refreshButton);
+ target.append(reviewButton,statusBox,scopeHost);
+ let status=null,phase='idle',reason=null,waitUntil=null,readSequence=0,running=false,runButton=null,finalizeButton=null,awaitingApprovalScope=null,unknownBaseline=null;
+ const render=()=>{
+  if(!current())return;
+  const view=groqSummaryProgress(status,{phase,reason,waitUntil});
+  headline.textContent=view.headline;
+  detail.textContent=view.detail;
+  statusBox.dataset.tone=view.tone;
+  if(runButton)runButton.disabled=running||!view.canExecute;
+  if(finalizeButton)finalizeButton.disabled=running||status?.finalReportSaved===true;
+ };
+ const setPhase=(next,nextReason=null,nextWait=null)=>{phase=next;reason=nextReason;waitUntil=nextWait;render();};
+ const refreshStatus=async()=>{
+  const sequence=++readSequence;
+  try{
+   const saved=await api(statusUrl);
+   if(sequence===readSequence&&current()){
+    status=saved;
+    if(phase==='statusUnavailable'||phase==='approved'&&saved?.approval?.state==='APPROVED')phase='idle';
+    if(phase==='unknown'&&Number.isSafeInteger(unknownBaseline)&&saved?.completedStages>unknownBaseline)phase='responseLostSaved';
+    render();
+   }
+   return saved;
+  }catch(error){
+   if(sequence===readSequence&&current()&&phase!=='unknown')setPhase('statusUnavailable');
+   throw error;
+  }
+ };
+ refreshButton.onclick=async()=>{refreshButton.disabled=true;try{const saved=await refreshStatus();if(awaitingApprovalScope&&saved?.approval?.state==='APPROVED'&&saved.transcriptHash===awaitingApprovalScope.transcriptHash){const fresh=await api(approvalUrl);if(current()&&fresh.approved){awaitingApprovalScope=null;setPhase('idle');renderScope(fresh);}}}catch{if(current())detail.textContent='상태 조회 실패 · 접수와 결과를 확인할 수 없습니다. 자동 재전송은 없습니다.';}finally{refreshButton.disabled=false;}};
+ setPhase('statusUnavailable');
+ refreshStatus().catch(()=>{});
+ async function execute(scope){
+  if(running||!current())return;
+  running=true;
+  let interrupted=false,pollTimer=null,stagePostStarted=false;
+  const onVisibility=()=>{
+   if(document.hidden){interrupted=true;setPhase(phase==='sending'?'unknown':'idle','FOREGROUND_REQUIRED');}
+   else if(current())refreshStatus().catch(()=>{});
+  };
+  document.addEventListener('visibilitychange',onVisibility);
+  setPhase('checking');
+  const sendObserved=async(body={})=>{
+   setPhase(body?.finalizeOnly?'finalizing':'sending');
+   unknownBaseline=status?.completedStages??null;
+   stagePostStarted=true;
+   let polling=false;
+   pollTimer=setInterval(async()=>{
+    if(polling||!current())return;
+    polling=true;try{await refreshStatus();}catch{}finally{polling=false;}
+   },1500);
+   try{
+    const response=await api(runUrl,{method:'POST',body});
+    setPhase('idle');
+    await refreshStatus().catch(()=>{});
+    return response;
+   }catch(error){
+    setPhase('unknown');
+    await refreshStatus().catch(()=>{});
+    throw error;
+   }finally{clearInterval(pollTimer);pollTimer=null;}
+  };
+  const waitObserved=async ms=>{
+   if(interrupted||!current())throw Error('FOREGROUND_REQUIRED');
+   const until=Date.now()+ms;
+   setPhase('waiting',null,until);
+   const ticker=setInterval(render,1000);
+   try{await waitForeground(ms);if(interrupted||!current())throw Error('FOREGROUND_REQUIRED');}
+   finally{clearInterval(ticker);if(!interrupted&&current())setPhase('checking');}
+  };
+  try{
+   const outcome=await runApprovedGroqSummary({jobId:job.id,scope,getApproval:()=>api(approvalUrl),sendStage:sendObserved,wait:waitObserved,foreground:()=>!interrupted&&!document.hidden&&current(),onUpdate:()=>{if(!interrupted)setPhase('waiting',null,Date.now()+61_000);}});
+   if(outcome.complete){
+    await refreshStatus().catch(()=>{});
+    if(current()){empty(target);showReport(outcome.result.job,target,true);}
+    toast('Groq Free 요약이 저장됐습니다.');
+    return;
+   }
+   const stopped=outcome.reason||'SUMMARY_RESULT_UNVERIFIED';
+   if(!(stopped==='SUMMARY_OUTCOME_UNKNOWN_REVIEW_REQUIRED'&&phase==='responseLostSaved'))setPhase(stopped==='SUMMARY_OUTCOME_UNKNOWN_REVIEW_REQUIRED'?'unknown':'idle',stopped==='SUMMARY_OUTCOME_UNKNOWN_REVIEW_REQUIRED'?null:stopped);
+   await refreshStatus().catch(()=>{});
+  }catch(error){
+   setPhase(stagePostStarted?(error?.code?'idle':'unknown'):'preflightFailed',stagePostStarted?error?.code??null:null);
+   await refreshStatus().catch(()=>{});
+  }finally{
+   if(pollTimer)clearInterval(pollTimer);
+   document.removeEventListener('visibilitychange',onVisibility);
+   running=false;
+   render();
+  }
+ }
+ function renderScope(scope){
+  runButton=null;finalizeButton=null;
   const panel=el('div',{className:'fields'});
   panel.append(el('p',{text:scope.finalizationReady?`전사 SHA-256 ${scope.transcriptHash} · 모든 추론 단계가 저장됐습니다. 저장된 보고서를 최종 확인하고 저장할 수 있습니다. 추가 모델 요청은 없습니다.`:`전사 SHA-256 ${scope.transcriptHash} · ${scope.model} · 이번 승인 창 ${scope.windowStart+1}단계부터 최대 ${scope.maxRequests}회 (계획 최대 ${scope.totalRequests}회) · 요청당 입력 ${scope.maxInputTokensPerRequest} / 완료 ${scope.maxCompletionTokensPerRequest} 토큰 · 이번 창의 앱 예약 상한 ${scope.totalTokenUpperBound} 토큰. 실제 계정 잔여량은 UNKNOWN입니다. 긴 전사는 다음 창의 별도 승인과 앱 일일 상한 재설정이 필요할 수 있습니다.`}));
-  if(scope.finalizationReady){const finalize=el('button',{className:'btn secondary small',text:'저장된 요약 최종 저장'});finalize.onclick=async()=>{finalize.disabled=true;try{const result=await runApprovedGroqSummary({jobId:job.id,scope,getApproval:()=>api('/api/jobs/'+job.id+'/groq-summary-approval'),sendStage:body=>api('/api/jobs/'+job.id+'/groq-summary',{method:'POST',body}),wait:waitForeground,foreground:()=>!document.hidden&&detailCurrent(job.id,requestId,target)});if(!result.complete)throw Error('요약 최종 저장 중단: '+result.reason);if(detailCurrent(job.id,requestId,target)){empty(target);showReport(result.result.job,target,true);}toast('Groq Free 요약이 저장됐습니다.');}catch(error){toast(safeError(error));finalize.disabled=false;}};panel.append(finalize);
+  if(scope.finalizationReady){
+   finalizeButton=el('button',{className:'btn secondary small',text:'저장된 요약 최종 저장'});
+   finalizeButton.onclick=()=>execute(scope);
+   panel.append(finalizeButton);
   }else if(scope.approved){
    panel.append(el('p',{text:`승인 상태 ${scope.state} · 만료 ${fmtRetryDate(scope.expiresAt)}. 실행은 별도 선택입니다.`}));
-   if(scope.state==='APPROVED'){const run=el('button',{className:'btn secondary small',text:'승인된 Groq Free 요약 실행'});run.onclick=async()=>{run.disabled=true;try{
-    const outcome=await runApprovedGroqSummary({jobId:job.id,scope,getApproval:()=>api('/api/jobs/'+job.id+'/groq-summary-approval'),sendStage:body=>api('/api/jobs/'+job.id+'/groq-summary',{method:'POST',body:body||{}}),wait:waitForeground,foreground:()=>!document.hidden&&detailCurrent(job.id,requestId,target),onUpdate:status=>{panel.append(el('p',{text:`요약 단계 ${status.stage} 저장됨 · 분석 ${job.id}`}));}});
-    if(outcome.reason==='SUMMARY_WINDOW_COMPLETE'){panel.append(el('p',{text:'이번 요약 승인 창이 완료됐습니다. 분석을 다시 열어 남은 단계를 별도로 검토하고 승인하세요. 앱 일일 상한이 재설정될 때까지 기다려야 할 수 있습니다.'}));return;}
-    if(!outcome.complete)throw Error('Groq Free 요약 중단: '+outcome.reason+' · 분석 '+job.id+'. 이력과 제공자 사용량을 확인하세요.');
-    if(detailCurrent(job.id,requestId,target)){empty(target);showReport(outcome.result.job,target,true);}toast('Groq Free 요약이 저장됐습니다.');
-   }catch(error){toast(safeError(error));run.disabled=false;}};panel.append(run);}
+   if(scope.state==='APPROVED'){
+    runButton=el('button',{className:'btn secondary small',text:'승인된 Groq Free 요약 실행'});
+    runButton.onclick=()=>execute(scope);
+    panel.append(runButton);
+   }
   }else{
    const form=el('form',{className:'fields'}),labels=['현재 이 Groq 키가 Free 조직에 속하고 결제가 비활성임을 확인했습니다.','계정 잔여 토큰은 UNKNOWN이며 표시된 요청·토큰 상한을 승인합니다.','유료 전환·Gemini 대체 없이 첫 429 또는 불명확한 결과에서 멈춥니다.'];
    const checks=labels.map(label=>{const input=el('input',{attrs:{type:'checkbox',required:'true'}}),row=el('label',{text:label});row.prepend(input);form.append(row);return input;});
-   const submit=el('button',{className:'btn secondary small',text:'이 요약 범위 승인 기록'});form.append(submit);form.onsubmit=async event=>{event.preventDefault();if(!detailCurrent(job.id,requestId,target))return;submit.disabled=true;try{
-    await api('/api/jobs/'+job.id+'/groq-summary-approval',{method:'POST',body:{jobId:job.id,transcriptHash:scope.transcriptHash,model:scope.model,windowStart:scope.windowStart,totalRequests:scope.totalRequests,maxRequests:scope.maxRequests,maxInputTokensPerRequest:scope.maxInputTokensPerRequest,maxCompletionTokensPerRequest:scope.maxCompletionTokensPerRequest,totalTokenUpperBound:scope.totalTokenUpperBound,credentialGeneration:scope.credentialGeneration,freeTierConfirmed:checks[0].checked,billingDisabled:checks[0].checked,unknownBalanceAcknowledged:checks[1].checked,noPaidFallback:checks[2].checked,noGeminiFallback:checks[2].checked,summaryOnly:true}});
-    if(detailCurrent(job.id,requestId,target))form.replaceWith(el('p',{text:'Groq Free 요약 승인 저장됨. 실행은 별도로 선택하세요.'}));
-   }catch(error){toast(safeError(error));submit.disabled=false;}};panel.append(form);
+   const submit=el('button',{className:'btn secondary small',text:'이 요약 범위 승인 기록'});
+   form.append(submit);
+   form.onsubmit=async event=>{
+    event.preventDefault();if(!current())return;
+    submit.disabled=true;
+    try{
+     const approved=await api(approvalUrl,{method:'POST',body:{jobId:job.id,transcriptHash:scope.transcriptHash,model:scope.model,windowStart:scope.windowStart,totalRequests:scope.totalRequests,maxRequests:scope.maxRequests,maxInputTokensPerRequest:scope.maxInputTokensPerRequest,maxCompletionTokensPerRequest:scope.maxCompletionTokensPerRequest,totalTokenUpperBound:scope.totalTokenUpperBound,credentialGeneration:scope.credentialGeneration,freeTierConfirmed:checks[0].checked,billingDisabled:checks[0].checked,unknownBalanceAcknowledged:checks[1].checked,noPaidFallback:checks[2].checked,noGeminiFallback:checks[2].checked,summaryOnly:true}});
+     if(current()){awaitingApprovalScope=null;setPhase('approved');renderScope(approved);await refreshStatus().catch(()=>{});}
+    }catch(error){
+     awaitingApprovalScope=scope;
+     setPhase('approvalUnknown');
+     const saved=await refreshStatus().catch(()=>null);
+     if(saved?.approval?.state==='APPROVED'&&saved.transcriptHash===scope.transcriptHash){
+      try{const fresh=await api(approvalUrl);if(current()&&fresh.approved){awaitingApprovalScope=null;setPhase('idle');renderScope(fresh);}}catch{}
+     }
+    }
+   };
+   panel.append(form);
   }
-  target.append(panel);
- }catch(error){toast(safeError(error));button.disabled=false;}};target.append(button);
+  scopeHost.replaceChildren(panel);
+  render();
+ }
+ reviewButton.onclick=async()=>{
+  reviewButton.disabled=true;
+  try{if(!current())return;const scope=await api(approvalUrl);if(current()){renderScope(scope);await refreshStatus().catch(()=>{});}}
+  catch(error){setPhase('statusUnavailable');reviewButton.disabled=false;toast(safeError(error));}
+ };
 }
 function showUnknownGroqProbeChoice(job,chunk,target,requestId){
  const button=el('button',{className:'btn secondary small',text:'조각 '+(chunk.index+1)+' 무료 1회 탐침 검토'});

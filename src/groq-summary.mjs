@@ -88,6 +88,18 @@ function validApproval(scope,jobId,hash,keyIdentity){
 }
 const approvalId=(id,sequence)=>id+':groq-summary:approval:'+sequence;
 const stageId=(id,hash,key)=>id+':groq-summary:'+hash+':'+key;
+async function summaryStatus(env,job){
+ // routeLive's ownedJob read already excludes non-owner and deletion-marked jobs.
+ const approval=await readApproval(env,job.id),hash=approval?.transcriptHash;
+ const prefix=typeof hash==='string'&&/^[a-f0-9]{64}$/.test(hash)?job.id+':groq-summary:'+hash+':':null;
+ const rows=prefix?(await env.DB.prepare("SELECT id,state,created_at FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(job.id,prefix,prefix).all()).results||[]:[];
+ const done=rows.filter(row=>row.state==='DONE').sort((a,b)=>a.created_at.localeCompare(b.created_at));
+ const active=rows.find(row=>row.state==='CLAIMED')||rows.find(row=>row.state==='FAILED_UNCERTAIN')||rows.find(row=>row.state==='BLOCKED');
+ const recent=await env.DB.prepare("SELECT state,created_at FROM yta_operations WHERE provider='groq-summary' AND id LIKE ? AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') ORDER BY created_at DESC LIMIT 1").bind('%:groq-summary:%').first();
+ const nextEligibleAt=recent?.state==='DONE'&&Number.isFinite(Date.parse(recent.created_at))?Date.parse(recent.created_at)+SPACING_MS:null;
+ const stage=row=>row?{key:row.id.slice(prefix.length),state:row.state,recordedAt:row.created_at}:null;
+ return json({jobId:job.id,transcriptHash:hash??null,approval:approval?{state:approval.state,expiresAt:approval.expiresAt,windowStart:approval.windowStart,maxRequests:approval.maxRequests,totalTokenUpperBound:approval.totalTokenUpperBound}:null,completedStages:done.length,plannedMaximumRequests:approval?.totalRequests??null,lastSavedStage:stage(done.at(-1)),activeStage:stage(active),nextEligibleAt,finalReportSaved:job.report?.kind==='GROQ_EVIDENCE_LINKED',providerReceiptVerified:false});
+}
 async function readApproval(env,id){
  const prefix=approvalId(id,'');
  // D1 permits at most 50 bytes in a LIKE pattern; this UUID prefix is longer.
@@ -186,6 +198,7 @@ async function stage(env,{id,hash,scope,key,prompt,allowed,groups,partIds,startM
  }
 }
 export async function handleGroqSummaryAction(request,env,{id,action,job,sourceOf,ownedJob}){
+ if(action==='groq-summary-status'&&request.method==='GET')return summaryStatus(env,job);
  const reviewing=request.method==='GET'&&['groq-summary-plan','groq-summary-approval'].includes(action);
  const read=async(stage,fn)=>{try{return await fn();}catch(error){if(!reviewing||error instanceof InputError||error instanceof ProviderError)throw error;throw Object.assign(new Error('요약 범위 읽기 오류 ('+stage+'). 저장된 원문은 보존됩니다.'),{safeReviewCode:'SUMMARY_REVIEW_'+stage+'_INTERNAL'});}};
  const {source,transcriptHash}=await read('SOURCE',()=>completeSource(env,job,sourceOf));

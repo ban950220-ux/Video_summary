@@ -48,6 +48,11 @@ test('site API health protected and identifies MOCK_ONLY not production PASS',as
   const r=await call('/api/health');assert.equal(r.status,200);
   const d=await r.json();assert.equal(d.mode,'MOCK_ONLY');assert.equal(d.realCalls,false);
 });
+test('Groq summary ledger status stays behind owner Access',async()=>{
+ const path='/api/jobs/11111111-1111-4111-8111-111111111111/groq-summary-status';
+ assert.equal((await call(path,'invalid')).status,401);
+ assert.equal((await call(path,jwt({email:'intruder@example.com'}))).status,401);
+});
 test('CSRF denies missing and foreign Origin for write APIs',async()=>{
   const payload={sourceType:'url',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:60};
   assert.equal(sameOriginMutation(request('/api/jobs',jwt(),{method:'POST',body:payload})),false);
