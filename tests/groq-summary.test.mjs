@@ -17,7 +17,7 @@ async function fixture({complete=true,large=false,sourceText=null,longSource=fal
  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'NOT_REAL_TEST_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:longSource?6000:600,title:'Offline Groq summary'}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
  const count=longSource?125:large?25:2,span=longSource?48000:large?24000:300000;
- const segments=Array.from({length:count},(_,i)=>({id:i+1,startMs:i*span,endMs:(i+1)*span,text:sourceText??`원문 ${i+1} ${longSource?'가나다라마바사아자차카타파하 '.repeat(18):large?'가나다라마바사 '.repeat(12):'검증'}`}));
+ const segments=Array.from({length:count},(_,i)=>({id:i+1,startMs:i*span,endMs:(i+1)*span,text:sourceText??`원문 ${i+1} ${longSource?'가나다라마바사아자차카타파하 '.repeat(28):large?'가나다라마바사 '.repeat(12):'검증'}`}));
  const raw=segments.map(part=>part.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:complete?1:0,audioFileSha256:'a'.repeat(64),audioSegmentOrigins:large?Array.from({length:500},(_,i)=>({segmentId:i+1,chunkIndex:i,startMs:i*1000,endMs:i*1000+900})):[]};
  db.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').run(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString());
  db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),id);
@@ -169,15 +169,16 @@ test('conservative UTF-8 bound partitions long Korean source below Groq Free inp
 test('500-segment future merge packs consecutive source IDs without losing the checkpoint guard',()=>{
  const segments=Array.from({length:500},(_,i)=>({id:i+1,startMs:i*11786,endMs:(i+1)*11786,text:'가나다라마바사아자차'.repeat(10)}));
  const audit={durationSeconds:5893,audioProcessingCoverage:1,independentVerification:false,externalFactCheck:'NOT_PERFORMED',audioBoundarySegmentIds:Array.from({length:14},(_,i)=>2+33*i)};
- const groups=partitionGroqTranscript(segments,audit),firstIds=groups.map(group=>group[0].id).filter(id=>id<=100);
+ const groups=partitionGroqTranscript(segments,audit),firstIds=groups.map(group=>group[0].id);
  assert.ok(groups.length>52&&groups.length<=120);
  const part=(first,last,chapterIds)=>({ids:Array.from({length:last-first+1},(_,i)=>first+i),startMs:(first-1)*11786,endMs:last*11786,report:{summary:[{text:'원문',evidenceIds:[first]}],chapters:[{text:'구간',evidenceIds:chapterIds}],claims:[],numbers:[],critical:[],conclusion:'원문'}});
- const large=part(1,100,firstIds),small=part(101,120,[101]),size=(parts,final=false)=>groqInputUpperBound(groqSummaryMessages(groqMergePrompt(parts,audit,{final})));
- assert.match(groqMergePrompt([large,small],audit),/"idRange":\[1,100\]/);
+ const large=part(1,397,firstIds.filter(id=>id<=397)),small=part(398,500,[398]);
+ const size=(parts,final=false)=>groqInputUpperBound(groqSummaryMessages(groqMergePrompt(parts,audit,{final})));
+ assert.match(groqMergePrompt([large,small],audit),/"idRange":\[1,397\]/);
  assert.ok(size([large,large],true)<=GROQ_SUMMARY_INPUT_BOUND);
  assert.ok(size([large,small],true)<=GROQ_SUMMARY_INPUT_BOUND);
  assert.ok(size([small,small],true)<=GROQ_SUMMARY_INPUT_BOUND);
- assert.match(groqMergePrompt([{...small,ids:[101,103]}],audit),/"ids":\[101,103\]/);
+ assert.match(groqMergePrompt([{...small,ids:[398,400]}],audit),/"ids":\[398,400\]/);
 });
 test('500-segment mocked summary reaches and saves the previously blocked merge checkpoint',async()=>{
  const f=await fixture({complete:false}),old=fetch;
@@ -487,7 +488,7 @@ test('grounding rejects Korean numeric substrings, decimals, signs and percent m
  }
 });
 test('long Korean transcript offers a bounded first window and resumes completed stages in a new window',async()=>{
- const f=await fixture({longSource:true}),old=fetch;let calls=0,reply=response();globalThis.fetch=async()=>{calls++;return reply;};
+ const f=await fixture({longSource:true,sourceText:'가나다라마바사아자차카타파하 '.repeat(18)}),old=fetch;let calls=0,reply=response();globalThis.fetch=async()=>{calls++;return reply;};
  try{assert.ok(f.segments.map(x=>x.text).join('').length>30000);assert.ok(f.plan.rawStages>29);assert.equal(f.plan.maxRequests,29);assert.ok(f.plan.totalRequests>29);
   assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);
   const groups=partitionGroqTranscript(f.segments,{durationSeconds:6000,audioProcessingCoverage:1,independentVerification:false,externalFactCheck:'NOT_PERFORMED'});
@@ -501,6 +502,54 @@ test('long Korean transcript offers a bounded first window and resumes completed
   f.db.prepare("UPDATE yta_operations SET created_at=? WHERE job_id=? AND provider='groq-summary' AND state='DONE'").run(new Date(Date.now()-90000000).toISOString(),f.id);
   const r=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal(r.status,202,await r.clone().text());assert.equal(calls,1);
   assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE id LIKE ? AND state='DONE'").get(f.id+':groq-summary:'+f.plan.transcriptHash+':raw:%').n,30);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+test('original 50,000-character fixture reports the strict-schema planning limit without a provider call',async()=>{
+ const f=await fixture({longSource:true});
+ try{assert.ok(f.segments.map(x=>x.text).join('').length>50000);assert.equal(f.plan.error?.code,'INVALID_INPUT');assert.match(f.plan.error.message,/단계 계획 상한/);}finally{f.db.close();}
+});
+test('1,226 synthetic Korean segments and 50,310 characters complete all strict-schema stages across reviewed windows',async()=>{
+ const f=await fixture({complete:false}),old=fetch;
+ const count=1226,durationMs=5892864;
+ const segments=Array.from({length:count},(_,i)=>({id:i+1,startMs:Math.round(i*durationMs/count),endMs:Math.round((i+1)*durationMs/count),text:'가'.repeat(i<45?41:40)}));
+ const raw=segments.map(segment=>segment.text).join('\n');assert.equal(raw.length,50310);
+ const audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64),audioBoundaryAmbiguities:Array.from({length:14},(_,i)=>({segmentId:2+i*33,chunkIndex:i+1,startMs:0,endMs:1}))};
+ f.db.prepare('UPDATE jobs SET duration_seconds=?,audit_json=? WHERE id=?').run(durationMs/1000,JSON.stringify(audit),f.id);
+ f.db.prepare('UPDATE yta_sources SET raw=?,segments_json=? WHERE job_id=?').run(raw,JSON.stringify(segments),f.id);
+ let calls=0;
+ globalThis.fetch=async(_url,options)=>{
+  calls++;
+  const body=JSON.parse(options.body),prompt=body.messages[1].content;
+  assert.deepEqual(body.response_format,GROQ_SUMMARY_RESPONSE_FORMAT);
+  assert.ok(groqInputUpperBound(body.messages)<=GROQ_SUMMARY_INPUT_BOUND);
+  let ids;
+  if(prompt.includes('전사 배열 [id,startMs,endMs,text]:'))ids=[JSON.parse(prompt.split('전사 배열 [id,startMs,endMs,text]:\n')[1])[0][0]];
+  else ids=[...new Set(JSON.parse(prompt.split('시간 순서별 부분 보고서:\n')[1]).flatMap(part=>part.report.chapters.flatMap(chapter=>chapter.evidenceIds)))];
+  return response({summary:[{text:'요약',evidenceIds:[ids[0]]}],chapters:[{text:'구간 요약',evidenceIds:ids}],claims:[],numbers:[],critical:[],conclusion:'검토'});
+ };
+ const approve=async()=>{
+  const review=await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json();
+  assert.equal(review.approved,false);
+  const approval={jobId:f.id,transcriptHash:review.transcriptHash,model:review.model,windowStart:review.windowStart,totalRequests:review.totalRequests,maxRequests:review.maxRequests,maxInputTokensPerRequest:review.maxInputTokensPerRequest,maxCompletionTokensPerRequest:review.maxCompletionTokensPerRequest,totalTokenUpperBound:review.totalTokenUpperBound,credentialGeneration:review.credentialGeneration,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,summaryOnly:true};
+  assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',approval),f.env)).status,200);
+ };
+ try{
+  const plan=await(await routeApi(request(f.path+'/groq-summary-plan'),f.env)).json();
+  assert.ok(plan.rawStages>1&&plan.rawStages<=120,JSON.stringify(plan));
+  assert.equal(plan.totalRequests,plan.rawStages*2-1);
+  assert.equal(plan.rawStages,90);assert.equal(plan.totalRequests,179);
+  await approve();
+  let final=null;
+  for(let step=0;step<plan.totalRequests+plan.rawStages+10;step++){
+   const result=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env),body=await result.json();
+   assert.ok([200,202].includes(result.status),JSON.stringify({step,calls,code:body.error?.code,message:body.error?.message}));
+   if(body.job?.report?.kind==='GROQ_EVIDENCE_LINKED'){final=body;break;}
+   if(body.windowComplete){f.db.prepare("UPDATE yta_operations SET created_at=? WHERE job_id=? AND provider='groq-summary' AND state='DONE'").run(new Date(Date.now()-90000000).toISOString(),f.id);await approve();}
+   else f.db.prepare("UPDATE yta_operations SET created_at=? WHERE job_id=? AND provider='groq-summary' AND state='DONE' AND created_at>?").run(new Date(Date.now()-62000).toISOString(),f.id,new Date(Date.now()-61000).toISOString());
+  }
+  assert.equal(final?.job?.report?.kind,'GROQ_EVIDENCE_LINKED');
+  assert.equal(calls,109);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND state='DONE'").get(f.id).n,calls);
  }finally{globalThis.fetch=old;f.db.close();}
 });
 test('oversized but valid checkpoint is not saved DONE before an impossible merge',async()=>{
