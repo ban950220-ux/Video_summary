@@ -162,6 +162,30 @@ test('paid choice offers no-call revalidation only for a complete stored receipt
  }
 });
 
+test('paid receipt recovery stays available without a new quote and retains cost warning after click or lost response',async()=>{
+ const node=tag=>({tag,children:[],dataset:{},hidden:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(key,value){this[key]=value;}});
+ const collect=item=>[item.textContent||'',...(item.children||[]).flatMap(collect)].join(' '),tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+ const reportJob={id:'job-a',status:'COMPLETE',report:{kind:'GEMINI_PAID_FULL_EVIDENCE_LINKED',summary:[],chapters:[],claims:[],numbers:[],critical:[],conclusion:'저장된 결론'}};
+ for(const lost of [false,true]){
+  const target=node('div'),toast=node('div'),calls=[];target.dataset.jobId='job-a';let saved=false;
+  const choice={transcription:{complete:true},summary:{complete:false,savedRawStages:0,rawStages:1,remainingRawStages:1},free:{model:'free',inputTokensUpperPerCall:1,outputTokensUpperPerCall:1,eta:{reason:'UNKNOWN'}},paid:{executionEnabled:false,quoteIssueReady:false,reason:'Gemini 키 없음',model:'paid',priceVersion:'v1',inputTokensUpper:100,outputTokensUpper:100,maxRetries:0}};
+  const fetcher=async(path,options)=>{calls.push({path,method:options.method});if(path.endsWith('/summary-choice'))return {ok:true,headers:{get:()=> 'application/json'},json:async()=>choice};if(path.endsWith('/paid-summary-revalidate')){saved=true;if(lost)throw Error('response lost');return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({job:reportJob,costReconciliation:'REVIEW_REQUIRED'})};}if(path.endsWith('/paid-summary-status'))return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({approval:{id:'approval-a',state:'APPROVED'},reservations:[{id:'reservation-a',state:'UNCERTAIN'}],receipt:saved?{revalidationAvailable:false}:{revalidationAvailable:true,response_bytes:1234},finalReportSaved:saved,costReconciliation:saved?'REVIEW_REQUIRED':null})};if(path==='/api/jobs/job-a')return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({job:reportJob})};throw Error('unexpected request '+path);};
+  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showSummaryChoice=showSummaryChoice;globalThis.__state=state;');
+  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent,clearTimeout,setTimeout:()=>0};runInNewContext(source,context);context.__state.view='library';context.__showSummaryChoice({id:'job-a'},target,0);await tick();
+  assert.doesNotMatch(collect(target),/서버 유료 견적 발급/);const button=target.children[0].children.find(item=>item.textContent==='보존 응답만 재검증 · 제공자 호출 없음');assert.ok(button);await button.onclick();await tick();
+  assert.equal(saved,true);assert.match(collect(target),/비용 원장은 검토가 필요/);assert.match(collect(target),/저장된 결론/);assert.equal(calls.filter(call=>call.method==='POST').length,1);assert.equal(calls.some(call=>call.path.endsWith('/paid-summary-quote')),false);
+ }
+});
+
+test('reopening a saved paid report reads the unsettled cost ledger',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(key,value){this[key]=value;},scrollIntoView(){}}),target=node('div'),toast=node('div');
+ const job={id:'job-a',title:'Paid report',created_at:new Date().toISOString(),duration_seconds:120,source_type:'url',status:'COMPLETE',report:{kind:'GEMINI_PAID_FULL_EVIDENCE_LINKED',summary:[],chapters:[],claims:[],numbers:[],critical:[],conclusion:'저장된 결론'}};
+ const calls=[],fetcher=async(path,options)=>{calls.push({path,method:options.method});const result=path.endsWith('/paid-summary-status')?{finalReportSaved:true,costReconciliation:'REVIEW_REQUIRED'}:{job};return {ok:true,headers:{get:()=> 'application/json'},json:async()=>result};};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__libraryCard=libraryCard;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:selector==='#library-detail'?target:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent,beginDetailAction:(_target,id,current)=>{target.dataset.jobId=id;return current+1;}};runInNewContext(source,context);context.__state.view='library';const card=context.__libraryCard(job);await card.children[1].children.find(item=>item.textContent==='리포트 열기').onclick();await new Promise(resolve=>setTimeout(resolve,0));
+ const collect=item=>[item.textContent||'',...(item.children||[]).flatMap(collect)].join(' ');assert.match(collect(target),/비용 원장은 검토가 필요/);assert.equal(calls.filter(call=>call.path.endsWith('/paid-summary-status')).length,1);assert.equal(calls.some(call=>call.method==='POST'),false);
+});
+
 test('lost checkpoint recovery POST and failed status GET leave only read-only reconciliation',async()=>{
  const node=tag=>({tag,children:[],hidden:false,dataset:{},disabled:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
  const preview={responseSha256:'a'.repeat(64),contractHash:'b'.repeat(64),firstRange:{firstId:1,lastId:20},summaryCount:4,chapterCount:20,storedUtf16Length:1954,failedOperationId:'failed-raw0',confirmedUsage:{totalTokens:2169},evidenceHash:'c'.repeat(64)};

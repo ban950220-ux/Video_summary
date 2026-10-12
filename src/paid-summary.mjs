@@ -18,6 +18,8 @@ async function saveReport(env,id,current,report,reservationId){
  if(saved.meta?.changes!==1)fail('PAID_SAVE_SCOPE_CHANGED');
 }
 async function schema(env){const rows=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('yta_paid_summary_quotes','yta_paid_summary_approvals','yta_paid_summary_reservations')").all()).results||[];if(rows.length!==3)fail('PAID_SCHEMA_REQUIRED','유료 계약 migration이 아직 준비되지 않았습니다.');}
+const costReconciliation=reservations=>reservations.some(item=>['RESERVED','UNCERTAIN'].includes(item.state))?'REVIEW_REQUIRED':reservations.some(item=>item.state==='SETTLED')?'SETTLED_PRIOR':null;
+async function savedCostReconciliation(env,id){const rows=(await env.DB.prepare("SELECT r.state FROM yta_paid_summary_reservations r JOIN yta_paid_summary_approvals a ON a.id=r.approval_id WHERE a.job_id=? AND a.owner_id='owner'").bind(id).all()).results||[];return costReconciliation(rows);}
 async function quoteRow(env,id,quoteId){return env.DB.prepare("SELECT id,quote_json,quote_sha256,request_sha256,source_sha256,expires_at,state FROM yta_paid_summary_quotes WHERE id=? AND job_id=? AND owner_id='owner'").bind(quoteId,id).first();}
 async function catalogQuote(id,current,credentialGeneration,expiresAt){const c=PAID_SUMMARY_CATALOG;return priceSummaryQuote({jobId:id,sourceSha256:current.sourceSha256,requestSha256:current.requestSha256,model:c.model,priceVersion:c.priceVersion,priceSource:c.priceSource,inputTokensUpper:current.request.inputChargeCeiling,outputTokensUpper:current.request.outputChargeCeiling,plannedCalls:1,maxRetries:0,maxTaxBps:10000,priceInputMicroUsdPerMillion:c.inputPriceMicroUsdPerMillion,priceOutputMicroUsdPerMillion:c.outputPriceMicroUsdPerMillion,credentialGeneration,expiresAt,costEstimate:paidRequestCostPreview(current.request)});}
 async function issuedQuote(env,id,job,current){
@@ -61,12 +63,12 @@ export async function handlePaidSummaryAction(request,env,{id,action,job,sourceO
   }
   const finalReportSaved=job.report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED';
   let recordedTrialEvidence=null;if(trial)try{recordedTrialEvidence=JSON.parse(trial.evidence_json);}catch{}
-  return json({issuedQuote:latestQuote?{quoteId:latestQuote.id,quote:JSON.parse(latestQuote.quote_json),firstTrialAvailable,firstTrialEvidence:FIRST_TRIAL_EVIDENCE}:null,approval,firstTrial:trial?{kind:FIRST_TRIAL_KIND,state:trial.state,generation:trial.state==='CONSUMED'?(finalReportSaved&&reservations.some(item=>item.state==='SETTLED')?'SUCCEEDED':'UNCONFIRMED'):'UNTESTED',metadataGet:'NOT_REQUESTED',evidence:recordedTrialEvidence}:null,reservations:reservations.map(({usage_json,...row})=>({...row,usage:usage_json?JSON.parse(usage_json):null})),receipt:receipt?{...receipt,revalidationAvailable:receipt.response_complete===1&&receipt.http_status===200&&(receipt.finish_reason===null||receipt.finish_reason==='STOP')&&['RECEIVED','VALIDATION_FAILED','SAVE_FAILED'].includes(receipt.state)&&['RESERVED','UNCERTAIN','SETTLED'].includes(reservations[0]?.state)&&reservations[0]?.outcome!=='REPORT_SAVED'&&!finalReportSaved}:null,executionReady,finalReportSaved,costReconciliation:finalReportSaved&&reservations.some(item=>['RESERVED','UNCERTAIN'].includes(item.state))?'REVIEW_REQUIRED':finalReportSaved&&reservations.some(item=>item.state==='SETTLED')?'SETTLED_PRIOR':null,providerInvoiceAmount:'UNKNOWN'});
+  return json({issuedQuote:latestQuote?{quoteId:latestQuote.id,quote:JSON.parse(latestQuote.quote_json),firstTrialAvailable,firstTrialEvidence:FIRST_TRIAL_EVIDENCE}:null,approval,firstTrial:trial?{kind:FIRST_TRIAL_KIND,state:trial.state,generation:trial.state==='CONSUMED'?(finalReportSaved&&reservations.some(item=>item.state==='SETTLED')?'SUCCEEDED':'UNCONFIRMED'):'UNTESTED',metadataGet:'NOT_REQUESTED',evidence:recordedTrialEvidence}:null,reservations:reservations.map(({usage_json,...row})=>({...row,usage:usage_json?JSON.parse(usage_json):null})),receipt:receipt?{...receipt,revalidationAvailable:receipt.response_complete===1&&receipt.http_status===200&&(receipt.finish_reason===null||receipt.finish_reason==='STOP')&&['RECEIVED','VALIDATION_FAILED','SAVE_FAILED'].includes(receipt.state)&&['RESERVED','UNCERTAIN','SETTLED'].includes(reservations[0]?.state)&&reservations[0]?.outcome!=='REPORT_SAVED'&&!finalReportSaved}:null,executionReady,finalReportSaved,costReconciliation:finalReportSaved?costReconciliation(reservations):null,providerInvoiceAmount:'UNKNOWN'});
  }
  if(action==='paid-summary-revalidate'&&request.method==='POST'){
   const body=await request.json();if(body?.confirmNoProviderCall!==true||typeof body.reservationId!=='string')fail('PAID_REVALIDATION_CONFIRMATION_REQUIRED');
   await requirePaidReceiptSchema(env.DB);
-  if(job.report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED')return json({job,cached:true,persisted:true,providerCalled:false});
+  if(job.report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED')return json({job,cached:true,persisted:true,providerCalled:false,costReconciliation:await savedCostReconciliation(env,id),providerInvoiceAmount:'UNKNOWN'});
   if(job.report)fail('SUMMARY_ALREADY_EXISTS');
   const current=await scope(env,job,sourceOf),approval=await env.DB.prepare("SELECT quote_json,quote_sha256 FROM yta_paid_summary_approvals WHERE job_id=? AND owner_id='owner'").bind(id).first();
   if(!approval)fail('PAID_RECEIPT_SCOPE_CHANGED');const quote=JSON.parse(approval.quote_json),{quoteSha256,...unsigned}=quote;
@@ -99,7 +101,7 @@ export async function handlePaidSummaryAction(request,env,{id,action,job,sourceO
  }
  if(action==='paid-summary-execute'&&request.method==='POST'){
   await requirePaidReceiptSchema(env.DB);
-  if(job.report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED')return json({job,cached:true,persisted:true});if(job.report)fail('SUMMARY_ALREADY_EXISTS');
+  if(job.report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED')return json({job,cached:true,persisted:true,costReconciliation:await savedCostReconciliation(env,id),providerInvoiceAmount:'UNKNOWN'});if(job.report)fail('SUMMARY_ALREADY_EXISTS');
   const body=await request.json(),approvalId=body?.approvalId;if(typeof approvalId!=='string')fail('PAID_APPROVAL_REQUIRED');
   const trial=await firstTrialForApproval(env.DB,approvalId),firstTrial=!!trial;
   if(!paidExecutionAllowed(env,firstTrial))fail('PAID_EXECUTION_DISABLED');
