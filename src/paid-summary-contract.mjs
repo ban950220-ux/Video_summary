@@ -23,7 +23,7 @@ export function fullSummaryRequest(source,audit){
  const requestBytes=encoder.encode(JSON.stringify(body)).length;
  const inputChargeCeiling=requestBytes*PAID_SUMMARY_INPUT_BYTE_MULTIPLIER+PAID_SUMMARY_INPUT_OVERHEAD_BYTES;
  if(inputChargeCeiling>PAID_SUMMARY_CATALOG.inputLimit)throw new ProviderError('PAID_INPUT_LIMIT','전사·스키마를 포함한 보수적 입력 상한을 넘었습니다. 단일 호출 견적을 제공하지 않습니다.');
- return {body,requestBytes,estimatedInputUpper:inputChargeCeiling,inputChargeCeiling,outputChargeCeiling:PAID_SUMMARY_OUTPUT_TOKENS};
+ return {body,requestBytes,estimatedInputUpper:inputChargeCeiling,inputChargeCeiling:PAID_SUMMARY_CATALOG.inputLimit,outputChargeCeiling:PAID_SUMMARY_CATALOG.outputLimit};
 }
 
 const estimateCost=(tokens,rate)=>Math.ceil(tokens*rate/1_000_000);
@@ -36,7 +36,7 @@ export function paidRequestCostPreview(request){
 export async function checkedPaidWireBody(body,quote){
  const serialized=JSON.stringify(body),bytes=encoder.encode(serialized).length;
  const inputChargeCeiling=bytes*PAID_SUMMARY_INPUT_BYTE_MULTIPLIER+PAID_SUMMARY_INPUT_OVERHEAD_BYTES;
- if(!quote||!Number.isSafeInteger(quote.requestBytes)||bytes!==quote.requestBytes||inputChargeCeiling!==quote.inputTokensUpper||body?.generationConfig?.maxOutputTokens!==PAID_SUMMARY_OUTPUT_TOKENS||quote.outputTokensUpper!==PAID_SUMMARY_OUTPUT_TOKENS||inputChargeCeiling>PAID_SUMMARY_CATALOG.inputLimit)throw new ProviderError('PAID_WIRE_SCOPE_CHANGED','저장된 요청 본문·출력 상한과 견적이 다릅니다.');
+ if(!quote||!Number.isSafeInteger(quote.requestBytes)||bytes!==quote.requestBytes||quote.inputTokensUpper!==PAID_SUMMARY_CATALOG.inputLimit||body?.generationConfig?.maxOutputTokens!==PAID_SUMMARY_OUTPUT_TOKENS||quote.outputTokensUpper!==PAID_SUMMARY_CATALOG.outputLimit||inputChargeCeiling>PAID_SUMMARY_CATALOG.inputLimit)throw new ProviderError('PAID_WIRE_SCOPE_CHANGED','저장된 요청 본문·출력 상한과 견적이 다릅니다.');
  const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(serialized)))).map(byte=>byte.toString(16).padStart(2,'0')).join('');
  if(hash!==quote.requestSha256)throw new ProviderError('PAID_WIRE_SCOPE_CHANGED','저장된 요청 본문 해시와 견적이 다릅니다.');
  return serialized;

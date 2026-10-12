@@ -24,7 +24,7 @@ test('stored transcript choice remains read-only and labels catalog price as an 
   assert.equal(response.status,200,JSON.stringify(choice));assert.equal(choice.transcription.remainingChunks,0);assert.equal(choice.summary.savedRawStages,0);
   assert.equal(choice.summary.requestedOutput,'FULL_VIDEO_SYNTHESIS');assert.equal(choice.summary.intermediateOutput,'RAW_CHECKPOINT_BUNDLE');
   assert.equal(choice.free.eta.status,'UNKNOWN');assert.equal(choice.free.automaticPaidFallback,false);
-  assert.equal(choice.paid.executionEnabled,false);assert.equal(choice.paid.quoteIssueReady,true);assert.ok(choice.paid.maxMicroUsd<720896);assert.equal(choice.paid.inputTokensUpper,choice.paid.requestBytes*2+8192);assert.equal(choice.paid.outputTokensUpper,8192);assert.equal(choice.paid.costEstimate.inputTokenCountVerified,false);assert.ok(choice.paid.costEstimate.estimatedPreTaxHighMicroUsd<choice.paid.maxMicroUsd);assert.equal(choice.paid.priceVersion,'google-gemini-standard-2026-10-12');assert.match(choice.paid.reason,/미검증/);assert.equal(choice.paid.eta.status,'UNKNOWN');assert.equal(writes,0);
+  assert.equal(choice.paid.executionEnabled,false);assert.equal(choice.paid.quoteIssueReady,true);assert.equal(choice.paid.maxMicroUsd,720896);assert.equal(choice.paid.inputTokensUpper,1_048_576);assert.equal(choice.paid.outputTokensUpper,65_536);assert.ok(choice.paid.requestBytes*2+8192<choice.paid.inputTokensUpper);assert.equal(choice.paid.costEstimate.inputTokenCountVerified,false);assert.ok(choice.paid.costEstimate.estimatedPreTaxHighMicroUsd<choice.paid.maxMicroUsd);assert.equal(choice.paid.priceVersion,'google-gemini-standard-2026-10-12');assert.match(choice.paid.reason,/미검증/);assert.equal(choice.paid.eta.status,'UNKNOWN');assert.equal(writes,0);
  }finally{f.db.close();}
 });
 
@@ -34,6 +34,7 @@ test('mock quote binds price, taxes, retries, source and exact user cap; concurr
   assert.equal(quote.inputCostMicroUsd,100000);assert.equal(quote.outputCostMicroUsd,40000);assert.equal(quote.maxCallMicroUsd,154000);assert.equal(quote.maxMicroUsd,462000);assert.equal(quote.maxCalls,3);assert.equal(quote.transcriptionCostMicroUsd,0);assert.equal(quote.eta.status,'UNKNOWN');
   const base={id:'approval-1',sourceSnapshot:f.snapshot,maxMicroUsd:quote.maxMicroUsd,maxCalls:quote.maxCalls,expiresAt:quote.expiresAt,confirmExactQuote:true};
   await assert.rejects(approvePaidSummaryBudget(f.env,quote,{...base,maxMicroUsd:quote.maxMicroUsd+1}),{code:'PAID_APPROVAL_SCOPE_CHANGED'});
+  await assert.rejects(approvePaidSummaryBudget(f.env,quote,{...base,maxMicroUsd:quote.maxCallMicroUsd-1}),{code:'PAID_APPROVAL_SCOPE_CHANGED'});
   await assert.rejects(approvePaidSummaryBudget(f.env,{...quote,priceVersion:'changed'},base),{code:'PAID_APPROVAL_SCOPE_CHANGED'});
   await approvePaidSummaryBudget(f.env,quote,base);
   await assert.rejects(approvePaidSummaryBudget(f.env,quote,{...base,id:'duplicate-approval'}),{code:'PAID_APPROVAL_SCOPE_CHANGED'});

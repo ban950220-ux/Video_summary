@@ -19,9 +19,9 @@ so their application and schema readback require a separate authorized step.
 - Standard paid text input is $0.25 per million tokens; output **including
   thinking** is $1.50 per million tokens:
   <https://ai.google.dev/gemini-api/docs/pricing>.
-- Google's `max_output_tokens` description says the cap includes thought
-  tokens. The app requests and reserves 8,192 total output and thinking tokens,
-  below the model's 65,536-token output limit:
+- Google's general `max_output_tokens` description says the cap includes thought
+  tokens. The app requests 8,192, but reserves the model's full 65,536-token
+  output limit until this model-specific billing bound is independently verified:
   <https://ai.google.dev/gemini-api/docs/thinking>.
 - JSON Schema objects, arrays, required fields, and `additionalProperties`
   are documented as supported; output is still checked locally:
@@ -36,21 +36,22 @@ was made to check them.
 
 The server builds one full-transcript request, including timed segment IDs,
 source audit and the JSON schema. It measures the exact serialized request in
-UTF-8 bytes. The input reservation uses **twice those bytes plus 8,192** for
-tokenization and protocol uncertainty, and refuses an oversized request. The
-output reservation uses the explicit `maxOutputTokens=8192`, including thinking.
-The adapter verifies the serialized body's size, SHA-256 and output cap against
-the server-issued, hashed quote before the final no-send D1 guard and fetch. This bounds the
-app's sent request, but it is **not a provider-certified token count**. An
-unexpected provider usage above the reserved estimate becomes `UNCERTAIN`;
-it cannot be represented as proven settled cost.
+UTF-8 bytes. Twice those bytes plus 8,192 is an **offline request-size
+admission check**, not a certified token count or monetary approval ceiling.
+The app refuses an oversized request. It requests `maxOutputTokens=8192`,
+but the reservation retains the official model limits of **1,048,576 input
+and 65,536 output tokens** until a narrower billing bound is independently
+verified. The adapter verifies the serialized body's size, SHA-256 and
+configured output cap against the server-issued, hashed quote before the
+final no-send D1 guard and fetch. A user amount below the full one-call
+reservation is rejected at approval, so it cannot become executable.
 
 The owner-facing range is an **offline cost scenario**, not an invoice forecast:
 input tokens are illustrated at request bytes / 4 through bytes / 2, and
 output plus thinking at 2,048 through 8,192 tokens. The range uses catalog
 text prices before tax; Korean tokenization and actual output can fall outside
-it. The server displays the separately calculated worst app reservation from
-the byte-based input ceiling and the hard output cap. One call and zero
+it. The server displays the separate maximum approval and atomic reservation
+from the official model limits. One call and zero
 automatic retries remain fixed. The additional **100% app budget buffer** is
 for unknown tax and other billing differences; it is not a claim that the
 applicable tax rate is 100%, or a verified tax quote. Actual token count,
