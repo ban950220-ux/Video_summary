@@ -58,3 +58,10 @@ under that deploy command and the current Worker version/source annotation was
 read back. This supports changing only the pinned version/source; the next
 deployment still requires fresh GET checks. A successful build by itself would
 not prove the postcheck without confirming which deploy command ran.
+
+## Read-only lineage diagnostic trigger
+
+This documentation-only review-branch commit is reserved for one Cloudflare
+Build trigger after the browser operator confirms the review branch and the
+temporary `npm run preflight:version-lineage` deploy command. The diagnostic
+result must be reviewed separately; this note does not record a Build result.
