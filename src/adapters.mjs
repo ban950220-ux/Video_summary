@@ -1,5 +1,6 @@
 // Optional live adapters; disabled by default and NOT tested with real credentials.
 import {InputError,videoIdOf} from './core.mjs';
+import {groqSummaryRequestBody} from './groq-summary-contract.mjs';
 export class ProviderError extends Error {constructor(code,message){super(message);this.code=code;}}
 export function assertLive(env,provider){
   if(env?.ENABLE_LIVE_FREE!=='true') throw new ProviderError('LIVE_DISABLED','실제 제공자 호출은 기본적으로 비활성화 상태입니다.');
@@ -59,7 +60,7 @@ export async function summarizeTranscriptWithGroq({env,messages,maxCompletionTok
  assertLive(env,'GROQ');
  if(!env.GROQ_API_KEY)throw new ProviderError('KEY_MISSING','Groq API 키 미설정');
  if(!Array.isArray(messages)||messages.length!==2||!Number.isSafeInteger(maxCompletionTokens)||maxCompletionTokens<1||maxCompletionTokens>1800)throw new InputError('Groq 요약 요청 범위 오류');
- const body={model:'openai/gpt-oss-120b',messages,response_format:{type:'json_object'},reasoning_effort:'low',max_completion_tokens:maxCompletionTokens,temperature:0,stream:false};
+ const body=groqSummaryRequestBody(messages,maxCompletionTokens);
  await beforeFetch?.();
  const response=await fetchFn('https://api.groq.com/openai/v1/chat/completions',{method:'POST',headers:{Authorization:`Bearer ${env.GROQ_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(120000)});
  const safeRateLimit=safeGroqSummaryHeaders(response.headers);

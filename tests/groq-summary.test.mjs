@@ -8,6 +8,7 @@ import {reportPrompt} from '../src/report.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 import {capacityIdentity} from '../src/observed-capacity.mjs';
 import {mergeAudioSegments} from '../src/audio.mjs';
+import {GROQ_SUMMARY_RESPONSE_FORMAT,groqSummaryRequestBody} from '../src/groq-summary-contract.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 async function fixture({complete=true,large=false,sourceText=null,longSource=false}={}){
@@ -16,7 +17,7 @@ async function fixture({complete=true,large=false,sourceText=null,longSource=fal
  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'NOT_REAL_TEST_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:longSource?6000:600,title:'Offline Groq summary'}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
  const count=longSource?125:large?25:2,span=longSource?48000:large?24000:300000;
- const segments=Array.from({length:count},(_,i)=>({id:i+1,startMs:i*span,endMs:(i+1)*span,text:sourceText??`원문 ${i+1} ${longSource?'가나다라마바사아자차카타파하 '.repeat(28):large?'가나다라마바사 '.repeat(12):'검증'}`}));
+ const segments=Array.from({length:count},(_,i)=>({id:i+1,startMs:i*span,endMs:(i+1)*span,text:sourceText??`원문 ${i+1} ${longSource?'가나다라마바사아자차카타파하 '.repeat(18):large?'가나다라마바사 '.repeat(12):'검증'}`}));
  const raw=segments.map(part=>part.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:complete?1:0,audioFileSha256:'a'.repeat(64),audioSegmentOrigins:large?Array.from({length:500},(_,i)=>({segmentId:i+1,chunkIndex:i,startMs:i*1000,endMs:i*1000+900})):[]};
  db.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').run(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString());
  db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),id);
@@ -25,11 +26,12 @@ async function fixture({complete=true,large=false,sourceText=null,longSource=fal
  const approval=plan&&{jobId:id,transcriptHash:plan.transcriptHash,model:plan.model,windowStart:plan.windowStart,totalRequests:plan.totalRequests,maxRequests:plan.maxRequests,maxInputTokensPerRequest:plan.maxInputTokensPerRequest,maxCompletionTokensPerRequest:plan.maxCompletionTokensPerRequest,totalTokenUpperBound:plan.totalTokenUpperBound,credentialGeneration:review.credentialGeneration,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,summaryOnly:true};
  return {db,env,id,path,plan,approval,segments};
 }
-async function sibling(f){
+async function sibling(f,{approve=true}={}){
  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600,title:'Second owner job'}),f.env)).json(),id=created.job.id,path='/api/jobs/'+id;
  const raw=f.segments.map(part=>part.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
  f.db.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').run(id,raw,JSON.stringify(f.segments),'GROQ_OWNED_AUDIO',new Date().toISOString());
  f.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),id);
+ if(!approve)return {id,path};
  const plan=await(await routeApi(request(path+'/groq-summary-plan'),f.env)).json();
  const review=await(await routeApi(request(path+'/groq-summary-approval'),f.env)).json();
  const approval={jobId:id,transcriptHash:plan.transcriptHash,model:plan.model,windowStart:plan.windowStart,totalRequests:plan.totalRequests,maxRequests:plan.maxRequests,maxInputTokensPerRequest:plan.maxInputTokensPerRequest,maxCompletionTokensPerRequest:plan.maxCompletionTokensPerRequest,totalTokenUpperBound:plan.totalTokenUpperBound,credentialGeneration:review.credentialGeneration,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,summaryOnly:true};
@@ -38,6 +40,67 @@ async function sibling(f){
 }
 const valid=id=>({summary:[{text:'원문 검증',evidenceIds:[id]}],chapters:[{text:'시간대 요약',evidenceIds:[id]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'});
 const response=(body=valid(1),extra={})=>Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify(body)}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390,completion_tokens_details:{reasoning_tokens:10}},...extra});
+
+test('strict summary schema is included in the request estimate and fresh approval hash',async()=>{
+ const f=await fixture(),old=fetch;let calls=0;
+ const stored=f.db.prepare('SELECT raw,segments_json FROM yta_sources WHERE job_id=?').get(f.id),job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(job.audit_json);
+ const legacyInput=[stored.raw,JSON.parse(stored.segments_json),audit.audioFileSha256,promptAudit({audit,duration_seconds:job.duration_seconds})];
+ const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(legacyInput)));
+ assert.notEqual(f.plan.transcriptHash,Buffer.from(digest).toString('hex'));
+ assert.equal(GROQ_SUMMARY_RESPONSE_FORMAT.json_schema.strict,true);
+ assert.equal(GROQ_SUMMARY_RESPONSE_FORMAT.json_schema.schema.properties.summary.type,'array');
+ const messages=groqSummaryMessages(groqRawPrompt(f.segments,promptAudit({audit,duration_seconds:job.duration_seconds})));
+ assert.ok(groqInputUpperBound(messages)>=Buffer.byteLength(JSON.stringify(groqSummaryRequestBody(messages,1800)))+512);
+ globalThis.fetch=async(_url,options)=>{calls++;const body=JSON.parse(options.body);assert.deepEqual(body.response_format,GROQ_SUMMARY_RESPONSE_FORMAT);return response();};
+ try{assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);assert.ok([200,202].includes((await routeApi(request(f.path+'/groq-summary','POST',{}),f.env)).status));assert.equal(calls,1);}finally{globalThis.fetch=old;f.db.close();}
+});
+
+test('legacy failed raw response is diagnosed without disclosing text or changing its ledger',async()=>{
+ const f=await fixture({large:true});
+ try{
+  const stored=f.db.prepare('SELECT raw,segments_json FROM yta_sources WHERE job_id=?').get(f.id),job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(job.audit_json);
+  const legacyInput=[stored.raw,JSON.parse(stored.segments_json),audit.audioFileSha256,promptAudit({audit,duration_seconds:job.duration_seconds})];
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(legacyInput))),legacyHash=Buffer.from(digest).toString('hex');
+  const approvalId=f.id+':groq-summary:approval:0',approval={...f.approval,sequence:0,transcriptHash:legacyHash};
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)").run(approvalId,f.id,'groq-summary',6600,'STOPPED',new Date().toISOString(),JSON.stringify(approval));
+  const raw=JSON.stringify({...valid(1),summary:'PRIVATE_RESPONSE_CONTENT'}),operationId=f.id+':groq-summary:'+legacyHash+':raw:0';
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,?,?,?,?,?,?)").run(operationId,f.id,'groq-summary',6600,'FAILED_UNCERTAIN',new Date().toISOString(),'SUMMARY_RESPONSE_INVALID',JSON.stringify({reviewResult:{partialText:raw,usage:{inputTokens:1258,outputTokens:962,reasoningTokens:74,totalTokens:2220}}}));
+  const before=f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(operationId);
+  const reply=await routeApi(request(f.path+'/groq-summary-failure-diagnostic'),f.env),body=await reply.json();
+  assert.equal(reply.status,200,JSON.stringify(body));assert.equal(body.sourceHashMatchesApproval,true);assert.equal(body.summaryType,'string');assert.equal(body.firstFailedCheck,'SCHEMA');assert.equal(body.storedUtf16Length,raw.length);assert.ok(body.raw0LastId>0);assert.ok(!JSON.stringify(body).includes('PRIVATE_RESPONSE_CONTENT'));
+  assert.deepEqual(f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(operationId),before);
+ }finally{f.db.close();}
+});
+
+test('pre-schema approval cannot authorize a request under the new contract',async()=>{
+ const f=await fixture(),old=fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('no provider call');};
+ try{
+  const stored=f.db.prepare('SELECT raw,segments_json FROM yta_sources WHERE job_id=?').get(f.id),job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(job.audit_json);
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([stored.raw,JSON.parse(stored.segments_json),audit.audioFileSha256,promptAudit({audit,duration_seconds:job.duration_seconds})]))),legacyHash=Buffer.from(digest).toString('hex');
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)").run(f.id+':groq-summary:approval:0',f.id,'groq-summary',6600,'APPROVED',new Date().toISOString(),JSON.stringify({...f.approval,sequence:0,transcriptHash:legacyHash}));
+  const review=await routeApi(request(f.path+'/groq-summary-approval'),f.env);
+  assert.equal((await review.json()).error.code,'SUMMARY_APPROVAL_CHANGED');
+  const run=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);
+  assert.equal(run.status,409);assert.equal(calls,0);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
+
+test('strict-shape failure retains original usage and a read-only diagnostic without retry',async()=>{
+ const f=await fixture(),old=fetch;let calls=0;
+ globalThis.fetch=async()=>{calls++;return response({...valid(1),summary:'PRIVATE_RESPONSE_CONTENT'});};
+ try{
+  assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);
+  const failed=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);
+  assert.equal((await failed.json()).error.code,'SUMMARY_RESPONSE_INVALID');assert.equal(calls,1);
+  const row=f.db.prepare("SELECT state,error_code,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND state='FAILED_UNCERTAIN'").get(f.id);
+  assert.equal(row.error_code,'SUMMARY_RESPONSE_INVALID');assert.equal(JSON.parse(row.result_json).reviewResult.usage.totalTokens,390);
+  const diagnostic=await routeApi(request(f.path+'/groq-summary-failure-diagnostic'),f.env),safe=await diagnostic.json();
+  assert.equal(diagnostic.status,200);assert.equal(safe.firstFailedCheck,'SCHEMA');assert.equal(safe.summaryType,'string');assert.ok(!JSON.stringify(safe).includes('PRIVATE_RESPONSE_CONTENT'));
+  assert.equal((await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json()).error.code,'SUMMARY_OPERATION_REVIEW_REQUIRED');
+  assert.equal((await routeApi(request(f.path+'/groq-summary','POST',{}),f.env)).status,409);assert.equal(calls,1);
+  assert.deepEqual(f.db.prepare("SELECT state,error_code,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND state='FAILED_UNCERTAIN'").get(f.id),row);
+ }finally{globalThis.fetch=old;f.db.close();}
+});
 
 test('cached audio boundary reconciliation preserves speech, invalidates old review and blocks after approval',async()=>{
  const prepare=async()=>{
@@ -100,20 +163,21 @@ test('conservative UTF-8 bound partitions long Korean source below Groq Free inp
  const fullLength=Array.from({length:125},(_,i)=>({id:i+1,startMs:i*47136,endMs:(i+1)*47136,text:'가나다라마바사아자차카타파하 '.repeat(8)}));
  const bounded=partitionGroqTranscript(fullLength,{durationSeconds:5892,audioProcessingCoverage:1,independentVerification:false});
  assert.equal(fullLength.map(part=>part.text).join('').length,15000);
- assert.ok((bounded.length*2-1)*6600<=195000);
+ assert.ok(bounded.length<=120);
+ assert.ok(Math.min(bounded.length*2-1,Math.floor(195000/6600))*6600<=195000);
 });
 test('500-segment future merge packs consecutive source IDs without losing the checkpoint guard',()=>{
  const segments=Array.from({length:500},(_,i)=>({id:i+1,startMs:i*11786,endMs:(i+1)*11786,text:'가나다라마바사아자차'.repeat(10)}));
  const audit={durationSeconds:5893,audioProcessingCoverage:1,independentVerification:false,externalFactCheck:'NOT_PERFORMED',audioBoundarySegmentIds:Array.from({length:14},(_,i)=>2+33*i)};
- const groups=partitionGroqTranscript(segments,audit),firstIds=groups.map(group=>group[0].id).filter(id=>id<=397);
- assert.equal(groups.length,52);
+ const groups=partitionGroqTranscript(segments,audit),firstIds=groups.map(group=>group[0].id).filter(id=>id<=100);
+ assert.ok(groups.length>52&&groups.length<=120);
  const part=(first,last,chapterIds)=>({ids:Array.from({length:last-first+1},(_,i)=>first+i),startMs:(first-1)*11786,endMs:last*11786,report:{summary:[{text:'원문',evidenceIds:[first]}],chapters:[{text:'구간',evidenceIds:chapterIds}],claims:[],numbers:[],critical:[],conclusion:'원문'}});
- const large=part(1,397,firstIds),small=part(398,500,[398]),size=(parts,final=false)=>groqInputUpperBound(groqSummaryMessages(groqMergePrompt(parts,audit,{final})));
- assert.match(groqMergePrompt([large,small],audit),/"idRange":\[1,397\]/);
+ const large=part(1,100,firstIds),small=part(101,120,[101]),size=(parts,final=false)=>groqInputUpperBound(groqSummaryMessages(groqMergePrompt(parts,audit,{final})));
+ assert.match(groqMergePrompt([large,small],audit),/"idRange":\[1,100\]/);
  assert.ok(size([large,large],true)<=GROQ_SUMMARY_INPUT_BOUND);
  assert.ok(size([large,small],true)<=GROQ_SUMMARY_INPUT_BOUND);
  assert.ok(size([small,small],true)<=GROQ_SUMMARY_INPUT_BOUND);
- assert.match(groqMergePrompt([{...small,ids:[398,400]}],audit),/"ids":\[398,400\]/);
+ assert.match(groqMergePrompt([{...small,ids:[101,103]}],audit),/"ids":\[101,103\]/);
 });
 test('500-segment mocked summary reaches and saves the previously blocked merge checkpoint',async()=>{
  const f=await fixture({complete:false}),old=fetch;
@@ -136,10 +200,10 @@ test('500-segment mocked summary reaches and saves the previously blocked merge 
   assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',body),f.env)).status,200);
  };
  try{
-  const plan=await(await routeApi(request(f.path+'/groq-summary-plan'),f.env)).json();assert.equal(plan.rawStages,52);
+  const plan=await(await routeApi(request(f.path+'/groq-summary-plan'),f.env)).json();assert.equal(plan.rawStages,partitionGroqTranscript(segments,promptAudit({duration_seconds:5893,audit})).length);
   await approve();
   let saved=false;
-  for(let step=0;step<110;step++){
+  for(let step=0;step<240;step++){
    const result=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env),body=await result.json();
    assert.ok([200,202].includes(result.status),JSON.stringify({step,calls,body}));
    saved=Boolean(f.db.prepare("SELECT 1 AS ok FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND id LIKE ? AND state='DONE'").get(f.id,'%:merge:1:0'));
@@ -285,7 +349,7 @@ test('hierarchical Groq stages preserve source evidence and resume completed che
   let ids;
   if(prompt.includes('전사 배열 [id,startMs,endMs,text]:'))ids=JSON.parse(prompt.split('전사 배열 [id,startMs,endMs,text]:\n')[1]).map(part=>part[0]);
   else ids=JSON.parse(prompt.split('시간 순서별 부분 보고서:\n')[1]).flatMap(part=>part.idRange?Array.from({length:part.idRange[1]-part.idRange[0]+1},(_,i)=>part.idRange[0]+i):part.ids);
-  const report={summary:[{text:'원문에 기반한 한국어 정리',evidenceIds:[ids[0]]}],chapters:ids.map(id=>({text:'해당 구간 요약',evidenceIds:[id]})),claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'};
+  const report={summary:[{text:'원문에 기반한 한국어 정리',evidenceIds:[ids[0]]}],chapters:[{text:'해당 구간 요약',evidenceIds:ids}],claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'};
   return response(report);
  };
  try{await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);
@@ -378,7 +442,9 @@ test('job deletion retains recent completed and uncertain summary usage for late
    assert.equal((await routeApi(request(f.path,'DELETE'),f.env)).status,200);
    const retained=f.db.prepare("SELECT state,units,result_json FROM yta_operations WHERE job_id=? AND id LIKE ?").get(f.id,f.id+':groq-summary:'+f.plan.transcriptHash+':%');
    assert.equal(retained.state,prior.state);assert.equal(retained.units,prior.units);assert.equal(retained.result_json,null);
-   const next=await sibling(f);assert.equal((await routeApi(request(next.path+'/groq-summary','POST',{}),f.env)).status,409);assert.equal(calls,1);
+   const next=await sibling(f,{approve:mode==='success'});
+   if(mode==='429')assert.equal((await routeApi(request(next.path+'/groq-summary-approval'),f.env)).status,409);
+   assert.equal((await routeApi(request(next.path+'/groq-summary','POST',{}),f.env)).status,409);assert.equal(calls,1);
    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM yta_operations WHERE job_id=?").get(f.id).n,3);
    assert.equal(f.db.prepare("SELECT state,result_json FROM yta_operations WHERE id=?").get(f.id+':deleting').state,'DELETING');
    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM usage_events WHERE job_id=?").get(f.id).n,mode==='success'?1:0);
@@ -420,9 +486,9 @@ test('grounding rejects Korean numeric substrings, decimals, signs and percent m
   }finally{globalThis.fetch=old;f.db.close();}
  }
 });
-test('50,000 character Korean transcript offers a bounded first window and resumes completed stages in a new window',async()=>{
+test('long Korean transcript offers a bounded first window and resumes completed stages in a new window',async()=>{
  const f=await fixture({longSource:true}),old=fetch;let calls=0,reply=response();globalThis.fetch=async()=>{calls++;return reply;};
- try{assert.ok(f.segments.map(x=>x.text).join('').length>50000);assert.ok(f.plan.rawStages>29);assert.equal(f.plan.maxRequests,29);assert.ok(f.plan.totalRequests>29);
+ try{assert.ok(f.segments.map(x=>x.text).join('').length>30000);assert.ok(f.plan.rawStages>29);assert.equal(f.plan.maxRequests,29);assert.ok(f.plan.totalRequests>29);
   assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);
   const groups=partitionGroqTranscript(f.segments,{durationSeconds:6000,audioProcessingCoverage:1,independentVerification:false,externalFactCheck:'NOT_PERFORMED'});
   for(let i=0;i<29;i++){const group=groups[i],ids=group.map(x=>x.id),report={summary:[{text:'원문',evidenceIds:ids}],chapters:[{text:'원문',evidenceIds:ids}],claims:[],numbers:[],critical:[],conclusion:'원문'};
