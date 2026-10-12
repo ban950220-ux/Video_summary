@@ -7,6 +7,9 @@ so the existing Groq Free path remains usable.
 This review branch changes none of those production settings and does not apply
 `0008_paid_summary_budget.sql` to production. The 98-minute private transcript
 and the user's provider account were not read or called for this work.
+`npm run deploy:production` invokes only `wrangler deploy`; it does not apply
+the D1 migration. Production currently lacks the three paid-summary tables,
+so their application and schema readback require a separate authorized step.
 
 ## Official catalog checked 2026-10-12
 

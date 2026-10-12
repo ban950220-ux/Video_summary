@@ -116,12 +116,15 @@ Read-only Build `e9c72f29-3051-4685-a16c-c5b2fdf2381e` at source
 After independent review of that response, `remoteSettingsReviewed=true` was
 set without changing any expected field or the active version. A post-deploy API
 shape change fails the postcheck rather than being silently accepted.
-That is historical. The current pinned version is
-`1fcd78b0-363c-4cc1-8b7e-1a6571ef455e` from
-`fce76164541f2785a0e89953d92e58202aa97701`. The later read-only Build
+That is historical. Read-only Build
 `1323e142-ee46-47d2-b541-df604c1a7a50`
-confirmed the omitted/null distinction and the current pinned version/source.
-The review branch records `remoteSettingsReviewed=true` for that exact shape;
+confirmed the omitted/null distinction and the former pinned version
+`1fcd78b0-363c-4cc1-8b7e-1a6571ef455e` from
+`fce76164541f2785a0e89953d92e58202aa97701`. The review branch now pins
+`caf22f64-997c-427c-8373-4f487bc4a5aa` from
+`c302e8599c4b98f0bd25ec89743f5ff1838273fd` and retains the same exact
+metadata checks. `remoteSettingsReviewed=true` carries forward the earlier
+reviewed shape; it does not assert a fresh metadata review.
 runtime and Access checks, a fresh pre-deploy read, and separate rollout
 authorization remain required. The Cloudflare Builds deploy command was
 restored to `npm run deploy:production` after the diagnostic. Do not trigger
@@ -160,7 +163,7 @@ automatic approval. The exact observed production response shape was
 independently reconciled before the gate changed.
 
 The review baseline identifies active version
-`1fcd78b0-363c-4cc1-8b7e-1a6571ef455e`. A later deployment must recheck
+`caf22f64-997c-427c-8373-4f487bc4a5aa`. A later deployment must recheck
 that version immediately before upload and update the baseline after success. See
 [the remote guard design](remote-deploy-guard-proposal.md).
 
@@ -270,8 +273,8 @@ output into Git or chat because it can contain runtime variable values.
 Before a later production deployment, inspect the selected Worker, target URL,
 active version, DB binding, Access policy, and names (not values) of variables
 and secrets in Cloudflare. Record the currently active version; it was reported
-as `1fcd78b0-363c-4cc1-8b7e-1a6571ef455e` at 100% with source commit
-`fce76164541f2785a0e89953d92e58202aa97701` in the latest owner review, but must be checked again immediately
+as `caf22f64-997c-427c-8373-4f487bc4a5aa` at 100% with source commit
+`c302e8599c4b98f0bd25ec89743f5ff1838273fd` in the latest owner review, but must be checked again immediately
 before deploying. Run the build checks and Wrangler `--dry-run` first. If the
 existing token cannot deploy this Worker, stop and review its existing scope;
 do not switch to a broader token automatically. `npm run release:gate` still

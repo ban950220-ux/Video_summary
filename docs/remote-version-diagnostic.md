@@ -1,6 +1,6 @@
 # Read-only active version diagnostic
 
-The read-only preflight has an opt-in active-version diagnostic. The current review branch pins the separately confirmed Worker version and source SHA. `remoteSettingsReviewed=true` now records the separately reviewed read-only Build `1323e142-ee46-47d2-b541-df604c1a7a50`; it does not deploy a Worker.
+The read-only preflight has an opt-in active-version diagnostic. The review branch pins Worker version `caf22f64-997c-427c-8373-4f487bc4a5aa` and source `c302e8599c4b98f0bd25ec89743f5ff1838273fd` from the latest owner review. `remoteSettingsReviewed=true` carries forward the separately reviewed metadata shape from read-only Build `1323e142-ee46-47d2-b541-df604c1a7a50`; it is not a new metadata review.
 
 In an authorized Workers Builds context with the existing read-only Build token, run:
 
@@ -48,3 +48,13 @@ UUID/source and check every target, binding, Access, runtime, exposure and
 metadata condition. Cloudflare Builds restored `npm run deploy:production`
 after the diagnostic without a deployment; a later build under that command
 must wait for separate rollout authorization and fresh remote prechecks.
+
+The `c302e8599c4b98f0bd25ec89743f5ff1838273fd` source uses the same
+`readRemoteState` and `assertRemoteState` code as this review branch. Its
+guarded deployment reads the remote state twice before upload and twice after
+upload, checking the exact optional-field and observability shape each time.
+The owner reports Build `f6d115a0-319b-433c-ba24-f11d04133a3a` succeeded
+under that deploy command and the current Worker version/source annotation was
+read back. This supports changing only the pinned version/source; the next
+deployment still requires fresh GET checks. A successful build by itself would
+not prove the postcheck without confirming which deploy command ran.

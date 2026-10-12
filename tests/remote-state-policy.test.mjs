@@ -17,8 +17,8 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
 ]});
 
 test('guard baseline pins the verified active Worker version and source commit',()=>{
-  assert.equal(approvedRemoteBaseline.activeVersionId,'1fcd78b0-363c-4cc1-8b7e-1a6571ef455e');
-  assert.equal(approvedRemoteBaseline.sourceCommit,'fce76164541f2785a0e89953d92e58202aa97701');
+  assert.equal(approvedRemoteBaseline.activeVersionId,'caf22f64-997c-427c-8373-4f487bc4a5aa');
+  assert.equal(approvedRemoteBaseline.sourceCommit,'c302e8599c4b98f0bd25ec89743f5ff1838273fd');
   assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,true);
   const observed=remote();observed.bindings.push({name:'ASSETS',type:'assets'});
   assert.equal(assertRemoteState(observed,approvedRemoteBaseline),true);
