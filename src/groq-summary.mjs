@@ -82,7 +82,7 @@ async function verifyCredentialGeneration(env,token,id,hash,scopeTag){
   return proof.id===id&&proof.hash===hash&&proof.scopeTag===scopeTag&&Number.isSafeInteger(proof.expiresAt)&&proof.expiresAt>Date.now()&&proof.identity===await capacityIdentity(env,'groq')?proof.identity:null;
  }catch{return null;}
 }
-async function completeSource(env,job,sourceOf){
+export async function completeSource(env,job,sourceOf){
  const source=await sourceOf(env,job.id);
  if(job.source_type!=='audio'||job.audit?.audioProcessing!=='ALL_PLANNED_CHUNKS_PROCESSED'||job.audit?.audioProcessingCoverage!==1||!(/^[a-f0-9]{64}$/.test(job.audit?.audioFileSha256||''))||!['GROQ_OWNED_AUDIO','GEMINI_OWNED_AUDIO','MIXED_OWNED_AUDIO'].includes(source?.provenance)||!Array.isArray(source.segments)||!source.segments.length||source.segments.some((part,i)=>part.id!==i+1||typeof part.text!=='string'||!part.text.trim()||!Number.isFinite(part.startMs)||!Number.isFinite(part.endMs)||part.startMs<0||part.endMs<=part.startMs||part.endMs>job.duration_seconds*1000+2000||(i&&part.startMs<source.segments[i-1].startMs)))stop('COMPLETE_TRANSCRIPT_REQUIRED','전체 음성 전사와 저장된 원본 시간축이 먼저 필요합니다.');
  const text=source.segments.map(part=>part.text).join('\n');

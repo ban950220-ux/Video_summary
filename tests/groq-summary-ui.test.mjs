@@ -87,6 +87,16 @@ test('bundle UI labels the intermediate artifact and uses a separate export URL'
  const links=host.children.at(-1).children;assert.deepEqual(links.map(item=>item.textContent),['구간별 묶음 TXT 내보내기','구간별 묶음 MD 내보내기']);
  assert.ok(links.every(item=>item.href===undefined||item.tag==='a'));
 });
+test('remaining summary choice shows unknown ETA and no paid execution control',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
+ const choice={transcription:{complete:true,remainingChunks:0},summary:{complete:false,savedRawStages:1,rawStages:4,remainingRawStages:3},free:{model:'mock-free',inputTokensUpperPerCall:4800,outputTokensUpperPerCall:1800,eta:{reason:'관측치 없음'}},paid:{executionEnabled:false,reason:'가격 미검증',model:null,priceVersion:null,inputTokensUpper:null,outputTokensUpper:null,maxRetries:null,maxTaxBps:null,maxMicroUsd:null}};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showSummaryChoice=showSummaryChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:async()=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>choice}),detailRequestIsCurrent};
+ runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showSummaryChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
+ const host=target.children[0],labels=host.children.map(item=>item.textContent||'').join(' ');
+ assert.match(labels,/남은 전사 0조각/);assert.match(labels,/전체 영상의 단일 종합 요약/);assert.match(labels,/소요 시간 UNKNOWN/);assert.match(labels,/가격 버전 미검증/);
+ assert.equal(host.children.some(item=>item.tag==='button'&&/유료/.test(item.textContent||'')),false);
+});
 
 test('lost checkpoint recovery POST and failed status GET leave only read-only reconciliation',async()=>{
  const node=tag=>({tag,children:[],hidden:false,dataset:{},disabled:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';

@@ -5,7 +5,7 @@ import {normalizeSegments,auditGaps,validateAnalysis,reportPrompt,markdownReport
 import {scanMp3,prepareMp3Chunk,mergeAudioSegments,boundaryMarkersFromRetained} from './audio.mjs';
 import {recordCapacity,reserveObservedCapacity,capacityBounds,persistWait,ensureCapacitySchema,capacityIdentityMatches,capacityIdentity} from './observed-capacity.mjs';
 import {partitionTranscript,partitionSynthesis,synthesisPrompt,summaryUnits,evidenceIds,assertGroupCoverage} from './summary-plan.mjs';
-import {handleGroqSummaryAction} from './groq-summary.mjs';
+import {handleGroqSummaryAction,completeSource,partitionGroqTranscript,promptAudit,GROQ_SUMMARY_INPUT_BOUND,GROQ_SUMMARY_COMPLETION_CAP,GROQ_SUMMARY_MODEL} from './groq-summary.mjs';
 const liveTables=['yta_sources','yta_quota','yta_operations','yta_audio'];
 export async function ensureLiveSchema(env){
  if(!env.DB)throw new ProviderError('DB_REQUIRED','D1 연결 필요');
@@ -332,7 +332,7 @@ async function executeFreeBatchChunk(env,{jobId,index,operationId,units,batch,by
 }
 export async function routeLive(request,env){
  const url=new URL(request.url),path=url.pathname;
- if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|groq-summary|groq-summary-plan|groq-summary-approval|groq-summary-status|groq-summary-failure-diagnostic|groq-summary-pilot|groq-summary-checkpoint-recovery|groq-summary-bundle|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/.test(path))return null;
+ if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|summary-choice|groq-summary|groq-summary-plan|groq-summary-approval|groq-summary-status|groq-summary-failure-diagnostic|groq-summary-pilot|groq-summary-checkpoint-recovery|groq-summary-bundle|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/.test(path))return null;
  try{
  if(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path)){await ensureLiveSchema(env);const id=path.split('/').pop(),owner=await env.DB.prepare('SELECT 1 AS ok FROM jobs WHERE id=? AND owner_id=?').bind(id,'owner').first();if(!owner)throw new ProviderError('NOT_FOUND','분석 기록 없음');
   // Durable tombstone is written before any private content is cleared. Late provider responses must observe it in their own UPDATE statement.
@@ -354,9 +354,17 @@ export async function routeLive(request,env){
    if(renewed.meta?.changes!==1){const inserted=await env.DB.prepare('INSERT OR IGNORE INTO yta_quota(provider,allowance,consumed,request_limit,request_count,expires_at,confirmed_at,billing_disabled) VALUES(?,?,0,?,0,?,?,1)').bind(provider,body.allowance,body.requestLimit,now+3600000,now).run();if(inserted.meta?.changes!==1)throw new ProviderError('ACTIVE_GRANT_EXISTS','현재 할당이 유효합니다. 중복 설정으로 사용량을 초기화할 수 없습니다.');}
    return json({configured:true,provider,expiresInSeconds:3600,verification:'OWNER_ATTESTED_NOT_INDEPENDENTLY_VERIFIED'});
   }
-  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|groq-summary|groq-summary-plan|groq-summary-approval|groq-summary-status|groq-summary-failure-diagnostic|groq-summary-pilot|groq-summary-checkpoint-recovery|groq-summary-bundle|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
+  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|summary-choice|groq-summary|groq-summary-plan|groq-summary-approval|groq-summary-status|groq-summary-failure-diagnostic|groq-summary-pilot|groq-summary-checkpoint-recovery|groq-summary-bundle|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
   const id=match[1],action=match[2],job=await ownedJob(env,id);
   if(action.startsWith('groq-summary'))return await handleGroqSummaryAction(request,env,{id,action,job,sourceOf,ownedJob});
+  if(action==='summary-choice'&&request.method==='GET'){
+   const source=await sourceOf(env,id),complete=job.audit?.audioProcessingCoverage===1&&Array.isArray(source?.segments)&&source.segments.length>0;
+   const groups=complete?partitionGroqTranscript(source.segments,promptAudit(job)):[];
+   const transcriptHash=complete?(await completeSource(env,job,sourceOf)).transcriptHash:null,stagePrefix=id+':groq-summary:'+transcriptHash+':';
+   const rows=complete?(await env.DB.prepare("SELECT id,state FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(id,stagePrefix,stagePrefix).all()).results||[]:[];
+   const savedRaw=groups.filter((_,index)=>rows.some(row=>row.id===stagePrefix+'raw:'+index&&row.state==='DONE')).length;
+   return json({jobId:id,transcription:{complete,remainingChunks:complete?0:'UNKNOWN',repeatRequired:false},summary:{complete:!!job.report,rawStages:groups.length,savedRawStages:savedRaw,remainingRawStages:groups.length-savedRaw,requestedOutput:'FULL_VIDEO_SYNTHESIS',intermediateOutput:'RAW_CHECKPOINT_BUNDLE'},free:{model:GROQ_SUMMARY_MODEL,inputTokensUpperPerCall:GROQ_SUMMARY_INPUT_BOUND,outputTokensUpperPerCall:GROQ_SUMMARY_COMPLETION_CAP,accountRemaining:'UNKNOWN',eta:{status:'UNKNOWN',reason:'검증된 남은 계정 용량과 실제 단계별 대기 시간이 없습니다.'},automaticPaidFallback:false},paid:{executionEnabled:false,quoteStatus:'UNAVAILABLE',reason:'검증된 모델·가격 버전·세금 범위가 없어 금액 승인을 제시할 수 없습니다.',model:null,priceVersion:null,priceSource:null,inputTokensUpper:null,outputTokensUpper:null,maxRetries:null,maxTaxBps:null,maxMicroUsd:null,eta:{status:'UNKNOWN',reason:'검증된 모델 및 제공자 처리 시간 관측치가 없습니다.'},automaticFreeFallback:false}});
+  }
   if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id),...boundaryAuditView(job.audit)});
   if(action==='export'&&request.method==='GET'){
    const source=await sourceOf(env,id),text=markdownReport(job,source);return new Response(text,{headers:{'content-type':'text/plain; charset=utf-8','cache-control':'no-store','content-disposition':'attachment; filename="analysis-'+id+(url.searchParams.get('format')==='txt'?'.txt':'.md')+'"'}});
