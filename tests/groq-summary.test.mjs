@@ -15,13 +15,13 @@ import {assertGrounding} from '../src/groq-summary.mjs';
 import {completeCoverageManifest,evidenceNotes,synthesisTreeProgress,persistedSynthesisNode} from '../src/groq-complete-synthesis.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
-async function fixture({complete=true,large=false,sourceText=null,longSource=false}={}){
+async function fixture({complete=true,large=false,sourceText=null,segmentText=null,longSource=false}={}){
  const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));
  const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:r.changes}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};
  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'NOT_REAL_TEST_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:longSource?6000:600,title:'Offline Groq summary'}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
  const count=longSource?125:large?25:2,span=longSource?48000:large?24000:300000;
- const segments=Array.from({length:count},(_,i)=>({id:i+1,startMs:i*span,endMs:(i+1)*span,text:sourceText??`원문 ${i+1} ${longSource?'가나다라마바사아자차카타파하 '.repeat(28):large?'가나다라마바사 '.repeat(12):'검증'}`}));
+ const segments=Array.from({length:count},(_,i)=>({id:i+1,startMs:i*span,endMs:(i+1)*span,text:segmentText?segmentText(i+1):sourceText??`원문 ${i+1} ${longSource?'가나다라마바사아자차카타파하 '.repeat(28):large?'가나다라마바사 '.repeat(12):'검증'}`}));
  const raw=segments.map(part=>part.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:complete?1:0,audioFileSha256:'a'.repeat(64),audioSegmentOrigins:large?Array.from({length:500},(_,i)=>({segmentId:i+1,chunkIndex:i,startMs:i*1000,endMs:i*1000+900})):[]};
  db.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').run(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString());
  db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),id);
@@ -45,8 +45,8 @@ async function sibling(f,{approve=true}={}){
 const valid=id=>({summary:[{text:'원문 검증',evidenceIds:[id]}],chapters:[{text:'시간대 요약',evidenceIds:[id]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'});
 const digest=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(typeof value==='string'?value:JSON.stringify(value))))).map(byte=>byte.toString(16).padStart(2,'0')).join('');
 const response=(body=valid(1),extra={})=>Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify(body)}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390,completion_tokens_details:{reasoning_tokens:10}},...extra});
-async function approvedCorrectionFixture({storedCredential=false}={}){
- const f=await fixture({large:true,sourceText:'가'.repeat(350)}),row=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(row.audit_json),groups=partitionGroqTranscript(f.segments,promptAudit({audit,duration_seconds:row.duration_seconds})),group=groups[8],hash=f.plan.transcriptHash,stamp=new Date(Date.now()-120000).toISOString();
+async function approvedCorrectionFixture({storedCredential=false,segmentText=null}={}){
+ const f=await fixture({large:true,sourceText:'가'.repeat(350),segmentText}),row=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(row.audit_json),groups=partitionGroqTranscript(f.segments,promptAudit({audit,duration_seconds:row.duration_seconds})),group=groups[8],hash=f.plan.transcriptHash,stamp=new Date(Date.now()-120000).toISOString();
  if(storedCredential){const encrypted=await encryptProviderKey(Buffer.alloc(32,7),'groq','STORED_TEST_ONLY_KEY');f.db.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','groq',?,?,?,?)").run(encrypted.version,encrypted.ivB64,encrypted.ciphertextB64,stamp);}
  const identity=await capacityIdentity(f.env,'groq');
  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'STOPPED',?,?)").run(f.id+':groq-summary:approval:0',f.id,stamp,JSON.stringify({...f.approval,sequence:0,keyIdentity:identity}));
@@ -57,8 +57,8 @@ async function approvedCorrectionFixture({storedCredential=false}={}){
  const approved=await routeApi(request(url,'POST',{step:'approve',quoteId:quote.quoteId,quoteSha256:quote.contract.quoteSha256,reservedUnits:quote.contract.reservedUnits,maxCalls:1,confirmExactQuote:true,confirmPriorUsagePreserved:true,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,noAutomaticRetry:true}),f.env);assert.equal(approved.status,200);const approval=await approved.json();
  return {f,group,url,quote,approval,failedId,oldResult};
 }
-async function reviewedGapFixture(){
- const setup=await approvedCorrectionFixture(),{f,group,approval,quote}=setup;
+async function reviewedGapFixture(options={}){
+ const setup=await approvedCorrectionFixture(options),{f,group,approval,quote}=setup;
  const job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),groups=partitionGroqTranscript(f.segments,promptAudit({audit:JSON.parse(job.audit_json),duration_seconds:job.duration_seconds})),stamp=new Date(Date.now()-120_000).toISOString();
  assert.ok(groups.length>9);
  for(let i=0;i<8;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+f.plan.transcriptHash+':raw:'+i,f.id,stamp,JSON.stringify({hash:f.plan.transcriptHash,key:'raw:'+i,report:valid(groups[i][0].id)}));
@@ -70,6 +70,7 @@ async function reviewedGapFixture(){
 
 test('complete synthesis review lists raw:8 and raw:9 failures separately without clearing either lock',async()=>{
  const {f,groups}=await reviewedGapFixture(),id=f.id,hash=f.plan.transcriptHash,stamp=new Date(Date.now()-120000).toISOString(),raw9Id=id+':groq-summary:'+hash+':raw:9';
+ f.env.ENABLE_COMPLETE_SYNTHESIS='true';
  const raw9Result=JSON.stringify({reviewResult:{partialText:JSON.stringify({...valid(groups[9][0].id),summary:[{text:'근거 없는 2024년',evidenceIds:[groups[9][0].id]}]}),usage:{inputTokens:1072,outputTokens:1006,reasoningTokens:null,totalTokens:2078}}});
  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").run(raw9Id,id,stamp,raw9Result);
  f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(? ,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2078,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").run(crypto.randomUUID(),id,stamp);
@@ -99,8 +100,33 @@ test('complete synthesis review lists raw:8 and raw:9 failures separately withou
  }finally{globalThis.fetch=oldFetch;}
 });
 
+test('feature-disabled year recovery only reads; explicit source-spelling review stores a separate derived record',async()=>{
+ const segmentText=id=>id===19?'22년 금리 1.5% '+ '가'.repeat(337):id===20?'23년 물가 2%대 '+ '가'.repeat(337):'가'.repeat(350);
+ const {f,groups}=await reviewedGapFixture({segmentText}),id=f.id,hash=f.plan.transcriptHash,group=groups[9],stamp=new Date(Date.now()-120000).toISOString(),url=f.path+'/groq-summary-complete';
+ assert.equal(group[0].id,19);assert.equal(group[1].id,20);
+ const original={summary:[{text:'2022년 금리 1.5%',evidenceIds:[19]},{text:'2023년 물가 2%대',evidenceIds:[20]}],chapters:[{text:'금리와 물가 언급',evidenceIds:[19,20]}],claims:[],numbers:[],critical:[],conclusion:'원문 범위의 결론'},resultJson=JSON.stringify({reviewResult:{partialText:JSON.stringify(original),usage:{inputTokens:1072,outputTokens:1006,reasoningTokens:null,totalTokens:2078}}}),operationId=id+':groq-summary:'+hash+':raw:9';
+ f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").run(operationId,id,stamp,resultJson);
+ f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(? ,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2078,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").run(crypto.randomUUID(),id,stamp);
+ f.db.prepare("UPDATE yta_operations SET state='STOPPED' WHERE id=?").run(id+':groq-summary:approval:1');
+ const review=await(await routeApi(request(url+'?stage=raw:9'),f.env)).json();assert.ok(review.derivedCandidate);assert.deepEqual(review.derivedCandidate.transformations.map(item=>[item.from,item.to]),[['2022년','22년'],['2023년','23년']]);
+ const body={step:'register-recovery',stage:'raw:9',sourceHash:hash,auditSha256:review.auditSha256,recordSha256:review.derivedCandidate.recordSha256,confirmSourceSpelling:true,confirmNoCenturyInference:true,confirmOriginalUsagePreserved:true,confirmNoProviderCall:true};
+ assert.equal((await routeApi(request(url,'POST',body),f.env)).status,409);
+ assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE provider='groq-summary-derived-recovery'").get().n,0);
+ f.env.ENABLE_COMPLETE_SYNTHESIS='true';assert.equal((await routeApi(request(url,'POST',body),f.env)).status,200);
+ const record=JSON.parse(f.db.prepare("SELECT result_json FROM yta_operations WHERE provider='groq-summary-derived-recovery'").get().result_json);
+ assert.equal(record.failedResultSha256,await digest(resultJson));assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(operationId).state,'FAILED_UNCERTAIN');
+ const after=await(await routeApi(request(url),f.env)).json();assert.equal(after.failedStages.find(item=>item.stage==='raw:9').contentProvenance,'AUDITED_DERIVED_CHECKPOINT');assert.equal(after.ready,false);
+ assert.equal(after.failedStages.find(item=>item.stage==='raw:9').failureDispositionReviewed,false);
+ const usageReview=await(await routeApi(request(url+'?stage=raw:9'),f.env)).json(),disposition=usageReview.disposition;
+ const marked=await routeApi(request(url,'POST',{step:'review-failure-usage',stage:'raw:9',sourceHash:hash,auditSha256:disposition.auditSha256,recordSha256:disposition.recordSha256,confirmSeparateFromContent:true,acknowledgeReceiptNotVerified:true,acknowledgeAccountBalanceUnknown:true,acknowledgeConservativeReservation:true,noRetry:true}),f.env);
+ assert.equal(marked.status,200,await marked.clone().text());
+ const reviewed=await(await routeApi(request(url),f.env)).json();assert.equal(reviewed.failedStages.find(item=>item.stage==='raw:9').failureDispositionReviewed,true);
+ assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(operationId).state,'FAILED_UNCERTAIN');
+});
+
 test('complete synthesis finalizes validated persisted nodes and actual app TXT export after owner meaning review',async()=>{
  const {f,groups}=await reviewedGapFixture(),id=f.id,hash=f.plan.transcriptHash,stamp=new Date(Date.now()-120000).toISOString(),url=f.path+'/groq-summary-complete';
+ f.env.ENABLE_COMPLETE_SYNTHESIS='true';
  const raw9Id=id+':groq-summary:'+hash+':raw:9',raw9Result=JSON.stringify({reviewResult:{partialText:JSON.stringify({...valid(groups[9][0].id),summary:[{text:'근거 없는 2024년',evidenceIds:[groups[9][0].id]}]}),usage:{inputTokens:1072,outputTokens:1006,reasoningTokens:60,totalTokens:2078}}});
  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").run(raw9Id,id,stamp,raw9Result);
  f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(? ,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2078,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").run(crypto.randomUUID(),id,stamp);
@@ -128,7 +154,7 @@ test('complete synthesis finalizes validated persisted nodes and actual app TXT 
  }
  const ready=await(await routeApi(request(url),f.env)).json();assert.equal(ready.finalizationReady,true);assert.equal(ready.rootSha256,await digest(progress.root));
  const denied=await routeApi(request(url,'POST',{step:'finalize',sourceHash:hash,manifestSha256:manifest.manifestSha256,confirmNoProviderCall:true}),f.env);assert.equal(denied.status,409);
- const semanticReview={confirmMeaningAgainstSource:true,manifestSha256:manifest.manifestSha256,rootSha256:ready.rootSha256,reviewedAt:new Date().toISOString()},finished=await routeApi(request(url,'POST',{step:'finalize',sourceHash:hash,manifestSha256:manifest.manifestSha256,confirmNoProviderCall:true,semanticReview}),f.env);
+ const semanticReview={confirmMeaningAgainstSource:true,confirmRootIncludesAllMeaningfulPoints:true,reviewedStages:ready.finalizationReview.reviewedStages.map(({index,evidenceSha256})=>({index,evidenceSha256})),manifestSha256:manifest.manifestSha256,rootSha256:ready.rootSha256,reviewedAt:new Date().toISOString()},finished=await routeApi(request(url,'POST',{step:'finalize',sourceHash:hash,manifestSha256:manifest.manifestSha256,confirmNoProviderCall:true,semanticReview}),f.env);
  assert.equal(finished.status,200);
  const savedReport=JSON.parse(f.db.prepare('SELECT report_json FROM jobs WHERE id=?').get(id).report_json),reopened=await(await routeApi(request(f.path),f.env)).json(),savedSource=await(await routeApi(request(f.path+'/source'),f.env)).json(),txt=await(await routeApi(request(f.path+'/export?format=txt'),f.env)).text();
  assert.deepEqual(reopened.job.report,savedReport);assert.equal(savedReport.coverageManifest.missingSegmentIds.length,0);assert.equal(savedReport.appendix.length,groups.length);

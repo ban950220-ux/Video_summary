@@ -88,3 +88,27 @@ The browser gap runner now asks the durable status endpoint after a failed
 gap read. If it can see raw:9's saved `SUMMARY_RESPONSE_INVALID`, it displays
 that stage and error. If a new read fails too, it retains the last server
 error separately from the read error and never resends automatically.
+
+## Subsequent offline safeguards
+
+Every complete-synthesis POST now requires `ENABLE_COMPLETE_SYNTHESIS=true`;
+the default is disabled. Source-spelling recovery requires a stopped,
+stage-scoped approval and keeps an existing cited four-digit year unchanged.
+Two-digit durations block automatic repair. Usage outside 4,800 input / 1,800
+output or with negative or inconsistent counts is rejected. The derived
+checkpoint is checked against the approval, failed result, response hash,
+usage evidence, transformation list and exact source text hashes.
+
+Content review and failure disposition have separate zero-unit records. The
+failure disposition does not verify a provider receipt, settle an account
+balance, or clear a failed operation. Quote-heavy excerpts are split against
+the actual nested JSON request size, preserving every character. Boundary
+uncertainty IDs are carried through notes, merge prompts, root and manifest.
+The one-note case is rejected before it can appear complete without a quote.
+
+The owner review screen exposes the root, original source, stage details and
+boundary IDs. Finalization requires one attestation per stage evidence hash
+and an explicit review of important points in the root. Structural checks
+still cannot prove semantic completeness; a heterogeneous-topic test shows
+that a generic root can pass ID checks while omitting substantive content.
+The actual video and provider have not been exercised by these tests.

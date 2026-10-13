@@ -555,6 +555,29 @@ function showBoundaryReconcileChoice(job,target,requestId){
  };
  target.append(review);
 }
+async function showCompleteSynthesisReview(job,target,requestId){
+ const current=()=>detailCurrent(job.id,requestId,target),path='/api/jobs/'+encodeURIComponent(job.id)+'/groq-summary-complete';
+ try{
+  const scope=await api(path);if(!current())return;
+  empty(target);target.append(el('h2',{text:'전체 종합 요약 · 원문 대조'}));
+  if(!scope.ready||!scope.finalizationReady||!scope.finalizationReview){target.append(el('p',{text:`원시 단계 ${scope.completedRawStages??0}/${scope.rawStages??'미확인'} · 미완료 또는 검토 필요. 완료된 병합 결과가 저장된 뒤 다시 확인하세요.`}));return;}
+  const review=scope.finalizationReview,checks=[];
+  target.append(el('p',{text:`원본 ${scope.sourceSegmentCount}구간 · ${scope.rawStages}단계 · 경계 불확실성 ${review.boundarySegmentIds.length}개. 아래 원문과 각 구간 결과를 대조한 뒤 핵심 종합에 중요한 내용이 빠지지 않았는지 확인하세요. 일반 표현은 의미가 같으면 바꿔쓸 수 있지만 수치·날짜·부정·인과관계는 원문과 맞아야 합니다.`}));
+  target.append(el('h3',{text:'핵심 종합'}),el('pre',{text:JSON.stringify(review.rootReport,null,2)}),el('h3',{text:'원문·구간별 상세 부록'}));
+  for(const stage of review.reviewedStages){
+   const details=el('details'),heading=el('summary',{text:`raw:${stage.index} · ${stage.provenance} · 원문 #${stage.sourceSegments[0]?.id}–#${stage.sourceSegments.at(-1)?.id}`}),check=el('input',{attrs:{type:'checkbox'}}),label=el('label',{text:'이 구간의 원문, 근거, 상세 결과와 핵심 종합 반영을 확인했습니다.'});label.prepend(check);
+   details.append(heading,el('pre',{text:stage.sourceSegments.map(item=>`#${item.id} ${item.startMs}–${item.endMs}ms ${item.text}`).join('\n')}),el('pre',{text:JSON.stringify(stage.rawReport??stage.reviewedExcerpt,null,2)}),label);target.append(details);checks.push(check);
+  }
+  const meaning=el('input',{attrs:{type:'checkbox'}}),meaningLabel=el('label',{text:'핵심 종합이 모든 중요한 발언·수치·반론·불확실성을 보존하는지 원문과 대조했습니다.'});meaningLabel.prepend(meaning);
+  const save=el('button',{className:'btn secondary small',text:'검토 확인 후 최종 보고서 저장'});save.disabled=!scope.featureEnabled;
+  if(!scope.featureEnabled)target.append(el('p',{className:'tip',text:'전체 종합 요약 저장 기능은 현재 비활성입니다. 읽기 전용 검토만 가능합니다.'}));
+  save.onclick=async()=>{if(!current()||!scope.featureEnabled||!meaning.checked||checks.some(check=>!check.checked)){toast('전체 구간과 핵심 종합을 먼저 대조해 주세요.');return;}save.disabled=true;
+   try{const semanticReview={confirmMeaningAgainstSource:true,confirmRootIncludesAllMeaningfulPoints:true,reviewedStages:review.reviewedStages.map(({index,evidenceSha256})=>({index,evidenceSha256})),manifestSha256:scope.manifestSha256,rootSha256:scope.rootSha256,reviewedAt:new Date().toISOString()};const saved=await api(path,{method:'POST',body:{step:'finalize',sourceHash:scope.sourceHash,manifestSha256:scope.manifestSha256,confirmNoProviderCall:true,semanticReview}});if(current()){empty(target);showReport(saved.job,target,true);}}
+   catch(error){if(current()){toast(safeError(error));save.disabled=false;}}
+  };
+  target.append(meaningLabel,save);
+ }catch(error){if(current()){empty(target);target.append(el('p',{text:'전체 종합 검토 자료를 읽을 수 없습니다: '+safeError(error)}));}}
+}
 function libraryCard(job){
   const card=el('article',{className:'library-item'}),top=el('div',{className:'library-top'}),info=el('div');
   info.append(el('div',{className:'library-title',text:job.title || job.video_id || '제목 없음'}),el('div',{className:'library-meta',text:`${fmtDate(job.created_at)} · ${Math.round(job.duration_seconds/60)}분 · ${job.source_type}`}));
@@ -596,6 +619,11 @@ function libraryCard(job){
       finally{b.disabled=false;}
     };
     actions.append(b);
+  }
+  if(job.source_type==='audio'&&!job.report){
+   const complete=el('button',{className:'btn secondary small',text:'전체 종합 원문·상세 검토'});
+   complete.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);target.append(el('p',{text:'전체 종합 검토 자료 확인 중…'}));showCompleteSynthesisReview(job,target,detailRequest);};
+   actions.append(complete);
   }
   if(job.source_type==='audio'&&!job.report){const free=el('button',{className:'btn secondary small',text:'Groq Free 요약 승인·실행'});free.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqSummaryChoice(job,target,detailRequest);};actions.append(free);const pilot=el('button',{className:'btn secondary small',text:'실패한 첫 요약 1회 복구 검토'});pilot.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqPilotChoice(job,target,detailRequest);};actions.append(pilot);const correction=el('button',{className:'btn secondary small',text:'raw:8 무료 1회 교정 검토'});correction.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCorrectionChoice(job,target,detailRequest);};actions.append(correction);const gap=el('button',{className:'btn secondary small',text:'raw:8 보류 · 독립 구간 무료 진행 검토'});gap.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqGapChoice(job,target,detailRequest);};actions.append(gap);const recovered=el('button',{className:'btn secondary small',text:'Groq Free 첫 구간 저장 보고서 무호출 복구 검토'});recovered.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCheckpointRecoveryChoice(job,target,detailRequest);};actions.append(recovered);const bundle=el('button',{className:'btn secondary small',text:'구간별 요약 묶음 보기'});bundle.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqBundleChoice(job,target,detailRequest);};actions.append(bundle);const choice=el('button',{className:'btn secondary small',text:'전체 요약 선택·유료 견적'});choice.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showSummaryChoice(job,target,detailRequest);};actions.append(choice);}actions.append(open,remove);card.append(actions);return card;
 }
