@@ -108,20 +108,23 @@ async function summaryStatus(env,job,sourceOf){
  const approval=await readApproval(env,job.id),anyRecovery=await env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery' LIMIT 1").bind(job.id).first(),correctionAttempt=await env.DB.prepare("SELECT state,error_code,created_at FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary'").bind(correctionAttemptId(job.id,approval?.transcriptHash??''),job.id).first(),anyCorrection=correctionAttempt?.state==='DONE';
  const current=anyRecovery||anyCorrection||approval?.outputKind===GAP_OUTPUT_KIND?await completeSource(env,job,sourceOf):null;
  const exists=anyRecovery?await env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(recoveryId(job.id,current.transcriptHash),job.id).first():null;
- if(anyRecovery&&!exists)stop('SUMMARY_RECOVERY_SCOPE_CHANGED','복구된 첫 단계의 원본 범위가 변경됐습니다.');
  const recovery=exists?await checkpointRecoveryContext(env,{id:job.id,job,source:current.source,transcriptHash:current.transcriptHash,legacyTranscriptHash:current.legacyTranscriptHash}):null;
- const hash=recovery?.recovered?current.transcriptHash:approval?.transcriptHash;
+ const hash=anyRecovery?current.transcriptHash:approval?.transcriptHash;
  if(approval?.outputKind===GAP_OUTPUT_KIND&&current.transcriptHash!==hash)stop('SUMMARY_GAP_APPROVAL_CHANGED','보류 범위의 원본 전사가 변경됐습니다.');
  const prefix=typeof hash==='string'&&/^[a-f0-9]{64}$/.test(hash)?job.id+':groq-summary:'+hash+':':null;
  const rows=prefix?(await env.DB.prepare("SELECT id,state,error_code,created_at FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(job.id,prefix,prefix).all()).results||[]:[];
  if(recovery?.recovered){const row=rows.find(item=>item.id===recovery.failedId);if(!row||row.state!=='FAILED_UNCERTAIN')stop('SUMMARY_RECOVERY_SCOPE_CHANGED','복구된 첫 단계의 실패 기록이 변경됐습니다.');row.state='DONE';row.created_at=recovery.recoveredAt;}
+ const persistedRecoveries=anyRecovery?await recoveredRawStages(env,{id:job.id,job,source:current.source,transcriptHash:current.transcriptHash,legacyTranscriptHash:current.legacyTranscriptHash}):new Map();
+ if(anyRecovery&&!recovery?.recovered&&!persistedRecoveries.size)stop('SUMMARY_RECOVERY_SCOPE_CHANGED','복구된 단계의 원본 범위가 변경됐습니다.');
+ const persistedFailureIds=projectRecoveredRows(rows,persistedRecoveries,job.id,hash);
  const correction=anyCorrection?await correctedStage(env,{id:job.id,job,source:current.source,transcriptHash:current.transcriptHash}):null;
  if(correction){const index=rows.findIndex(row=>row.id===correction.failedId);if(index<0)stop('SUMMARY_CORRECTION_SCOPE_CHANGED','교정 대상 단계가 없습니다.');rows[index]={id:correction.failedId,state:'DONE',created_at:correction.row.created_at};}
  const done=rows.filter(row=>row.state==='DONE').sort((a,b)=>a.created_at.localeCompare(b.created_at));
  const active=rows.find(row=>row.state==='CLAIMED')||rows.find(row=>row.state==='FAILED_UNCERTAIN')||rows.find(row=>row.state==='BLOCKED');
  const continuedActive=approval?.outputKind===GAP_OUTPUT_KIND?rows.find(row=>row.id!==stageId(job.id,hash,'raw:8')&&row.state==='CLAIMED')||rows.find(row=>row.id!==stageId(job.id,hash,'raw:8')&&row.state==='FAILED_UNCERTAIN')||rows.find(row=>row.id!==stageId(job.id,hash,'raw:8')&&row.state==='BLOCKED'):null;
  const correctionActive=correctionAttempt&&correctionAttempt.state!=='DONE'?{key:'raw:8:correction',state:correctionAttempt.state,recordedAt:correctionAttempt.created_at,errorCode:correctionAttempt.error_code??null}:null;
- const recent=await env.DB.prepare("SELECT state,created_at FROM yta_operations WHERE provider='groq-summary' AND id LIKE ? AND id NOT IN (?,?,?) AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') ORDER BY created_at DESC LIMIT 1").bind('%:groq-summary:%',recovery?.failedId??'NO_RECOVERY_CURRENT',recovery?.legacyFailedId??'NO_RECOVERY_LEGACY',correction?.failedId??'NO_CORRECTION').first();
+ const recentExcluded=[recovery?.failedId??'NO_RECOVERY_CURRENT',recovery?.legacyFailedId??'NO_RECOVERY_LEGACY',correction?.failedId??'NO_CORRECTION',...persistedFailureIds];
+ const recent=await env.DB.prepare(`SELECT state,created_at FROM yta_operations WHERE provider='groq-summary' AND id LIKE ? AND id NOT IN (${recentExcluded.map(()=>'?').join(',')}) AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') ORDER BY created_at DESC LIMIT 1`).bind('%:groq-summary:%',...recentExcluded).first();
  const nextEligibleAt=recent?.state==='DONE'&&Number.isFinite(Date.parse(recent.created_at))?Date.parse(recent.created_at)+SPACING_MS:null;
  const stage=row=>row?{key:row.id.slice(prefix.length),state:row.state,errorCode:row.error_code??null,recordedAt:row.created_at}:null;
  const gapGroups=approval?.outputKind===GAP_OUTPUT_KIND?partitionGroqTranscript(current.source.segments,promptAudit(job)):null;
@@ -477,28 +480,30 @@ async function handlePilot(request,env,{id,job,source,transcriptHash,legacyTrans
   throw error;
  }
 }
-const recoveryId=(id,hash)=>id+':groq-summary-recovery:'+hash+':raw:0';
-async function checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash}){
- const audit=promptAudit(job),groups=partitionGroqTranscript(source.segments,audit),first=groups[0],failedId=stageId(id,transcriptHash,'raw:0');
+const recoveryId=(id,hash,index=0)=>id+':groq-summary-recovery:'+hash+':raw:'+index;
+async function checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash},index=0){
+ const audit=promptAudit(job),groups=partitionGroqTranscript(source.segments,audit),first=groups[index],failedId=stageId(id,transcriptHash,'raw:'+index);
+ if(!Number.isSafeInteger(index)||index<0||!first)stop('SUMMARY_RECOVERY_NOT_FOUND','검토할 원시 구간이 없습니다.');
  const failed=await env.DB.prepare("SELECT state,error_code,result_json,units,created_at FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary'").bind(failedId,id).first();
- if(failed?.state!=='FAILED_UNCERTAIN'||failed.error_code!=='SUMMARY_CHECKPOINT_TOO_LARGE'||failed.units!==pilotUnits)stop('SUMMARY_RECOVERY_NOT_FOUND','검토할 첫 구간의 크기 실패 기록이 없습니다.');
+ if(failed?.state!=='FAILED_UNCERTAIN'||!['SUMMARY_CHECKPOINT_TOO_LARGE','SUMMARY_RESULT_PERSISTENCE_UNCERTAIN'].includes(failed.error_code)||index>0&&failed.error_code!=='SUMMARY_RESULT_PERSISTENCE_UNCERTAIN'||!safeInt(failed.units)||failed.units>pilotUnits||failed.error_code==='SUMMARY_CHECKPOINT_TOO_LARGE'&&failed.units!==pilotUnits)stop('SUMMARY_RECOVERY_NOT_FOUND','검토할 첫 구간의 크기 실패 기록이 없습니다.');
  let saved;try{saved=JSON.parse(failed.result_json);}catch{}
  const raw=saved?.reviewResult?.partialText,usage=saved?.reviewResult?.usage;
- if(typeof raw!=='string'||raw.length>=12000||!safeInt(usage?.inputTokens)||!safeInt(usage?.outputTokens)||!safeInt(usage?.reasoningTokens)||!safeInt(usage?.totalTokens)||usage.totalTokens!==usage.inputTokens+usage.outputTokens||usage.reasoningTokens>usage.outputTokens)stop('SUMMARY_RECOVERY_EVIDENCE_INVALID','보존된 응답과 사용량을 확인할 수 없습니다.');
+ if(failed.error_code==='SUMMARY_RESULT_PERSISTENCE_UNCERTAIN'&&(saved?.reviewResult?.responseComplete!==true||saved?.usageRecorded!==true||typeof saved?.usageEventId!=='string'))stop('SUMMARY_RECOVERY_EVIDENCE_INVALID','완결 응답과 사용량 기록을 확인할 수 없습니다.');
+ if(typeof raw!=='string'||raw.length>=12000||!safeInt(usage?.inputTokens)||!safeInt(usage?.outputTokens)||!(usage?.reasoningTokens===null||safeInt(usage?.reasoningTokens))||!safeInt(usage?.totalTokens)||usage.totalTokens<usage.inputTokens+usage.outputTokens||(usage.reasoningTokens!==null&&usage.reasoningTokens>usage.outputTokens))stop('SUMMARY_RECOVERY_EVIDENCE_INVALID','보존된 응답과 사용량을 확인할 수 없습니다.');
  const report=checkedReport(raw,first,[{ids:first.map(part=>part.id)}],{strictPayload:true});
- const usageRow=await env.DB.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY' AND used_units=?").bind(id,usage.totalTokens).first();
- if(usageRow?.count!==1)stop('SUMMARY_RECOVERY_EVIDENCE_INVALID','실제 사용량 기록을 확인할 수 없습니다.');
+ const usageRow=failed.error_code==='SUMMARY_RESULT_PERSISTENCE_UNCERTAIN'?await env.DB.prepare("SELECT id,unit,provenance,used_units FROM usage_events WHERE id=? AND job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY'").bind(saved.usageEventId,id).first():await env.DB.prepare("SELECT id,unit,provenance,used_units FROM usage_events WHERE job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY' AND used_units=? LIMIT 1").bind(id,usage.totalTokens).first();
+ if(!usageRow||usageRow.unit!=='actual_total_tokens'||usageRow.used_units!==usage.totalTokens||!['PROVIDER_REPORTED_ACCOUNT_REMAINING_UNKNOWN','PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN'].includes(usageRow.provenance))stop('SUMMARY_RECOVERY_EVIDENCE_INVALID','실제 사용량 기록을 확인할 수 없습니다.');
  const oldId=stageId(id,legacyTranscriptHash,'raw:0'),pilotReviewId=pilotId(id,'review',legacyTranscriptHash),pilotApprovalId=pilotId(id,'approval',legacyTranscriptHash);
  const pilotRows=await env.DB.prepare("SELECT id,state,result_json FROM yta_operations WHERE id IN (?,?) AND job_id=?").bind(pilotReviewId,pilotApprovalId,id).all();
  const pilotReview=pilotRows.results?.find(item=>item.id===pilotReviewId),pilotApproval=pilotRows.results?.find(item=>item.id===pilotApprovalId);
  let legacyEvidence=null;
- if(pilotReview||pilotApproval){
+ if(index===0&&(pilotReview||pilotApproval)){
   const old=await env.DB.prepare("SELECT state,error_code,result_json FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary'").bind(oldId,id).first();
   if(pilotReview?.state!=='REVIEWED'||pilotApproval?.state!=='APPROVED'||old?.state!=='FAILED_UNCERTAIN'||old.error_code!=='SUMMARY_RESPONSE_INVALID')stop('SUMMARY_RECOVERY_EVIDENCE_INVALID','이전 실패와 1회 검토 기록이 일치하지 않습니다.');
   legacyEvidence={failedOperationId:oldId,failedResultSha256:await sha(old.result_json),pilotReviewSha256:await sha(pilotReview.result_json),pilotApprovalSha256:await sha(pilotApproval.result_json)};
  }
- const evidence={jobId:id,owner:'owner',contractVersion:GROQ_SUMMARY_CONTRACT_VERSION,contractHash:transcriptHash,sourceSha256:await sha(JSON.stringify([source.raw,source.segments_json])),auditSha256:await sha(JSON.stringify(summaryInputAudit(job.audit))),failedOperationId:failedId,failedResultSha256:await sha(failed.result_json),responseSha256:await sha(raw),failedAt:failed.created_at,failedReservedUnits:failed.units,confirmedUsage:usage,legacyEvidence,firstRange:{firstId:first[0].id,lastId:first.at(-1).id,startMs:first[0].startMs,endMs:first.at(-1).endMs},summaryCount:report.summary.length,chapterCount:report.chapters.length,storedUtf16Length:raw.length,compositionMode:'LOSSLESS_RAW_CHECKPOINTS'};
- const evidenceHash=await sha(JSON.stringify(evidence)),idForRecovery=recoveryId(id,transcriptHash),record={evidenceHash,failedOperationId:failedId,failedResultSha256:evidence.failedResultSha256,responseSha256:evidence.responseSha256,sourceSha256:evidence.sourceSha256,auditSha256:evidence.auditSha256,contractHash:transcriptHash,report};
+ const evidence={...(index?{stage:'raw:'+index}:{}),jobId:id,owner:'owner',contractVersion:GROQ_SUMMARY_CONTRACT_VERSION,contractHash:transcriptHash,sourceSha256:await sha(JSON.stringify([source.raw,source.segments_json])),auditSha256:await sha(JSON.stringify(summaryInputAudit(job.audit))),failedOperationId:failedId,failedResultSha256:await sha(failed.result_json),responseSha256:await sha(raw),failedAt:failed.created_at,failedReservedUnits:failed.units,confirmedUsage:usage,usageEventId:usageRow.id,usageProvenance:usageRow.provenance,legacyEvidence,firstRange:{firstId:first[0].id,lastId:first.at(-1).id,startMs:first[0].startMs,endMs:first.at(-1).endMs},summaryCount:report.summary.length,chapterCount:report.chapters.length,storedUtf16Length:raw.length,compositionMode:'LOSSLESS_RAW_CHECKPOINTS'};
+ const evidenceHash=await sha(JSON.stringify(evidence)),idForRecovery=recoveryId(id,transcriptHash,index),record={...(index?{stage:'raw:'+index}:{}),evidenceHash,failedOperationId:failedId,failedResultSha256:evidence.failedResultSha256,responseSha256:evidence.responseSha256,sourceSha256:evidence.sourceSha256,auditSha256:evidence.auditSha256,contractHash:transcriptHash,report};
  const row=await env.DB.prepare("SELECT state,result_json,created_at FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(idForRecovery,id).first();
  if(row&&!(row.state==='DONE'&&row.result_json===JSON.stringify(record)))stop('SUMMARY_RECOVERY_SCOPE_CHANGED','기존 복구 기록과 현재 근거가 다릅니다.');
  return {evidence,evidenceHash,record,recovered:Boolean(row),recoveredAt:row?.created_at??null,idForRecovery,failedId,failedResultJson:failed.result_json,legacyFailedId:legacyEvidence?oldId:null};
@@ -509,15 +514,26 @@ export async function validatedRecoveredFirstCheckpoint(env,{id,job,source,trans
  return (await checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash})).recovered;
 }
 async function handleCheckpointRecovery(request,env,context){
- const {id,job,source,transcriptHash}=context,review=await checkpointRecoveryContext(env,context);
+ const {id,job,source,transcriptHash}=context,requested=new URL(request.url).searchParams.get('stage'),index=requested?Number(requested.slice(4)):0;
+ if(requested&&!/^raw:(0|[1-9][0-9]*)$/.test(requested))stop('SUMMARY_RECOVERY_NOT_FOUND','복구할 원시 단계 번호를 확인하세요.');
+ const review=await checkpointRecoveryContext(env,context,index);
  if(request.method==='GET')return json({...review.evidence,evidenceHash:review.evidenceHash,recovered:review.recovered,recoveryRecordExists:review.recovered,automaticContinuation:false,providerCalls:0});
  if(request.method!=='POST')return json({error:{code:'METHOD_NOT_ALLOWED'}},405);
  let body;try{body=await request.json();}catch{throw new InputError('체크포인트 복구 요청 JSON 오류');}
  if(body?.step!=='recover'||body.evidenceHash!==review.evidenceHash||body.failedOperationId!==review.failedId||body.contractHash!==transcriptHash||body.responseSha256!==review.evidence.responseSha256||body.acknowledgeOriginalUsage!==review.evidence.confirmedUsage.totalTokens||body.confirmNoProviderCall!==true||body.confirmNoAutomaticContinuation!==true)throw new InputError('보존된 응답·사용량·무호출 범위를 명시적으로 확인하세요.');
  if(review.recovered)stop('SUMMARY_RECOVERY_ALREADY_RECORDED','첫 구간 체크포인트가 이미 복구됐습니다.');
- const inserted=await env.DB.prepare("INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT ?,?,'groq-summary-recovery',0,'DONE',?,? WHERE EXISTS(SELECT 1 FROM jobs WHERE id=? AND owner_id='owner' AND audit_json=? AND (report_json IS NULL OR report_json='null')) AND EXISTS(SELECT 1 FROM yta_sources WHERE job_id=? AND raw=? AND segments_json=?) AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary' AND state='FAILED_UNCERTAIN' AND error_code='SUMMARY_CHECKPOINT_TOO_LARGE' AND result_json=?) AND EXISTS(SELECT 1 FROM usage_events WHERE job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY' AND used_units=?) AND NOT EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(review.idForRecovery,id,nowIso(),JSON.stringify(review.record),id,JSON.stringify(job.audit),id,source.raw,source.segments_json,review.failedId,id,review.failedResultJson,id,review.evidence.confirmedUsage.totalTokens,id+':deleting').run();
+ const inserted=await env.DB.prepare("INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT ?,?,'groq-summary-recovery',0,'DONE',?,? WHERE EXISTS(SELECT 1 FROM jobs WHERE id=? AND owner_id='owner' AND audit_json=? AND (report_json IS NULL OR report_json='null')) AND EXISTS(SELECT 1 FROM yta_sources WHERE job_id=? AND raw=? AND segments_json=?) AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary' AND state='FAILED_UNCERTAIN' AND error_code IN ('SUMMARY_CHECKPOINT_TOO_LARGE','SUMMARY_RESULT_PERSISTENCE_UNCERTAIN') AND result_json=?) AND EXISTS(SELECT 1 FROM usage_events WHERE id=? AND job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY' AND unit='actual_total_tokens' AND provenance=? AND used_units=?) AND NOT EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(review.idForRecovery,id,nowIso(),JSON.stringify(review.record),id,JSON.stringify(job.audit),id,source.raw,source.segments_json,review.failedId,id,review.failedResultJson,review.evidence.usageEventId,id,review.evidence.usageProvenance,review.evidence.confirmedUsage.totalTokens,id+':deleting').run();
  if(inserted.meta?.changes!==1)stop('SUMMARY_RECOVERY_SCOPE_CHANGED','원본·사용량·실패 기록이 바뀌었거나 이미 복구됐습니다.');
- return json({recovered:true,checkpoint:'raw:0',automaticContinuation:false,providerCalls:0,evidenceHash:review.evidenceHash});
+ return json({recovered:true,checkpoint:'raw:'+index,automaticContinuation:false,providerCalls:0,evidenceHash:review.evidenceHash});
+}
+async function recoveredRawStages(env,context){
+ const {id,transcriptHash}=context,prefix=id+':groq-summary-recovery:'+transcriptHash+':raw:',rows=(await env.DB.prepare("SELECT id,state,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery' AND substr(id,1,length(?))=?").bind(id,prefix,prefix).all()).results||[],recovered=new Map();
+ for(const row of rows){const suffix=row.id.slice(prefix.length);if(!/^(0|[1-9][0-9]*)$/.test(suffix))stop('SUMMARY_RECOVERY_SCOPE_CHANGED','복구된 원시 단계 번호를 확인하세요.');const index=Number(suffix);if(index===0)continue;const evidence=await checkpointRecoveryContext(env,context,index);if(row.state!=='DONE'||!evidence.recovered||row.result_json!==JSON.stringify(evidence.record))stop('SUMMARY_RECOVERY_SCOPE_CHANGED','복구 기록과 원본 실패가 다릅니다.');recovered.set(index,evidence);}
+ return recovered;
+}
+function projectRecoveredRows(rows,recovered,id,hash){
+ for(const [index,evidence] of recovered){const position=rows.findIndex(row=>row.id===evidence.failedId);if(position<0||rows[position].state!=='FAILED_UNCERTAIN')stop('SUMMARY_RECOVERY_SCOPE_CHANGED','복구된 원본 실패 상태가 변경됐습니다.');rows[position]={...rows[position],state:'DONE',result_json:JSON.stringify({hash,key:'raw:'+index,report:evidence.record.report,recoveredWithoutProviderCall:true,recoveryRecordSha256:evidence.evidenceHash})};}
+ return [...recovered.values()].map(item=>item.failedId);
 }
 function assembledCheckpointReport({rows,id,hash,groups,source,audit}){
  const saved=(key,allowed,coverage)=>{const row=rows.find(item=>item.id===stageId(id,hash,key));if(!row)return null;let item;try{item=JSON.parse(row.result_json);}catch{stop('SUMMARY_OPERATION_REVIEW_REQUIRED','저장된 요약 단계를 검토하세요.');}if(item?.hash!==hash||item.key!==key||!item.report)stop('SUMMARY_OPERATION_REVIEW_REQUIRED','저장된 요약 단계 범위를 검토하세요.');return checkedReport(JSON.stringify(item.report),allowed,coverage);};
@@ -603,6 +619,7 @@ async function reviewedGapContext(env,{id,job,source,transcriptHash,legacyTransc
  const prefix=id+':groq-summary:'+transcriptHash+':';
  const rows=(await env.DB.prepare("SELECT id,state,error_code,result_json,units FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(id,prefix,prefix).all()).results||[];
  if(recovery?.recovered){const index=rows.findIndex(row=>row.id===recovery.failedId);if(index<0||rows[index].state!=='FAILED_UNCERTAIN')stop('SUMMARY_GAP_NOT_ELIGIBLE','첫 구간 복구 범위가 다릅니다.');rows[index]={id:recovery.failedId,state:'DONE',result_json:JSON.stringify({hash:transcriptHash,key:'raw:0',report:recovery.record.report,recoveredWithoutProviderCall:true})};}
+ const persistedRecoveries=await recoveredRawStages(env,{id,job,source,transcriptHash,legacyTranscriptHash}),persistedFailureIds=projectRecoveredRows(rows,persistedRecoveries,id,transcriptHash);
  if(rows.some(row=>!/^raw:(0|[1-9][0-9]*)$/.test(row.id.slice(prefix.length))||Number(row.id.slice(prefix.length+4))>=groups.length))stop('SUMMARY_GAP_NOT_ELIGIBLE','알 수 없는 요약 단계가 있습니다.');
  const parts=[];let firstPending=null;
  for(let i=0;i<groups.length;i++){
@@ -615,8 +632,8 @@ async function reviewedGapContext(env,{id,job,source,transcriptHash,legacyTransc
   const checked=checkedReport(JSON.stringify(saved.report),group,[{ids:group.map(part=>part.id)}]);
   parts.push({ids:group.map(part=>part.id),startMs:group[0].startMs,endMs:group.at(-1).endMs,report:checked,index:i,resultJson:row.result_json});
  }
- const excluded=[prior.failedId,attemptId,recovery?.failedId??'NO_RECOVERY_CURRENT',recovery?.legacyFailedId??'NO_RECOVERY_LEGACY'];
- const other=await env.DB.prepare("SELECT id FROM yta_operations WHERE provider='groq-summary' AND state IN ('CLAIMED','FAILED_UNCERTAIN') AND id NOT IN (?,?,?,?,?) LIMIT 1").bind(...excluded,inFlightOperationId??'NO_IN_FLIGHT_GAP').first();
+ const excluded=[prior.failedId,attemptId,recovery?.failedId??'NO_RECOVERY_CURRENT',recovery?.legacyFailedId??'NO_RECOVERY_LEGACY',...persistedFailureIds];
+ const other=await env.DB.prepare(`SELECT id FROM yta_operations WHERE provider='groq-summary' AND state IN ('CLAIMED','FAILED_UNCERTAIN') AND id NOT IN (${[...excluded,inFlightOperationId??'NO_IN_FLIGHT_GAP'].map(()=>'?').join(',')}) LIMIT 1`).bind(...excluded,inFlightOperationId??'NO_IN_FLIGHT_GAP').first();
  if(other)stop('SUMMARY_OPERATION_REVIEW_REQUIRED','다른 전송 불명확 또는 진행 중인 요청을 먼저 검토하세요.');
  const gap={stage:'raw:8',firstId:held[0].id,lastId:held.at(-1).id,startMs:held[0].startMs,endMs:held.at(-1).endMs,originalState:'FAILED_UNCERTAIN',correctionState:'FAILED_UNCERTAIN',failureCode:'SUMMARY_RESPONSE_INVALID',originalSha256:await sha(prior.failedResultJson),correctionSha256:await sha(attempt.result_json)};
  return {audit,groups,parts,firstPending,held,gap,excluded,sourceAuditSha256:await sha(JSON.stringify(job.audit)),originalResultJson:prior.failedResultJson,correctionResultJson:attempt.result_json,completedRawStages:parts.length,contiguousRawStages:8,pendingRawStages:groups.length-parts.length-1};
@@ -640,8 +657,9 @@ async function stage(env,{id,hash,scope,key,prompt,allowed,groups,sourceOf,owned
  if(inputBound>GROQ_SUMMARY_INPUT_BOUND||units>=8_000)stop('SUMMARY_STAGE_TOO_LONG','요약 요청의 보수적 입력 상한을 넘습니다.');
  const now=Date.now(),cutoff=new Date(now-60_000).toISOString(),day=new Date(now-86_400_000).toISOString(),spacing=new Date(now-SPACING_MS).toISOString();
  await validateSummaryLedger(env);
- const excluded=Array.from({length:4},(_,i)=>resolvedFailures[i]??'NO_RESOLVED_FAILURE_'+i);
- const recent=await env.DB.prepare("SELECT state,error_code,created_at FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND id NOT IN (?,?,?,?) AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') ORDER BY created_at DESC LIMIT 1").bind('%:groq-summary%',...excluded).first();
+ const excluded=resolvedFailures.length?resolvedFailures:['NO_RESOLVED_FAILURE'];
+ const excludedSql=excluded.map(()=>'?').join(',');
+ const recent=await env.DB.prepare(`SELECT state,error_code,created_at FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND id NOT IN (${excludedSql}) AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') ORDER BY created_at DESC LIMIT 1`).bind('%:groq-summary%',...excluded).first();
  if(recent?.state==='CLAIMED')stop('SUMMARY_OPERATION_IN_FLIGHT','Groq 요약 호출이 진행 중입니다.');
  if(recent?.state==='FAILED_UNCERTAIN')stop('SUMMARY_OPERATION_REVIEW_REQUIRED','불명확한 요약 호출을 먼저 검토하세요.');
  if(recent&&recent.created_at>spacing)stop('SUMMARY_PACING_WAIT','요약 요청 간격을 기다리세요.');
@@ -649,28 +667,31 @@ async function stage(env,{id,hash,scope,key,prompt,allowed,groups,sourceOf,owned
  const daily=await env.DB.prepare("SELECT COALESCE(SUM(units),0) AS units FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>?").bind('%:groq-summary%',day).first();
  if(!safeInt(used?.units)||!safeInt(daily?.units))stop('SUMMARY_LEDGER_REVIEW_REQUIRED','Groq 요약 사용 이력을 검토하세요.');
  if(used.units+units>MINUTE_CAP||daily.units+units>DAY_CAP)stop('SUMMARY_LOCAL_LIMIT','앱 사용 상한에 도달했습니다. 계정 실제 잔여량은 UNKNOWN입니다.');
- const claimed=await env.DB.prepare("INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,'groq-summary',?,'CLAIMED',? WHERE EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND state='APPROVED') AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND (typeof(units) NOT IN ('integer','real') OR units<0 OR units>195000 OR units!=CAST(units AS INTEGER) OR typeof(created_at)!='text' OR strftime('%s',created_at) IS NULL)) AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state='CLAIMED') AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state='FAILED_UNCERTAIN' AND id NOT IN (?,?,?,?)) AND COALESCE((SELECT SUM(units) FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>?),0)+?<=? AND COALESCE((SELECT SUM(units) FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>?),0)+?<=? AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state='DONE' AND created_at>?) AND (?=0 OR (EXISTS(SELECT 1 FROM yta_operations f WHERE f.id=? AND f.job_id=? AND f.state='FAILED_UNCERTAIN' AND f.error_code='SUMMARY_RESPONSE_INVALID' AND f.result_json=?) AND EXISTS(SELECT 1 FROM yta_operations f WHERE f.id=? AND f.job_id=? AND f.state='FAILED_UNCERTAIN' AND f.error_code='SUMMARY_RESPONSE_INVALID' AND f.result_json=?)))").bind(operationId,id,units,nowIso(),approvalId(id,scope.sequence),'%:groq-summary%','%:groq-summary%','%:groq-summary%',...excluded,'%:groq-summary%',cutoff,units,MINUTE_CAP,'%:groq-summary%',day,units,DAY_CAP,'%:groq-summary%',spacing,gapEvidence?1:0,gapEvidence?.excluded[0]??'',id,gapEvidence?.originalResultJson??'',gapEvidence?.excluded[1]??'',id,gapEvidence?.correctionResultJson??'').run();
+ const claimed=await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,'groq-summary',?,'CLAIMED',? WHERE EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND state='APPROVED') AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND (typeof(units) NOT IN ('integer','real') OR units<0 OR units>195000 OR units!=CAST(units AS INTEGER) OR typeof(created_at)!='text' OR strftime('%s',created_at) IS NULL)) AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state='CLAIMED') AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state='FAILED_UNCERTAIN' AND id NOT IN (${excludedSql})) AND COALESCE((SELECT SUM(units) FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>?),0)+?<=? AND COALESCE((SELECT SUM(units) FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state IN ('CLAIMED','DONE','FAILED_UNCERTAIN') AND created_at>?),0)+?<=? AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND id LIKE ? AND state='DONE' AND created_at>?) AND (?=0 OR (EXISTS(SELECT 1 FROM yta_operations f WHERE f.id=? AND f.job_id=? AND f.state='FAILED_UNCERTAIN' AND f.error_code='SUMMARY_RESPONSE_INVALID' AND f.result_json=?) AND EXISTS(SELECT 1 FROM yta_operations f WHERE f.id=? AND f.job_id=? AND f.state='FAILED_UNCERTAIN' AND f.error_code='SUMMARY_RESPONSE_INVALID' AND f.result_json=?)))`).bind(operationId,id,units,nowIso(),approvalId(id,scope.sequence),'%:groq-summary%','%:groq-summary%','%:groq-summary%',...excluded,'%:groq-summary%',cutoff,units,MINUTE_CAP,'%:groq-summary%',day,units,DAY_CAP,'%:groq-summary%',spacing,gapEvidence?1:0,gapEvidence?.excluded[0]??'',id,gapEvidence?.originalResultJson??'',gapEvidence?.excluded[1]??'',id,gapEvidence?.correctionResultJson??'').run();
  if(claimed.meta?.changes!==1)stop('SUMMARY_LOCAL_LIMIT','동시 요청·사용 상한 또는 간격을 확인하세요.');
  const check=()=>guard(env,{id,hash,scope,operationId,sourceOf,ownedJob,gapEvidence});
- let result,usageRecorded=false;
+ let result,usageRecorded=false,usageEventId=null,validatedReport=false;
  try{
   await check();
   result=await runOwnedGroqSummary({env:{...env,GROQ_FREE_PLAN_CONFIRMED:'true'},messages,maxCompletionTokens:GROQ_SUMMARY_COMPLETION_CAP,beforeDispatch:check,beforeFetch:check});
   if(result.inputTokens>inputBound||result.totalTokens>units)stop('SUMMARY_USAGE_OVER_BOUND','제공자 사용량이 승인 상한을 넘었습니다.');
   let report;try{report=checkedReport(result.text,allowed,groups,{strictPayload:true});}catch(error){error.reviewResult={partialText:result.text.slice(0,12000),usage:result.usage};error.safeRateLimit=result.safeRateLimit;throw error;}
+  validatedReport=true;
   // Preserve a valid checkpoint even when a subsequent merge cannot fit.
   // The raw reports remain available for lossless local composition.
   const current=await completeSource(env,await ownedJob(env,id),sourceOf);
   if(current.transcriptHash!==hash)stop('TRANSCRIPT_CHANGED_DURING_SUMMARY','요약 중 저장된 원본 전사가 변경됐습니다.');
-  await env.DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',result.totalTokens,0,null,'PROVIDER_REPORTED_ACCOUNT_REMAINING_UNKNOWN',nowIso()).run();
+  await env.DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(usageEventId=crypto.randomUUID(),id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',result.totalTokens,0,null,'PROVIDER_REPORTED_ACCOUNT_REMAINING_UNKNOWN',nowIso()).run();
   usageRecorded=true;
   const stored=await env.DB.prepare("UPDATE yta_operations SET state=?,result_json=CASE WHEN EXISTS (SELECT 1 FROM jobs WHERE id=? AND owner_id='owner') AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING') THEN ? ELSE NULL END,created_at=? WHERE id=? AND state=?").bind('DONE',id,id+':deleting',JSON.stringify({hash,key,report,usage:result.usage,safeRateLimit:result.safeRateLimit}),nowIso(),operationId,'CLAIMED').run();
   if(stored.meta?.changes!==1)stop('SUMMARY_RESULT_RACE','요약 단계 저장 상태가 바뀌었습니다.');
   return {report,newCall:true};
  }catch(error){
   const observedUsage=result?.usage??error.reviewResult?.usage;
-  if(!usageRecorded&&safeInt(observedUsage?.totalTokens)){await env.DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',observedUsage.totalTokens,0,null,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',nowIso()).run();}
-  await env.DB.prepare("UPDATE yta_operations SET state=?,error_code=?,result_json=CASE WHEN EXISTS (SELECT 1 FROM jobs WHERE id=? AND owner_id='owner') AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING') THEN ? ELSE NULL END,created_at=? WHERE id=? AND state='CLAIMED'").bind(error.preDispatchBlocked?'BLOCKED':'FAILED_UNCERTAIN',error.preDispatchBlocked?'PRE_DISPATCH_BLOCKED':String(error.code||'SUMMARY_OUTCOME_UNKNOWN'),id,id+':deleting',error.reviewResult||error.safeRateLimit?JSON.stringify({reviewResult:error.reviewResult??null,safeRateLimit:error.safeRateLimit??null}):null,nowIso(),operationId).run();
+  if(!usageRecorded&&safeInt(observedUsage?.totalTokens)){try{const eventId=crypto.randomUUID();await env.DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(eventId,id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',observedUsage.totalTokens,0,null,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',nowIso()).run();usageRecorded=true;usageEventId=eventId;}catch{usageEventId=null;}}
+  const evidence=result?{partialText:result.text,usage:result.usage,model:result.model,finishReason:'stop',responseComplete:true}:error.reviewResult??null;
+  const failureCode=error.preDispatchBlocked?'PRE_DISPATCH_BLOCKED':validatedReport?'SUMMARY_RESULT_PERSISTENCE_UNCERTAIN':String(error.code||'SUMMARY_OUTCOME_UNKNOWN');
+  await env.DB.prepare("UPDATE yta_operations SET state=?,error_code=?,result_json=CASE WHEN EXISTS (SELECT 1 FROM jobs WHERE id=? AND owner_id='owner') AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING') THEN ? ELSE NULL END,created_at=? WHERE id=? AND state='CLAIMED'").bind(error.preDispatchBlocked?'BLOCKED':'FAILED_UNCERTAIN',failureCode,id,id+':deleting',evidence||error.safeRateLimit?JSON.stringify({reviewResult:evidence,safeRateLimit:result?.safeRateLimit??error.safeRateLimit??null,usageEventId,usageRecorded,checkpointPersisted:false}):null,nowIso(),operationId).run();
   await env.DB.prepare("UPDATE yta_operations SET state='STOPPED',error_code=? WHERE id=? AND state='APPROVED'").bind(String(error.code||'SUMMARY_OUTCOME_UNKNOWN'),approvalId(id,scope.sequence)).run();
   throw error;
  }
@@ -727,7 +748,7 @@ async function completeStageContext(env,{id,job,source,transcriptHash,legacyTran
  if(rows.some(row=>!/^raw:(0|[1-9][0-9]*)$/.test(row.id.slice(prefix.length))||Number(row.id.slice(prefix.length+4))>=groups.length))stop('SUMMARY_COMPLETE_OPERATION_REVIEW_REQUIRED','원시 단계 이외의 요약 작업을 먼저 검토하세요.');
  const recoveryRow=await env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(recoveryId(id,transcriptHash),id).first();
  const recovery=recoveryRow?await checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash}):null;
- const checkpoints=Array(groups.length).fill(null),failures=[],pending=[],latestApproval=await readApproval(env,id);
+ const checkpoints=Array(groups.length).fill(null),failures=[],pending=[],latestApproval=await readApproval(env,id),persistedRecoveries=await recoveredRawStages(env,{id,job,source,transcriptHash,legacyTranscriptHash});
  const approvalEvidence=latestApproval?await env.DB.prepare("SELECT id,state,result_json AS resultJson FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary'").bind(approvalId(id,latestApproval.sequence),id).first():null;
  async function failureEvidence(row,operationId,provenance){
   let data;try{data=JSON.parse(row?.result_json);}catch{}
@@ -740,6 +761,7 @@ async function completeStageContext(env,{id,job,source,transcriptHash,legacyTran
  for(let index=0;index<groups.length;index++){
   const key='raw:'+index,row=rows.find(item=>item.id===stageId(id,transcriptHash,key)),group=groups[index];
   if(!row){pending.push(index);continue;}
+  if(persistedRecoveries.has(index)){const recovered=persistedRecoveries.get(index),report=checkedReport(JSON.stringify(recovered.record.report),group,[{ids:group.map(item=>item.id)}]);checkpoints[index]={key,sourceHash:transcriptHash,provenance:'AI_VALIDATED_RAW_CHECKPOINT',report,reportSha256:await sha(JSON.stringify(report)),recoveryRecordSha256:recovered.evidenceHash};continue;}
   if(row.state==='DONE'||index===0&&recovery?.recovered&&row.id===recovery.failedId){
    let saved;try{saved=index===0&&recovery?.recovered?{hash:transcriptHash,key,report:recovery.record.report}:JSON.parse(row.result_json);}catch{}
    if(saved?.hash!==transcriptHash||saved.key!==key||!saved.report)stop('SUMMARY_COMPLETE_OPERATION_REVIEW_REQUIRED','저장된 원시 단계가 현재 원본과 다릅니다.');
@@ -819,6 +841,7 @@ async function handleCompleteSummary(request,env,context,sourceOf,ownedJob){
  if(unfinished){if(unfinished.id!==prefix+progress.next?.key)stop('SYNTHESIS_OPERATION_REVIEW_REQUIRED','미완료 종합 단계 순서를 검토하세요.');return json({contract:COMPLETE_SYNTHESIS_CONTRACT,featureEnabled:env.ENABLE_COMPLETE_SYNTHESIS==='true',ready:false,blocked:true,node:progress.next.key,state:unfinished.state,errorCode:unfinished.error_code??null,completedSynthesisNodes:progress.completed,automaticRetries:0,providerCalls:0});}
  if(body&&['quote','approve','cancel','execute'].includes(body.step))return json(await synthesisAction({body,env,id,job,source,sourceHash:transcriptHash,manifest,notes,progress,failures:state.failures,ownedJob,sourceOf,completeSource,verifyGrounding:assertGrounding}));
  if(body?.step==='finalize'){
+  if(state.failures.some(item=>!item.dispositionReviewed))stop('SYNTHESIS_FAILURE_REVIEW_REQUIRED','실패 호출의 사용량·미확정 결과를 먼저 검토하세요.');
   if(!progress.complete||body.sourceHash!==transcriptHash||body.manifestSha256!==manifest.manifestSha256||body.confirmNoProviderCall!==true)stop('SYNTHESIS_FINALIZATION_NOT_READY','저장된 전체 종합과 근거 검토가 완료돼야 합니다.');
   let report;try{report=await completedSynthesisReport({manifest,notes,root:progress.root,checkpoints:state.checkpoints,excerpts,segments:source.segments,verifyGrounding:assertGrounding,semanticReview:body.semanticReview});}catch{stop('SYNTHESIS_FINALIZATION_NOT_READY','원문 의미 대조·범위·부록을 검토하세요.');}
   const response=await saveFinalReport(env,id,job,source,report,ownedJob),stored=await env.DB.prepare("SELECT report_json FROM jobs WHERE id=? AND owner_id='owner'").bind(id).first();
@@ -845,10 +868,10 @@ export async function handleGroqSummaryAction(request,env,{id,action,job,sourceO
  const recoveryExists=await env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(recoveryId(id,transcriptHash),id).first();
  const recovery=recoveryExists?await checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash}):null;
  const correction=await correctedStage(env,{id,job,source,transcriptHash});
- const resolvedFailures=[recovery?.failedId??'NO_RECOVERY_CURRENT',recovery?.legacyFailedId??'NO_RECOVERY_LEGACY',correction?.failedId??'NO_CORRECTION'];
- const [resolvedCurrent,resolvedLegacy,resolvedCorrection]=resolvedFailures;
+ const persistedRecoveries=await recoveredRawStages(env,{id,job,source,transcriptHash,legacyTranscriptHash}),persistedFailureIds=[...persistedRecoveries.values()].map(item=>item.failedId);
+ const resolvedFailures=[recovery?.failedId??'NO_RECOVERY_CURRENT',recovery?.legacyFailedId??'NO_RECOVERY_LEGACY',correction?.failedId??'NO_CORRECTION',...persistedFailureIds];
  if(action==='groq-summary-approval'&&['GET','POST'].includes(request.method)){
-  const unresolved=await env.DB.prepare("SELECT 1 AS unresolved FROM yta_operations WHERE provider='groq-summary' AND state='FAILED_UNCERTAIN' AND id NOT IN (?,?,?) LIMIT 1").bind(resolvedCurrent,resolvedLegacy,resolvedCorrection).first();
+  const excludedSql=resolvedFailures.map(()=>'?').join(','),unresolved=await env.DB.prepare(`SELECT 1 AS unresolved FROM yta_operations WHERE provider='groq-summary' AND state='FAILED_UNCERTAIN' AND id NOT IN (${excludedSql}) LIMIT 1`).bind(...resolvedFailures).first();
   if(unresolved)stop('SUMMARY_OPERATION_REVIEW_REQUIRED','이전 요약 요청 결과가 미확정입니다. 새 승인을 기록하기 전에 이력을 검토하세요.');
  }
  const audit=promptAudit(job),groups=await read('PARTITION',()=>partitionGroqTranscript(source.segments,audit)),totalRequests=groups.length*2-1;
@@ -856,6 +879,7 @@ export async function handleGroqSummaryAction(request,env,{id,action,job,sourceO
  const rows=(await read('OPERATIONS',()=>env.DB.prepare("SELECT id,state,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(id,stagePrefix,stagePrefix).all())).results||[];
  if(recovery?.recovered){const index=rows.findIndex(row=>row.id===recovery.failedId);if(index<0||rows[index].state!=='FAILED_UNCERTAIN')stop('SUMMARY_RECOVERY_SCOPE_CHANGED','복구된 첫 단계의 원본 실패가 변경됐습니다.');rows[index]={id:recovery.failedId,state:'DONE',result_json:JSON.stringify({hash:transcriptHash,key:'raw:0',report:recovery.record.report,recoveredWithoutProviderCall:true})};}
  if(correction){const index=rows.findIndex(row=>row.id===correction.failedId);if(index<0||rows[index].state!=='FAILED_UNCERTAIN')stop('SUMMARY_CORRECTION_SCOPE_CHANGED','교정된 원본 실패 기록이 변경됐습니다.');rows[index]=correction.row;}
+ projectRecoveredRows(rows,persistedRecoveries,id,transcriptHash);
  if(rows.some(row=>row.state!=='DONE'))stop('SUMMARY_OPERATION_REVIEW_REQUIRED','이전 단계의 불명확한 호출을 검토하세요.');
  if(action==='groq-summary-bundle'&&request.method==='GET'){
   const bundle=await rawCheckpointBundle({rows,id,hash:transcriptHash,groups,source,audit});

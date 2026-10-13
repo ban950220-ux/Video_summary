@@ -12,6 +12,9 @@ const fullYears=[['2022년','22년'],['2023년','23년']];
 const token=(value)=>new RegExp('(?<!\\d)'+value+'(?!\\d)','g');
 // A two-digit "년" can describe elapsed time. This is deliberately a narrow
 // spelling repair, so contextual ambiguity must go to human review.
+// A short form is eligible only when the source itself anchors the century.
+// Bare “22년” is also a duration, so it must remain for source-excerpt review.
+const calendarContext=(text,year)=>[...text.matchAll(token(year))].every(match=>/2020년대(?:의|인)?\s*$/.test(text.slice(Math.max(0,match.index-24),match.index)));
 const durationContext=(text,year)=>[...text.matchAll(token(year))].some(match=>{
  const before=text.slice(Math.max(0,match.index-28),match.index).split(/[.!?。！？,，;；]/).at(-1);
  const after=text.slice(match.index+year.length,match.index+year.length+18).split(/[.!?。！？,，;；]/)[0];
@@ -40,7 +43,7 @@ export async function abbreviatedYearRecoveryCandidate({stage,sourceHash,auditSh
    if(cited.some(item=>token(from).test(item.text)))continue;
    const candidates=cited.filter(item=>token(to).test(item.text));
    if(candidates.length!==1)fail('YEAR_RECOVERY_SOURCE_AMBIGUOUS');
-   if([...candidates[0].text.matchAll(token(to))].length!==1||durationContext(candidates[0].text,to))fail('YEAR_RECOVERY_SOURCE_AMBIGUOUS');
+   if([...candidates[0].text.matchAll(token(to))].length!==1||!calendarContext(candidates[0].text,to)||durationContext(candidates[0].text,to))fail('YEAR_RECOVERY_SOURCE_AMBIGUOUS');
    for(const match of matches)changes.push({field,index,from,to,offset:match.index,evidenceIds:[...ids],source:{id:candidates[0].id,startMs:candidates[0].startMs,endMs:candidates[0].endMs,textSha256:null}});
    output=output.replaceAll(token(from),to);
   }

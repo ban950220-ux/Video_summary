@@ -106,7 +106,7 @@ test('resume validates saved request and response hashes before revealing one ne
 
 test('coverage distinguishes a source-preserving derived raw:9 checkpoint from a reviewed raw:8 excerpt',async()=>{
  const f=await fixture(10),ids=f.groups[9].map(item=>item.id);
- f.groups[9]=f.groups[9].map((item,index)=>({...item,text:index===0?'22년 금리 1.5%':index===1?'23년 물가 2%대':'원문 발언을 정리함'}));f.segments=f.groups.flat();
+ f.groups[9]=f.groups[9].map((item,index)=>({...item,text:index===0?'2020년대의 22년 금리 1.5%':index===1?'2020년대의 23년 물가 2%대':'원문 발언을 정리함'}));f.segments=f.groups.flat();
  const original={summary:[{text:'2022년 금리 1.5%',evidenceIds:[ids[0]]},{text:'2023년 물가 2%대',evidenceIds:[ids[1]]}],chapters:[{text:'금리와 물가 언급',evidenceIds:[ids[0],ids[1]]}],claims:[],numbers:[],critical:[],conclusion:'원문 범위의 결론'},failedResultJson=JSON.stringify({reviewResult:{partialText:JSON.stringify(original),usage:{inputTokens:1072,outputTokens:1006,reasoningTokens:60,totalTokens:2078}}});
  const approvalEvidence={id:'job:groq-summary:approval:1',state:'STOPPED',resultJson:JSON.stringify({jobId:'job',transcriptHash:f.sourceHash,sequence:1,model:'openai/gpt-oss-120b',outputKind:'RAW_CHECKPOINTS_WITH_REVIEW_GAP',windowStart:9,maxRequests:1,maxInputTokensPerRequest:4800,maxCompletionTokensPerRequest:1800,freeTierConfirmed:true,billingDisabled:true})},failedOperationId='job:groq-summary:'+f.sourceHash+':raw:9';
  const recovery=await abbreviatedYearRecoveryCandidate({stage:'raw:9',sourceHash:f.sourceHash,auditSha256:f.auditSha256,failedOperationId,failedResultJson,usageEvidence:{unit:'actual_total_tokens',totalTokens:2078},approvalEvidence,segments:f.groups[9],verifyGrounding:assertGrounding});

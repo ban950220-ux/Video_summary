@@ -101,7 +101,7 @@ test('complete synthesis review lists raw:8 and raw:9 failures separately withou
 });
 
 test('feature-disabled year recovery only reads; explicit source-spelling review stores a separate derived record',async()=>{
- const segmentText=id=>id===19?'22년 금리 1.5% '+ '가'.repeat(337):id===20?'23년 물가 2%대 '+ '가'.repeat(337):'가'.repeat(350);
+ const segmentText=id=>id===19?'2020년대의 22년 금리 1.5% '+ '가'.repeat(337):id===20?'2020년대의 23년 물가 2%대 '+ '가'.repeat(337):'가'.repeat(350);
  const {f,groups}=await reviewedGapFixture({segmentText}),id=f.id,hash=f.plan.transcriptHash,group=groups[9],stamp=new Date(Date.now()-120000).toISOString(),url=f.path+'/groq-summary-complete';
  assert.equal(group[0].id,19);assert.equal(group[1].id,20);
  const original={summary:[{text:'2022년 금리 1.5%',evidenceIds:[19]},{text:'2023년 물가 2%대',evidenceIds:[20]}],chapters:[{text:'금리와 물가 언급',evidenceIds:[19,20]}],claims:[],numbers:[],critical:[],conclusion:'원문 범위의 결론'},resultJson=JSON.stringify({reviewResult:{partialText:JSON.stringify(original),usage:{inputTokens:1072,outputTokens:1006,reasoningTokens:null,totalTokens:2078}}}),operationId=id+':groq-summary:'+hash+':raw:9';
@@ -1109,7 +1109,7 @@ test('1,954-character stored strict report recovers without a provider call and 
  f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,?,?,?,?,?,?)').run(oldId,f.id,'groq-summary',6600,'FAILED_UNCERTAIN',now,'SUMMARY_RESPONSE_INVALID',oldResult);
  f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,?,?,?,?,?,?)').run(newId,f.id,'groq-summary',6600,'FAILED_UNCERTAIN',now,'SUMMARY_CHECKPOINT_TOO_LARGE',newResult);
  for(const [kind,state] of [['review','REVIEWED'],['approval','APPROVED']])f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)').run(f.id+':groq-summary-pilot:'+kind+':'+legacyHash,f.id,'groq-summary-pilot-'+kind,0,state,now,'{}');
- for(const units of [2220,2169])f.db.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),f.id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',units,0,null,'TEST',now);
+ for(const units of [2220,2169])f.db.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),f.id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',units,0,null,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',now);
  let providerCalls=0;globalThis.fetch=async()=>{providerCalls++;throw Error('provider call prohibited');};
  try{
   const url=f.path+'/groq-summary-checkpoint-recovery',preview=await(await routeApi(request(url),f.env)).json();
@@ -1297,4 +1297,42 @@ test('raw dispatch shares the D1 in-flight guard with synthesis',async()=>{
  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'groq-summary-synthesis',6600,'CLAIMED',?)").run(synthesisId,f.id,new Date().toISOString());
  const oldFetch=globalThis.fetch;let calls=0;try{globalThis.fetch=async()=>{calls++;throw Error('unexpected provider request');};const result=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.notEqual(result.status,202);assert.equal(calls,0);}finally{globalThis.fetch=oldFetch;}
  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(synthesisId).state,'CLAIMED');
+});
+
+test('raw final dispatch refuses an approval cancelled during the shared claim read',async()=>{
+ const f=await fixture();assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);
+ const DB=f.env.DB,approvalId=f.id+':groq-summary:approval:0';let sharedReads=0,fetches=0;
+ f.env.DB={prepare(sql){const statement=DB.prepare(sql);if(!sql.includes("SELECT id FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND state='CLAIMED' LIMIT 2"))return statement;return {async all(){sharedReads++;if(sharedReads===2)f.db.prepare("UPDATE yta_operations SET state='STOPPED' WHERE id=?").run(approvalId);return statement.all();}};}};
+ const oldFetch=globalThis.fetch;try{globalThis.fetch=async()=>{fetches++;throw Error('unexpected provider call');};const result=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.notEqual(result.status,202);assert.equal(sharedReads,2);assert.equal(fetches,0);}finally{globalThis.fetch=oldFetch;}
+});
+
+test('raw final dispatch refuses an approval expired during the shared claim read',async()=>{
+ const f=await fixture();assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);
+ const DB=f.env.DB,clock=Date.now;let sharedReads=0,fetches=0;
+ f.env.DB={prepare(sql){const statement=DB.prepare(sql);if(!sql.includes("SELECT id FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND state='CLAIMED' LIMIT 2"))return statement;return {async all(){sharedReads++;if(sharedReads===2)Date.now=()=>clock()+3_600_001;return statement.all();}};}};
+ const oldFetch=globalThis.fetch;try{globalThis.fetch=async()=>{fetches++;throw Error('unexpected provider call');};const result=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.notEqual(result.status,202);assert.equal(sharedReads,2);assert.equal(fetches,0);}finally{globalThis.fetch=oldFetch;Date.now=clock;}
+});
+
+for(const failurePoint of ['usage','checkpoint'])test(`raw valid provider response survives ${failurePoint} persistence failure without another provider call`,async()=>{
+ const f=await fixture(),approvalReply=await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env);assert.equal(approvalReply.status,200);
+ const report={summary:[{text:'원문 검증',evidenceIds:[1]}],chapters:[{text:'원문 검증',evidenceIds:[1,2]}],claims:[],numbers:[],critical:[],conclusion:'원문 검증'},raw=JSON.stringify(report);
+ const DB=f.env.DB;let injected=false,calls=0;
+ f.env.DB={prepare(sql){const stmt=DB.prepare(sql);if(!(failurePoint==='usage'&&sql.startsWith('INSERT INTO usage_events')||failurePoint==='checkpoint'&&sql.startsWith('UPDATE yta_operations SET state=?,result_json=CASE')))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {async run(){if(!injected){injected=true;throw Error('SIMULATED_D1_WRITE_FAILURE');}return bound.run();}};}};}};
+ const oldFetch=globalThis.fetch;try{globalThis.fetch=async()=>{calls++;return response(report);};const failed=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.notEqual(failed.status,202);assert.equal(calls,1);
+  const row=f.db.prepare("SELECT state,error_code,result_json FROM yta_operations WHERE id=?").get(f.id+':groq-summary:'+f.plan.transcriptHash+':raw:0'),saved=JSON.parse(row.result_json);assert.equal(row.state,'FAILED_UNCERTAIN');assert.equal(row.error_code,'SUMMARY_RESULT_PERSISTENCE_UNCERTAIN');assert.equal(saved.reviewResult.partialText,raw);assert.equal(saved.reviewResult.usage.totalTokens,390);assert.equal(saved.reviewResult.responseComplete,true);
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE job_id=? AND capability='LIVE_FREE_SUMMARY'").get(f.id).n,1);
+  const again=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.notEqual(again.status,202);assert.equal(calls,1);
+  const recoveryUrl=f.path+'/groq-summary-checkpoint-recovery',reviewReply=await routeApi(request(recoveryUrl),f.env);assert.equal(reviewReply.status,200,await reviewReply.clone().text());const review=await reviewReply.json();assert.equal(review.confirmedUsage.totalTokens,390);assert.equal(review.responseSha256,await digest(raw));
+  const restored=await routeApi(request(recoveryUrl,'POST',{step:'recover',evidenceHash:review.evidenceHash,failedOperationId:review.failedOperationId,contractHash:review.contractHash,responseSha256:review.responseSha256,acknowledgeOriginalUsage:390,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true}),f.env);assert.equal(restored.status,200,await restored.clone().text());assert.equal(calls,1);
+  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(f.id+':groq-summary:'+f.plan.transcriptHash+':raw:0').state,'FAILED_UNCERTAIN');assert.equal((await(await routeApi(request(recoveryUrl),f.env)).json()).recovered,true);
+ }finally{globalThis.fetch=oldFetch;}
+});
+
+test('later raw persistence failure keeps original failure and admits separate zero-call checkpoint recovery',async()=>{
+ const f=await fixture({large:true,sourceText:'가'.repeat(350)}),audit=JSON.parse(f.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(f.id).audit_json),groups=partitionGroqTranscript(f.segments,promptAudit({audit,duration_seconds:600})),index=10,group=groups[index],raw=JSON.stringify(valid(group[0].id)),stamp=new Date().toISOString(),operationId=f.id+':groq-summary:'+f.plan.transcriptHash+':raw:'+index;
+ assert.ok(group);f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESULT_PERSISTENCE_UNCERTAIN',?)").run(operationId,f.id,stamp,JSON.stringify({reviewResult:{partialText:raw,usage:{inputTokens:300,outputTokens:90,reasoningTokens:10,totalTokens:390},responseComplete:true},usageRecorded:true}));
+ const usageEventId=crypto.randomUUID();f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',390,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").run(usageEventId,f.id,stamp);f.db.prepare("UPDATE yta_operations SET result_json=json_set(result_json,'$.usageEventId',?) WHERE id=?").run(usageEventId,operationId);
+ const url=f.path+'/groq-summary-checkpoint-recovery?stage=raw:'+index,reviewReply=await routeApi(request(url),f.env);assert.equal(reviewReply.status,200,await reviewReply.clone().text());const review=await reviewReply.json();assert.equal(review.stage,'raw:10');
+ const restored=await routeApi(request(url,'POST',{step:'recover',evidenceHash:review.evidenceHash,failedOperationId:review.failedOperationId,contractHash:review.contractHash,responseSha256:review.responseSha256,acknowledgeOriginalUsage:390,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true}),f.env);assert.equal(restored.status,200,await restored.clone().text());assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(operationId).state,'FAILED_UNCERTAIN');assert.equal((await(await routeApi(request(url),f.env)).json()).recovered,true);
+ const statusReply=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal(statusReply.status,200,await statusReply.clone().text());const status=await statusReply.json();assert.equal(status.completedStages,1);assert.equal(status.activeStage,null);
 });

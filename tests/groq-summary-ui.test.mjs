@@ -129,8 +129,8 @@ test('checkpoint recovery UI requires explicit review and never starts a provide
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCheckpointRecoveryChoice({id:'job-a'},target,0);
  await new Promise(resolve=>setTimeout(resolve,0));
  const host=target.children[0],form=host.children.find(item=>item.tag==='form');assert.ok(form);assert.equal(calls.length,1);
- assert.match(host.children[0].textContent,/Groq Free 첫 구간 보고서 복구 · 전체 요약 아님/);
- assert.equal(form.children.at(-1).textContent,'Groq Free 첫 구간 저장 보고서만 복구');
+ assert.match(host.children[0].textContent,/Groq Free 저장 보고서 무호출 복구 · 전체 요약 아님/);
+ assert.equal(form.children.at(-1).textContent,'Groq Free raw:0 저장 보고서만 복구');
  await form.onsubmit({preventDefault(){}});assert.equal(calls.length,1);
  for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
  await form.onsubmit({preventDefault(){}});

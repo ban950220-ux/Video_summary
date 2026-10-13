@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {assertGrounding} from '../src/groq-summary.mjs';
 import {abbreviatedYearRecoveryCandidate} from '../src/groq-year-recovery.mjs';
 
-const segments=[{id:172,startMs:760568,endMs:768000,text:'22년 금리 1.5%를 언급했습니다.'},{id:173,startMs:770928,endMs:778000,text:'23년 물가 2%대를 언급했습니다.'}];
+const segments=[{id:172,startMs:760568,endMs:768000,text:'2020년대의 22년 금리 1.5%를 언급했습니다.'},{id:173,startMs:770928,endMs:778000,text:'2020년대의 23년 물가 2%대를 언급했습니다.'}];
 const response={summary:[{text:'2022년 금리 1.5%',evidenceIds:[172]},{text:'2023년 물가 2%대',evidenceIds:[173]}],chapters:[{text:'금리와 물가를 언급했습니다.',evidenceIds:[172,173]}],claims:[],numbers:[],critical:[],conclusion:'확인 범위 내 발언만 정리했습니다.'};
 const result=JSON.stringify({reviewResult:{partialText:JSON.stringify(response),usage:{inputTokens:1072,outputTokens:1006,reasoningTokens:60,totalTokens:2078}}});
 const sourceHash='a'.repeat(64),approval={jobId:'job',transcriptHash:sourceHash,sequence:1,model:'openai/gpt-oss-120b',outputKind:'RAW_CHECKPOINTS_WITH_REVIEW_GAP',windowStart:9,maxRequests:1,maxInputTokensPerRequest:4800,maxCompletionTokensPerRequest:1800,freeTierConfirmed:true,billingDisabled:true};
@@ -33,7 +33,7 @@ test('supported full year is preserved even when another cited segment says a du
  const mixedSegments=[
   {id:1,startMs:0,endMs:1000,text:'이 사업은 2022년에 시작됐다'},
   {id:2,startMs:1000,endMs:2000,text:'연구 기간은 22년이었다'},
-  {id:3,startMs:2000,endMs:3000,text:'23년 물가를 논했다'}
+  {id:3,startMs:2000,endMs:3000,text:'2020년대의 23년 물가를 논했다'}
  ];
  const mixed={...response,summary:[{text:'이 사업은 2022년에 시작됐다',evidenceIds:[1,2]},{text:'2023년 물가를 논했다',evidenceIds:[3]}],chapters:[{text:'사업과 물가',evidenceIds:[1,2,3]}]};
  const failedResultJson=JSON.stringify({reviewResult:{partialText:JSON.stringify(mixed),usage:{inputTokens:1072,outputTokens:1006,reasoningTokens:60,totalTokens:2078}}});
@@ -54,7 +54,7 @@ test('year repair rejects impossible or out-of-contract provider usage',async()=
 });
 
 test('elapsed-year phrases are not repaired into calendar dates',async()=>{
- for(const sourceText of ['22년 동안 근무했다','22년 만에 돌아왔다','22년이 넘게 일했다']){
+ for(const sourceText of ['22년 동안 근무했다','22년 만에 돌아왔다','22년이 넘게 일했다','그는 22년을 근무했고 금리 1.5%를 언급했습니다.','22년을 살았다','22년에 걸친 이야기','22년 금리 1.5%']){
   await assert.rejects(abbreviatedYearRecoveryCandidate({...base,segments:[{...segments[0],text:sourceText},segments[1]]}),/YEAR_RECOVERY_SOURCE_AMBIGUOUS/);
  }
 });
