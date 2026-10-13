@@ -228,3 +228,13 @@ test('saved second paid report keeps UNCERTAIN cost warning and offers separate 
  assert.ok(target.children.some(item=>item.textContent?.includes('검토가 필요합니다')&&item.textContent?.includes('UNCERTAIN')));
  target.replaceChildren();context.__showSummaryChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));const host=target.children[0];assert.equal(host.children.some(item=>item.textContent?.includes('첫 시도 승인 취소')),false);assert.equal(host.children.some(item=>item.textContent?.includes('두 번째 시도 승인 취소')),false);
 });
+
+test('lost second cost status stays unknown until reopen restores UNCERTAIN warning',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showReport=showReport;globalThis.__state=state;');
+ let retryReads=0;const fetcher=async path=>{if(path.endsWith('/paid-retry-status')){retryReads++;if(retryReads===1)throw Error('read response lost');return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({firstTrial:{reservationState:'SETTLED'},attempt:{state:'UNCERTAIN',tokenEstimateMicroUsd:null}})};}return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({reservations:[{state:'SETTLED'}],costReconciliation:'SETTLED_PRIOR'})};};
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher};runInNewContext(source,context);
+ const job={id:'job-a',status:'COMPLETE',report:{kind:'GEMINI_PAID_FULL_EVIDENCE_LINKED',summary:[],chapters:[],claims:[],numbers:[],critical:[],conclusion:'끝'}};
+ context.__showReport(job,target,true);await new Promise(resolve=>setTimeout(resolve,0));assert.ok(target.children.some(item=>item.textContent?.includes('두 번째 시도 비용 원장을 확인할 수 없습니다')));assert.equal(target.children.some(item=>item.textContent?.includes('정산 기록이 있습니다')),false);
+ context.__showReport(job,target,true);await new Promise(resolve=>setTimeout(resolve,0));assert.ok(target.children.some(item=>item.textContent?.includes('검토가 필요합니다')&&item.textContent?.includes('UNCERTAIN')));assert.equal(retryReads,2);
+});

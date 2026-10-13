@@ -81,9 +81,9 @@ function showReport(job,container,persisted,costReconciliation){empty(container)
    const cost=el('p',{className:'tip',text:paidCostText(costReconciliation)});container.append(cost);
    Promise.allSettled([api('/api/jobs/'+job.id+'/paid-summary-status'),api('/api/jobs/'+job.id+'/paid-retry-status')]).then(([oldResult,retryResult])=>{
     const old=oldResult.status==='fulfilled'?oldResult.value:null,retry=retryResult.status==='fulfilled'?retryResult.value:null;
-    const states=[...(old?.reservations??[]).map(item=>item.state),...(retry?.attempt?[retry.attempt.state]:[])];
-    const reconciliation=states.some(value=>['RESERVED','UNCERTAIN'].includes(value))?'REVIEW_REQUIRED':states.some(value=>value==='SETTLED')?'SETTLED_PRIOR':old?.costReconciliation;
-    const second=retry?.attempt?` 첫 시도 ${retry.firstTrial?.reservationState??'미확인'} · 두 번째 시도 ${retry.attempt.state}, 토큰 기반 추정 ${retry.attempt.tokenEstimateMicroUsd??'UNKNOWN'} microUSD. 제공자 실제 청구액 UNKNOWN.`:'';
+    const states=[...(old?.reservations??[]).map(item=>item.state),...(retry?.firstTrial?[retry.firstTrial.reservationState]:[]),...(retry?.attempt?[retry.attempt.state]:[])];
+    const reconciliation=retryResult.status==='rejected'?(states.some(value=>['RESERVED','UNCERTAIN'].includes(value))?'REVIEW_REQUIRED':null):states.some(value=>['RESERVED','UNCERTAIN'].includes(value))?'REVIEW_REQUIRED':states.some(value=>value==='SETTLED')?'SETTLED_PRIOR':old?.costReconciliation;
+    const second=retry?.attempt?` 첫 시도 ${retry.firstTrial?.reservationState??'미확인'} · 두 번째 시도 ${retry.attempt.state}, 토큰 기반 추정 ${retry.attempt.tokenEstimateMicroUsd??'UNKNOWN'} microUSD. 제공자 실제 청구액 UNKNOWN.`:retryResult.status==='rejected'?' 두 번째 시도 비용 원장을 확인할 수 없습니다.':'';
     cost.textContent=paidCostText(reconciliation)+second;
    });
   }
