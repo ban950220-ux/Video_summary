@@ -18,8 +18,20 @@ async function setup(){
  const url=path+'/groq-summary-complete',scope=await(await routeApi(request(url),env)).json();assert.equal(scope.ready,true);
  const quote=await(await routeApi(request(url,'POST',{step:'quote',sourceHash:scope.sourceHash,manifestSha256:scope.manifestSha256,confirmFreeOnly:true,acknowledgeUnknownBalance:true}),env)).json();
  const approved=await routeApi(request(url,'POST',{step:'approve',quoteId:quote.quoteId,quoteSha256:quote.quoteSha256,reservedUnits:quote.quote.reservedUnits,maxCalls:quote.quote.maxCalls,confirmExactQuote:true,freeTierConfirmed:true,billingDisabled:true,noPaidFallback:true,noAutomaticRetry:true}),env);assert.equal(approved.status,200,await approved.clone().text());const approval=await approved.json();
- return {mf,DB,env,url,scope,approval};
+ return {mf,DB,env,url,scope,approval,groups};
 }
+test('Workerd D1 preserves a valid synthesis response after checkpoint write failure and recovers without a second fetch',async()=>{
+ const f=await setup(),oldFetch=globalThis.fetch;let calls=0,injected=false;
+ try{
+  f.env.DB={prepare(sql){const stmt=f.DB.prepare(sql);if(!sql.startsWith("UPDATE yta_operations SET state='DONE',result_json=?"))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {async run(){if(!injected){injected=true;throw Error('SIMULATED_SYNTHESIS_CHECKPOINT_WRITE_FAILURE');}return bound.run();}};}};}};
+  const left=f.groups[0][0].id,right=f.groups[1][0].id,report={summary:[{text:'가',evidenceIds:[left]}],chapters:[{text:'가',evidenceIds:[left]},{text:'가',evidenceIds:[right]}],claims:[],numbers:[],critical:[],conclusion:'가'};
+  globalThis.fetch=async()=>{calls++;return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify(report)}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390,completion_tokens_details:{reasoning_tokens:10}}});};
+  const attempted=await routeApi(request(f.url,'POST',{step:'execute',approvalId:f.approval.approvalId,expectedNode:f.scope.nextSynthesisStage,requestSha256:f.scope.nextSynthesisRequestSha256,executeOnce:true}),f.env);assert.notEqual(attempted.status,200);assert.equal(calls,1);assert.equal(injected,true);
+  f.env.DB=f.DB;const failed=await f.DB.prepare("SELECT state,result_json FROM yta_operations WHERE provider='groq-summary-synthesis'").first(),saved=JSON.parse(failed.result_json);assert.equal(failed.state,'FAILED_UNCERTAIN');assert.equal(saved.partialText,JSON.stringify(report));assert.equal(saved.usage.totalTokens,390);assert.equal((await f.DB.prepare("SELECT state FROM yta_operations WHERE provider='groq-summary-synthesis-approval'").first()).state,'STOPPED');
+  globalThis.fetch=async()=>{throw Error('recovery must not call provider');};const blocked=await(await routeApi(request(f.url),f.env)).json();assert.equal(blocked.blocked,true);assert.ok(blocked.recoveryCandidate);
+  const restored=await routeApi(request(f.url,'POST',{step:'recover-node',failedOperationId:blocked.recoveryCandidate.failedOperationId,responseSha256:blocked.recoveryCandidate.responseSha256,usageTotalTokens:390,confirmNoProviderCall:true,confirmOriginalFailurePreserved:true}),f.env);assert.equal(restored.status,200,await restored.clone().text());assert.equal((await f.DB.prepare("SELECT state FROM yta_operations WHERE provider='groq-summary-synthesis'").first()).state,'FAILED_UNCERTAIN');assert.equal((await f.DB.prepare("SELECT state FROM yta_operations WHERE provider='groq-summary-synthesis-recovery'").first()).state,'DONE');assert.equal(calls,1);
+ }finally{globalThis.fetch=oldFetch;await f.mf.dispose();}
+});
 for(const mode of ['cancel','expire'])test(`synthesis final D1 read blocks ${mode} before mock fetch`,async()=>{
  const f=await setup(),oldFetch=globalThis.fetch,clock=Date.now;let reads=0,calls=0;
  try{
