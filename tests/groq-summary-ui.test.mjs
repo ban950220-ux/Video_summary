@@ -5,6 +5,20 @@ import {runInNewContext} from 'node:vm';
 import {runApprovedGroqSummary,detailRequestIsCurrent} from '../web/site/audio-runner.mjs';
 import {groqSummaryProgress} from '../web/site/groq-summary-progress.mjs';
 
+test('reviewed gap UI discloses the held group and records approval before offering execution',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
+ const preview={approved:false,jobId:'job-a',transcriptHash:'a'.repeat(64),sourceAuditSha256:'b'.repeat(64),model:'openai/gpt-oss-120b',outputKind:'RAW_CHECKPOINTS_WITH_REVIEW_GAP',contractVersion:'raw-checkpoints-reviewed-gap-v1',gap:{stage:'raw:8',firstId:144,lastId:165,failureCode:'SUMMARY_RESPONSE_INVALID',originalSha256:'c'.repeat(64),correctionSha256:'d'.repeat(64)},completedRawStages:8,contiguousRawStages:8,heldRawStages:1,pendingRawStages:11,rawStages:20,nextRawStage:'raw:9',windowStart:9,totalRequests:20,maxRequests:11,maxInputTokensPerRequest:4800,maxCompletionTokensPerRequest:1800,totalTokenUpperBound:72600,credentialGeneration:'opaque'};
+ const posts=[];let saved={...preview};
+ const fetcher=async(_path,options)=>{if(options.method==='POST'){const body=JSON.parse(options.body);posts.push(body);saved={...saved,approved:true,state:'APPROVED',expiresAt:Date.now()+600000};}return {ok:true,headers:{get:()=> 'application/json'},json:async()=>saved};};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqGapChoice=showGroqGapChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent,fmtRetryDate:()=> 'soon'};
+ runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqGapChoice({id:'job-a'},target,0);await new Promise(resolve=>setImmediate(resolve));
+ const host=target.children[0];assert.match(host.children[1].textContent,/연속 완료 raw:0–7/);assert.match(host.children[1].textContent,/보류 1구간/);assert.match(host.children[1].textContent,/전체 보고서는 저장되지/);assert.equal(posts.length,0);
+ const form=host.children.find(item=>item.tag==='form');assert.ok(form);for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
+ await form.onsubmit({preventDefault(){}});assert.deepEqual(posts.map(item=>item.step),['approve']);assert.equal(posts[0].acknowledgeMissingRaw8,true);assert.equal(posts[0].acknowledgeNoFinalReport,true);
+ assert.ok(host.children.some(item=>item.tag==='button'&&item.textContent.includes('순차 진행')));assert.equal(posts.some(item=>item.step==='execute'),false);
+});
+
 test('raw:8 correction UI replaces expired quotes and separates claimed, failed and saved attempts',async()=>{
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqCorrectionChoice=showGroqCorrectionChoice;globalThis.__state=state;');
  const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}});

@@ -6,6 +6,13 @@ const now=100_000;
 const approved={approval:{state:'APPROVED',expiresAt:200_000,windowStart:0,maxRequests:29,totalTokenUpperBound:191400},completedStages:0,plannedMaximumRequests:191,activeStage:null,finalReportSaved:false};
 const view=(status,options={})=>groqSummaryProgress(status,{now,...options});
 
+test('reviewed gap progress separates contiguous, saved, held and pending raw groups',()=>{
+ const status={...approved,completedStages:9,rawProgress:{contiguousRawStages:8,completedRawStages:9,heldRawStages:1,pendingRawStages:11,rawStages:21,heldStage:'raw:8'},activeStage:{key:'raw:8:correction',state:'FAILED_UNCERTAIN'}};
+ const result=view(status);
+ assert.match(result.detail,/연속 완료 raw 0–7/);assert.match(result.detail,/검증 저장 9\/21구간/);assert.match(result.detail,/보류 1구간 \(raw:8\)/);assert.match(result.detail,/미처리 11구간/);
+ assert.match(result.headline,/전체 요약 미완료/);assert.equal(result.canExecute,false);
+});
+
 test('progress wording separates approval, transport, server claim, checkpoint and final report',()=>{
  assert.match(view(approved).headline,/승인 저장/);
  assert.match(view(approved).detail,/접수 기록은 확인되지/);

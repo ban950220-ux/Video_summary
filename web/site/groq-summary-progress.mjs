@@ -3,10 +3,12 @@
 export function groqSummaryProgress(status,{phase='idle',reason=null,waitUntil=null,now=Date.now()}={}){
  const saved=Number.isSafeInteger(status?.completedStages)?status.completedStages:0;
  const maximum=Number.isSafeInteger(status?.plannedMaximumRequests)?status.plannedMaximumRequests:null;
- const count=maximum===null?`저장된 중간 단계 ${saved}개`:`저장된 중간 단계 ${saved}개 · 계획 최대 ${maximum}요청`;
+ const gap=status?.rawProgress;
+ const count=gap?`연속 완료 raw 0–${gap.contiguousRawStages-1} · 검증 저장 ${gap.completedRawStages}/${gap.rawStages}구간 · 보류 ${gap.heldRawStages}구간 (${gap.heldStage}) · 미처리 ${gap.pendingRawStages}구간`:maximum===null?`저장된 중간 단계 ${saved}개`:`저장된 중간 단계 ${saved}개 · 계획 최대 ${maximum}요청`;
  const approval=status?.approval,active=status?.activeStage;
  const result=(headline,detail,tone='neutral',canExecute=false)=>({headline,detail:detail?`${detail} · ${count}`:count,tone,canExecute});
  if(status?.finalReportSaved)return result('최종 요약 저장 완료','이력에서 보고서를 다시 열고 TXT로 내보낼 수 있습니다.','done');
+ if(gap)return result('raw:8 검토 필요 · 전체 요약 미완료','독립 구간의 무료 진행은 누락 공개 범위에서 별도로 검토하세요. 보류 구간은 완료로 세지 않으며 최종 보고서를 만들 수 없습니다.','warning');
  if(active?.key==='raw:8:correction'){
   if(active.state==='CLAIMED')return result('raw:8 교정 1회 접수 확인','새 교정 슬롯이 기록됐습니다. 제공자 수신 여부와 결과는 아직 미확인입니다. 자동 재전송하지 마세요.','working');
   if(active.state==='FAILED_UNCERTAIN')return result('raw:8 교정 1회 결과 불확실','기존 raw:8 실패와 별개의 새 시도입니다. 제공자 사용량과 안전한 제한 정보를 확인하기 전 재전송하지 마세요.','warning');

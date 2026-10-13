@@ -1,0 +1,19 @@
+# Reviewed raw:8 gap continuation (offline review branch)
+
+This branch starts at production source `806fe607e11aa3c3082b13b77f8f70ab89dc6fc1`. It contains neither the paid summary branch (`cd270d1`) nor the later relative-date prompt change (`34ae5fa`). The relative-date prompt change is a separate review item; it cannot repair an already used correction attempt.
+
+## Contract and state
+
+The owner-only `GET /api/jobs/:id/groq-summary-gap` reviews a narrow case: source and TXT are complete, raw:0–7 are validated `DONE` checkpoints, raw:8 has a persisted `SUMMARY_RESPONSE_INVALID` / `UNSUPPORTED_NUMBER` failure, and its already used one-call correction has another persisted `SUMMARY_RESPONSE_INVALID` / `UNSUPPORTED_NUMBER` failure with usage recorded. The code checks both failure payloads and the original approval/quote evidence. It rejects a `429`, transport uncertainty, an incomplete or malformed preserved response, another in-flight/uncertain Groq request, or a changed source. This classification identifies the local validation failure; provider receipt completeness remains unverified.
+
+The separately approved Free contract is `RAW_CHECKPOINTS_WITH_REVIEW_GAP` / `raw-checkpoints-reviewed-gap-v1`. Its source hash, original and correction failure hashes, missing raw:8 range, model, key generation, request count, token ceiling and one-hour approval window are fixed. The owner must acknowledge the missing raw:8 and absent final report before an approval row is written. Each later `POST step=execute` names exactly one expected raw stage, beginning with raw:9. A repeated POST for the old expected stage fails. No raw:8 retransmission, correction slot, merge request, model fallback or automatic retry is offered.
+
+The existing app Free rate, daily and 61-second pacing checks remain in the provider admission path. The final prefetch guard rechecks owner, exact source, key, approval, deletion marker and both failure rows. A new `CLAIMED`, `FAILED_UNCERTAIN`, `429`, invalid response, or unexpected row blocks further stages. The UI can move through an approved window only while its tab stays active; loss of a response stops the loop and requires a fresh read and explicit restart.
+
+`GET /api/jobs/:id/groq-summary-gap-bundle` composes only validated saved raw checkpoints. JSON/TXT/Markdown identify raw:8 as `검토 필요·미완료`, provide its source ID/time range and both failed states, and distinguish contiguous completion, saved count, one held group and unprocessed groups. Even after all other groups finish, `jobs.report_json` stays null, `finalSummaryComplete` is false and the ordinary finalization path still rejects the missing raw:8. This is a partial artifact, not the requested full-video summary.
+
+## Activation and evidence
+
+Offline tests use synthetic D1 and mocked provider responses. They verify immutable original/correction rows and usage, raw:9-only admission, duplicate blocking, source/key binding, a later `429` lock, gap disclosure and no final report after every independent group is saved. They do not prove that the production raw:8 rows meet eligibility, that account Free quota remains, or that the actual video has a completed summary.
+
+No schema migration is needed. A production rollout needs a separately reviewed deployment. Using the new path would require the owner's explicit Free range approval and would write a new approval row, later raw:9+ operation rows and their usage events; those actions are not performed on this branch. The original transcript, raw:0–7 checkpoints, original raw:8 failure, used correction attempt, and existing usage are never reset or overwritten by this path. Any future raw:8 resolution and final full report require a separate design and authorization.

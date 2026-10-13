@@ -53,6 +53,76 @@ async function approvedCorrectionFixture({storedCredential=false}={}){
  const approved=await routeApi(request(url,'POST',{step:'approve',quoteId:quote.quoteId,quoteSha256:quote.contract.quoteSha256,reservedUnits:quote.contract.reservedUnits,maxCalls:1,confirmExactQuote:true,confirmPriorUsagePreserved:true,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,noAutomaticRetry:true}),f.env);assert.equal(approved.status,200);const approval=await approved.json();
  return {f,group,url,quote,approval,failedId,oldResult};
 }
+async function reviewedGapFixture(){
+ const setup=await approvedCorrectionFixture(),{f,group,approval,quote}=setup;
+ const job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),groups=partitionGroqTranscript(f.segments,promptAudit({audit:JSON.parse(job.audit_json),duration_seconds:job.duration_seconds})),stamp=new Date(Date.now()-120_000).toISOString();
+ assert.ok(groups.length>9);
+ for(let i=0;i<8;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+f.plan.transcriptHash+':raw:'+i,f.id,stamp,JSON.stringify({hash:f.plan.transcriptHash,key:'raw:'+i,report:valid(groups[i][0].id)}));
+ const correction=JSON.stringify({...valid(group[0].id),summary:[{text:'원문에 없는 2024년',evidenceIds:[group[0].id]}]}),correctionResult=JSON.stringify({reviewResult:{partialText:correction,usage:{inputTokens:1130,outputTokens:1576,reasoningTokens:53,totalTokens:2706}},safeRateLimit:null});
+ f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',?,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").run(approval.attemptId,f.id,quote.contract.reservedUnits,stamp,correctionResult);
+ f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(? ,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2706,0,NULL,'PROVIDER_REPORTED_CORRECTIVE_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").run(crypto.randomUUID(),f.id,stamp);
+ return {...setup,groups,correctionResult};
+}
+
+test('reviewed gap contract preserves raw:8 failures, executes only raw:9 and exposes an incomplete bundle',async()=>{
+ const {f,groups,approval,failedId,oldResult,correctionResult}=await reviewedGapFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const url=f.path+'/groq-summary-gap',preview=await routeApi(request(url),f.env);assert.equal(preview.status,200,await preview.clone().text());const scope=await preview.json();
+  const denied=await handleSiteRequest(request(url),{...f.env,ACCESS_TEAM_DOMAIN:'https://owner.cloudflareaccess.com',ACCESS_AUD:'gap-owner-audience',ACCESS_OWNER_EMAIL:'owner@example.com'});assert.equal(denied.status,401);
+  assert.deepEqual([scope.contiguousRawStages,scope.completedRawStages,scope.heldRawStages,scope.nextRawStage],[8,8,1,'raw:9']);assert.equal(scope.finalSummaryComplete,false);assert.equal(scope.outputKind,'RAW_CHECKPOINTS_WITH_REVIEW_GAP');
+  const bundle=await(await routeApi(request(f.path+'/groq-summary-gap-bundle'),f.env)).json();assert.equal(bundle.sourceCheckpointCount,8);assert.equal(bundle.missingRanges[0].stage,'raw:8');assert.equal(bundle.finalSummaryComplete,false);
+  const approved=await routeApi(request(url,'POST',{...scope,step:'approve',freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,summaryOnly:true,acknowledgeMissingRaw8:true,acknowledgeNoFinalReport:true,noAutomaticRetry:true}),f.env);assert.equal(approved.status,200,await approved.clone().text());
+  const status=await(await routeApi(request(f.path+'/groq-summary-status'),f.env)).json();assert.deepEqual([status.rawProgress.contiguousRawStages,status.rawProgress.completedRawStages,status.rawProgress.heldRawStages,status.rawProgress.pendingRawStages],[8,8,1,groups.length-9]);
+  let nextResponseId=groups[9][0].id;globalThis.fetch=async()=>{calls++;return response(valid(nextResponseId));};
+  const sent=await routeApi(request(url,'POST',{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:'raw:9',executeOnce:true}),f.env);assert.equal(sent.status,202,await sent.clone().text());assert.equal((await sent.json()).stage,'raw:9');assert.equal(calls,1);
+  const after=await(await routeApi(request(url),f.env)).json();assert.deepEqual([after.contiguousRawStages,after.completedRawStages,after.heldRawStages,after.nextRawStage],[8,9,1,'raw:10']);
+  assert.equal((await routeApi(request(url,'POST',{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:'raw:9',executeOnce:true}),f.env)).status,409);assert.equal(calls,1);
+  assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(failedId).result_json,oldResult);assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(approval.attemptId).result_json,correctionResult);
+  assert.equal(f.db.prepare('SELECT report_json FROM jobs WHERE id=?').get(f.id).report_json,'null');
+  assert.equal((await routeApi(request(f.path+'/groq-summary','POST',{finalizeOnly:true,transcriptHash:scope.transcriptHash}),f.env)).status,409);
+  const later=await(await routeApi(request(f.path+'/groq-summary-gap-bundle?format=txt'),f.env)).text();assert.match(later,/raw:8/);assert.match(later,/검토 필요·미완료/);assert.match(later,/원시구간 완료 9/);
+  for(let index=10;index<groups.length;index++){
+   f.db.prepare("UPDATE yta_operations SET created_at=? WHERE id=? AND state='DONE'").run(new Date(Date.now()-120_000).toISOString(),f.id+':groq-summary:'+scope.transcriptHash+':raw:'+(index-1));
+   nextResponseId=groups[index][0].id;
+   const continued=await routeApi(request(url,'POST',{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:'raw:'+index,executeOnce:true}),f.env);assert.equal(continued.status,202,await continued.clone().text());
+  }
+  const complete=await(await routeApi(request(url),f.env)).json();assert.equal(complete.bundleAvailable,true);assert.equal(complete.completedRawStages,groups.length-1);assert.equal(complete.heldRawStages,1);assert.equal(complete.pendingRawStages,0);assert.equal(complete.finalSummaryComplete,false);
+  const finalBundle=await(await routeApi(request(f.path+'/groq-summary-gap-bundle'),f.env)).json();assert.equal(finalBundle.missingRanges[0].completed,false);assert.equal(finalBundle.sourceCheckpointCount,groups.length-1);
+  assert.equal(f.db.prepare('SELECT report_json FROM jobs WHERE id=?').get(f.id).report_json,'null');assert.equal((await routeApi(request(f.path+'/groq-summary','POST',{finalizeOnly:true,transcriptHash:scope.transcriptHash}),f.env)).status,409);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('reviewed gap approval remains bound to the source and key before dispatch',async()=>{
+ const {f,groups}=await reviewedGapFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const url=f.path+'/groq-summary-gap',scope=await(await routeApi(request(url),f.env)).json(),body={step:'execute',transcriptHash:scope.transcriptHash,expectedStage:'raw:9',executeOnce:true};
+  assert.equal((await routeApi(request(url,'POST',{...scope,step:'approve',freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,summaryOnly:true,acknowledgeMissingRaw8:true,acknowledgeNoFinalReport:true,noAutomaticRetry:true}),f.env)).status,200);
+  globalThis.fetch=async()=>{calls++;throw Error('PROVIDER_CALL_FORBIDDEN');};
+  f.env.GROQ_API_KEY='ROTATED_TEST_KEY';assert.equal((await routeApi(request(url,'POST',body),f.env)).status,409);assert.equal(calls,0);
+  f.env.GROQ_API_KEY='NOT_REAL_TEST_KEY';
+  const oldAudit=f.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(f.id).audit_json;
+  f.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify({...JSON.parse(oldAudit),changedAfterGapApproval:true}),f.id);
+  const changed=await routeApi(request(url,'POST',body),f.env);assert.equal(changed.status,409,await changed.clone().text());assert.equal(calls,0);
+  f.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(oldAudit,f.id);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM yta_operations WHERE id=?').get(f.id+':groq-summary:'+scope.transcriptHash+':raw:9').n,0);
+  assert.equal(groups[8][0].id,scope.gap.firstId);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('reviewed gap rejects an uncertain correction or a later 429 without another dispatch',async()=>{
+ const {f,approval,correctionResult}=await reviewedGapFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  f.db.prepare("UPDATE yta_operations SET error_code='429' WHERE id=?").run(approval.attemptId);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-gap'),f.env)).status,409);
+  f.db.prepare("UPDATE yta_operations SET error_code='SUMMARY_RESPONSE_INVALID',result_json=? WHERE id=?").run(correctionResult,approval.attemptId);
+  const scope=await(await routeApi(request(f.path+'/groq-summary-gap'),f.env)).json();
+  const approved=await routeApi(request(f.path+'/groq-summary-gap','POST',{...scope,step:'approve',freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,summaryOnly:true,acknowledgeMissingRaw8:true,acknowledgeNoFinalReport:true,noAutomaticRetry:true}),f.env);assert.equal(approved.status,200);
+  globalThis.fetch=async()=>{calls++;return Response.json({}, {status:429});};
+  assert.equal((await routeApi(request(f.path+'/groq-summary-gap','POST',{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:'raw:9',executeOnce:true}),f.env)).status,409);assert.equal(calls,1);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-gap'),f.env)).status,409);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-gap','POST',{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:'raw:9',executeOnce:true}),f.env)).status,409);assert.equal(calls,1);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
 
 test('owner-only raw:8 diagnostic classifies saved response without writes, provider calls or private text',async()=>{
  const f=await fixture({large:true,sourceText:'가'.repeat(350)}),priorFetch=globalThis.fetch;let fetches=0;
