@@ -1,6 +1,6 @@
 import {InputError} from './core.mjs';
 import {ProviderError} from './adapters.mjs';
-import {capacityIdentity} from './observed-capacity.mjs';
+import {capacityIdentity,capacityIdentityForCredentialSnapshot} from './observed-capacity.mjs';
 import {runOwnedGroqSummary} from './provider-keys.mjs';
 import {COMPLETE_SYNTHESIS_CONTRACT,COMPLETE_SYNTHESIS_INPUT_LIMIT,COMPLETE_SYNTHESIS_OUTPUT_LIMIT,persistedSynthesisNode} from './groq-complete-synthesis.mjs';
 
@@ -36,7 +36,7 @@ async function sharedLedger(env,excluded=[]){
  if(minute+PER_CALL>MINUTE_CAP||day+PER_CALL>DAY_CAP)fail('SYNTHESIS_LOCAL_LIMIT','공유 Groq 앱 사용 상한을 기다리세요.');
 }
 
-export async function synthesisAction({body,env,id,job,source,sourceHash,manifest,notes,progress,failures,ownedJob,sourceOf,completeSource,verifyGrounding}){
+export async function synthesisAction({body,env,id,job,source,sourceHash,manifest,notes,progress,failures,recoveredFailureIds=[],ownedJob,sourceOf,completeSource,verifyGrounding}){
  if(env.ENABLE_COMPLETE_SYNTHESIS!=='true'||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')fail('SYNTHESIS_FEATURE_DISABLED','Groq Free 종합 실행은 비활성입니다.');
  if(progress.complete)fail('SYNTHESIS_ALREADY_COMPLETE','모든 종합 노드가 이미 저장됐습니다.');
  if(failures.some(item=>!item.dispositionReviewed))fail('SYNTHESIS_FAILURE_REVIEW_REQUIRED','원시 단계 실패 사용량을 별도로 검토하세요.');
@@ -75,7 +75,7 @@ export async function synthesisAction({body,env,id,job,source,sourceHash,manifes
   if(stopped.meta?.changes!==1)fail('SYNTHESIS_APPROVAL_CHANGED','종합 승인 취소 상태가 변경됐습니다.');return {cancelled:true,providerCalls:0};
  }
  if(body.step!=='execute'||body.approvalId!==aId||body.expectedNode!==progress.next.key||body.requestSha256!==progress.next.requestSha256||body.executeOnce!==true)throw new InputError('현재 다음 종합 노드만 한 번 실행하세요.');
- const excluded=failures.flatMap(item=>item.evidence.map(evidence=>evidence.operationId));
+ const excluded=[...failures.flatMap(item=>item.evidence.map(evidence=>evidence.operationId)),...recoveredFailureIds];
  await sharedLedger(env,excluded);
  const recentCutoff=new Date(Date.now()-SPACING_MS).toISOString(),minuteCutoff=new Date(Date.now()-60_000).toISOString(),dayCutoff=new Date(Date.now()-86_400_000).toISOString();
  const claim=await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT ?,j.id,'groq-summary-synthesis',?,'CLAIMED',?,? FROM jobs j JOIN yta_sources s ON s.job_id=j.id JOIN yta_operations a ON a.job_id=j.id WHERE j.id=? AND j.owner_id='owner' AND j.audit_json=? AND (j.report_json IS NULL OR j.report_json='null') AND s.raw=? AND s.segments_json=? AND a.id=? AND a.provider='groq-summary-synthesis-approval' AND a.state='APPROVED' AND a.result_json=? AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=? AND d.provider='deletion' AND d.state='DELETING') AND NOT EXISTS(SELECT 1 FROM yta_operations o WHERE ${sharedProvider.replaceAll('provider','o.provider')} AND o.state='CLAIMED') AND NOT EXISTS(SELECT 1 FROM yta_operations o WHERE ${sharedProvider.replaceAll('provider','o.provider')} AND o.state='FAILED_UNCERTAIN' AND o.id NOT IN (${excluded.map(()=>'?').join(',')||"''"})) AND COALESCE((SELECT SUM(o.units) FROM yta_operations o WHERE ${sharedProvider.replaceAll('provider','o.provider')} AND o.${counted.replaceAll('state','state')} AND o.created_at>?),0)+?<=? AND COALESCE((SELECT SUM(o.units) FROM yta_operations o WHERE ${sharedProvider.replaceAll('provider','o.provider')} AND o.${counted.replaceAll('state','state')} AND o.created_at>?),0)+?<=? AND NOT EXISTS(SELECT 1 FROM yta_operations o WHERE ${sharedProvider.replaceAll('provider','o.provider')} AND o.state='DONE' AND o.created_at>?)`).bind(opId,PER_CALL,now(),JSON.stringify({key:progress.next.key,requestSha256:progress.next.requestSha256,approvalId:aId}),id,JSON.stringify(job.audit),source.raw,source.segments_json,aId,savedApproval.result_json,id+':deleting',...excluded,minuteCutoff,PER_CALL,MINUTE_CAP,dayCutoff,PER_CALL,DAY_CAP,recentCutoff).run();
@@ -85,6 +85,7 @@ export async function synthesisAction({body,env,id,job,source,sourceHash,manifes
   const fresh=await ownedJob(env,id),current=await completeSource(env,fresh,sourceOf);
   if(current.transcriptHash!==sourceHash||JSON.stringify(fresh.audit)!==JSON.stringify(job.audit)||env.ENABLE_COMPLETE_SYNTHESIS!=='true'||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true'||approval.expiresAt<=Date.now()||await capacityIdentity(env,'groq')!==keyIdentity)fail('SYNTHESIS_DISPATCH_CHANGED','원본·승인·키 또는 무료 조건이 변경됐습니다.');
   const credential=await env.DB.prepare("SELECT cipher_version,iv_b64,ciphertext_b64,updated_at FROM provider_credentials WHERE owner_id='owner' AND provider='groq'").first();
+  if(await capacityIdentityForCredentialSnapshot(env,'groq',credential)!==keyIdentity)fail('SYNTHESIS_DISPATCH_CHANGED','승인한 키 세대가 변경됐습니다.');
   const row=await env.DB.prepare("SELECT 1 AS ok FROM yta_operations a JOIN yta_operations o ON o.job_id=a.job_id JOIN jobs j ON j.id=a.job_id JOIN yta_sources s ON s.job_id=j.id WHERE a.id=? AND a.provider='groq-summary-synthesis-approval' AND a.state='APPROVED' AND a.result_json=? AND o.id=? AND o.provider='groq-summary-synthesis' AND o.state='CLAIMED' AND j.owner_id='owner' AND j.audit_json=? AND (j.report_json IS NULL OR j.report_json='null') AND s.raw=? AND s.segments_json=? AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=? AND d.provider='deletion' AND d.state='DELETING') AND NOT EXISTS(SELECT 1 FROM yta_operations x WHERE x.provider IN ('groq-summary','groq-summary-synthesis') AND x.state='CLAIMED' AND x.id!=?) AND ((?=0 AND NOT EXISTS(SELECT 1 FROM provider_credentials c WHERE c.owner_id='owner' AND c.provider='groq')) OR (?=1 AND EXISTS(SELECT 1 FROM provider_credentials c WHERE c.owner_id='owner' AND c.provider='groq' AND c.cipher_version=? AND c.iv_b64=? AND c.ciphertext_b64=? AND c.updated_at=?)))").bind(aId,savedApproval.result_json,opId,JSON.stringify(job.audit),source.raw,source.segments_json,id+':deleting',opId,credential?1:0,credential?1:0,credential?.cipher_version??null,credential?.iv_b64??null,credential?.ciphertext_b64??null,credential?.updated_at??null).first();
   if(!row||approval.expiresAt<=Date.now()||env.ENABLE_COMPLETE_SYNTHESIS!=='true'||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')fail('SYNTHESIS_DISPATCH_CHANGED','최종 D1 승인·작업 범위가 변경됐습니다.');
  };

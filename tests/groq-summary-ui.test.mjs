@@ -128,7 +128,7 @@ test('checkpoint recovery UI requires explicit review and never starts a provide
  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,clearInterval,detailRequestIsCurrent};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCheckpointRecoveryChoice({id:'job-a'},target,0);
  await new Promise(resolve=>setTimeout(resolve,0));
- const host=target.children[0],form=host.children.find(item=>item.tag==='form');assert.ok(form);assert.equal(calls.length,1);
+ const host=target.children[0],reviewHost=host.children[2],form=reviewHost.children.find(item=>item.tag==='form');assert.ok(form);assert.equal(calls.length,1);
  assert.match(host.children[0].textContent,/Groq Free 저장 보고서 무호출 복구 · 전체 요약 아님/);
  assert.equal(form.children.at(-1).textContent,'Groq Free raw:0 저장 보고서만 복구');
  await form.onsubmit({preventDefault(){}});assert.equal(calls.length,1);
@@ -136,7 +136,17 @@ test('checkpoint recovery UI requires explicit review and never starts a provide
  await form.onsubmit({preventDefault(){}});
  assert.deepEqual(calls.map(call=>call.method),['GET','POST','GET']);
  assert.equal(calls[1].body.confirmNoProviderCall,true);assert.equal(calls[1].body.confirmNoAutomaticContinuation,true);
- assert.equal(host.children.some(item=>item.tag==='form'),false);
+ assert.equal(reviewHost.children.some(item=>item.tag==='form'),false);
+});
+
+test('checkpoint recovery selector remains usable when raw:0 has no recovery evidence',async()=>{
+ const node=tag=>({tag,children:[],dataset:{},hidden:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div');target.dataset.jobId='job-a';
+ const paths=[],preview={responseSha256:'a'.repeat(64),contractHash:'b'.repeat(64),firstRange:{firstId:20,lastId:21},summaryCount:1,chapterCount:1,storedUtf16Length:900,failedOperationId:'raw10-failure',confirmedUsage:{totalTokens:390},evidenceHash:'c'.repeat(64),stage:'raw:10'};
+ const fetcher=async(path)=>{paths.push(path);return path.includes('raw:0')?{ok:false,status:409,headers:{get:()=> 'application/json'},json:async()=>({error:{code:'SUMMARY_RECOVERY_NOT_FOUND'}})}:{ok:true,headers:{get:()=> 'application/json'},json:async()=>preview};};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showGroqCheckpointRecoveryChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:()=>node('div')},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,clearInterval,detailRequestIsCurrent};runInNewContext(source,context);context.__state.view='library';context.__show({id:'job-a'},target,0);
+ await new Promise(resolve=>setImmediate(resolve));const host=target.children[0],selector=host.children[1].children[0];assert.equal(selector.tag,'input');selector.value='10';await selector.onchange();await new Promise(resolve=>setTimeout(resolve,10));
+ assert.deepEqual(paths.map(path=>path.slice(path.indexOf('?'))),['?stage=raw:0','?stage=raw:10']);assert.ok(host.children[2].children.some(item=>item.tag==='form'),JSON.stringify(host.children[2].children.map(item=>[item.tag,item.textContent])));
 });
 
 test('bundle UI labels the intermediate artifact and uses a separate export URL',async()=>{
@@ -257,9 +267,9 @@ test('lost checkpoint recovery POST and failed status GET leave only read-only r
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqCheckpointRecoveryChoice=showGroqCheckpointRecoveryChoice;globalThis.__state=state;');
  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,clearInterval,detailRequestIsCurrent};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCheckpointRecoveryChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
- const host=target.children[0],form=host.children.find(item=>item.tag==='form');for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
+ const host=target.children[0],reviewHost=host.children[2],form=reviewHost.children.find(item=>item.tag==='form');for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
  await form.onsubmit({preventDefault(){}});assert.equal(posts,1);assert.equal(form.children.at(-1).disabled,true);
  await form.onsubmit({preventDefault(){}});assert.equal(posts,1);
- const refresh=host.children.find(item=>item.tag==='button'&&item.textContent==='저장 상태 다시 확인');assert.ok(refresh);await refresh.onclick();
- assert.equal(posts,1);assert.equal(gets,3);assert.equal(host.children.some(item=>item.tag==='form'),false);
+ const refresh=reviewHost.children.find(item=>item.tag==='button'&&item.textContent==='저장 상태 다시 확인');assert.ok(refresh);await refresh.onclick();
+ assert.equal(posts,1);assert.equal(gets,3);assert.equal(reviewHost.children.some(item=>item.tag==='form'),false);
 });

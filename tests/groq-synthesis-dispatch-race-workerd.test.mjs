@@ -29,3 +29,12 @@ for(const mode of ['cancel','expire'])test(`synthesis final D1 read blocks ${mod
   assert.notEqual(reply.status,200);assert.equal(reads,3);assert.equal(calls,0);assert.equal((await f.DB.prepare("SELECT state FROM yta_operations WHERE provider='groq-summary-synthesis'").first()).state,'BLOCKED');
  }finally{globalThis.fetch=oldFetch;Date.now=clock;await f.mf.dispose();}
 });
+test('synthesis rejects a key replacement between identity check and credential snapshot',async()=>{
+ const f=await setup(),oldFetch=globalThis.fetch;let calls=0,rotations=0;
+ try{
+  f.env.DB={prepare(sql){const stmt=f.DB.prepare(sql);if(sql!=="SELECT cipher_version,iv_b64,ciphertext_b64,updated_at FROM provider_credentials WHERE owner_id='owner' AND provider='groq'")return stmt;return {async first(){rotations++;await f.DB.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','groq',1,'offline-iv','offline-cipher',?)").bind(new Date().toISOString()).run();return stmt.first();}};}};
+  globalThis.fetch=async()=>{calls++;throw Error('unexpected provider fetch');};
+  const reply=await routeApi(request(f.url,'POST',{step:'execute',approvalId:f.approval.approvalId,expectedNode:f.scope.nextSynthesisStage,requestSha256:f.scope.nextSynthesisRequestSha256,executeOnce:true}),f.env);
+  assert.equal(rotations,1);assert.equal(calls,0);assert.equal(reply.status,409,await reply.clone().text());assert.equal((await f.DB.prepare("SELECT state FROM yta_operations WHERE provider='groq-summary-synthesis'").first()).state,'BLOCKED');
+ }finally{globalThis.fetch=oldFetch;await f.mf.dispose();}
+});

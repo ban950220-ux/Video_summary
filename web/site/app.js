@@ -453,15 +453,17 @@ function showGroqCheckpointRecoveryChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),baseUrl='/api/jobs/'+job.id+'/groq-summary-checkpoint-recovery',host=el('div');target.append(host);
  let stageIndex=0;const url=()=>baseUrl+'?stage=raw:'+stageIndex;
  let postUncertain=false;
+ const selector=el('input',{attrs:{type:'number',min:'0',step:'1',value:'0'}});
+ const label=el('label',{text:'복구할 원시 구간 번호 (raw:0부터)'});label.append(selector);
+ const reviewHost=el('div');host.append(el('h2',{text:'Groq Free 저장 보고서 무호출 복구 · 전체 요약 아님'}),label,reviewHost);
+ selector.onchange=()=>{const next=Number(selector.value);if(!Number.isSafeInteger(next)||next<0){selector.value=String(stageIndex);return;}stageIndex=next;postUncertain=false;render().catch(error=>{if(current()){empty(reviewHost);reviewHost.append(el('p',{text:'선택한 원시 구간의 복구 근거를 확인할 수 없습니다.'}));toast(safeError(error));}});};
  const refresh=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});
- refresh.onclick=async()=>{refresh.disabled=true;try{await render();}catch(error){if(current()){host.append(el('p',{text:'복구 저장 상태를 확인할 수 없습니다. 재전송하지 마세요.'}));toast(safeError(error));}}finally{refresh.disabled=false;}};
+ refresh.onclick=async()=>{refresh.disabled=true;try{await render();}catch(error){if(current()){reviewHost.append(el('p',{text:'복구 저장 상태를 확인할 수 없습니다. 재전송하지 마세요.'}));toast(safeError(error));}}finally{refresh.disabled=false;}};
  const render=async()=>{
-  const review=await api(url());if(!current())return;empty(host);
-  const selector=el('input',{attrs:{type:'number',min:'0',step:'1',value:String(stageIndex)}});selector.onchange=()=>{const next=Number(selector.value);if(!Number.isSafeInteger(next)||next<0){selector.value=String(stageIndex);return;}stageIndex=next;postUncertain=false;render().catch(error=>{if(current())toast(safeError(error));});};
-  const label=el('label',{text:'복구할 원시 구간 번호 (raw:0부터)'});label.append(selector);
-  host.append(el('h2',{text:'Groq Free 저장 보고서 무호출 복구 · 전체 요약 아님'}),label,el('p',{text:`raw:${stageIndex} 저장 응답 SHA-256 ${review.responseSha256} · 원본 계약 ${review.contractHash} · ${review.firstRange.firstId}–${review.firstRange.lastId}번 근거 · 요약 ${review.summaryCount}개, 장 ${review.chapterCount}개, 저장 JSON ${review.storedUtf16Length}자.`}),el('p',{text:`기존 실패 ${review.failedOperationId}와 실제 사용량 ${review.confirmedUsage.totalTokens}토큰은 그대로 보존합니다. 이 복구는 모델을 호출하지 않고 다음 요약 단계도 시작하지 않습니다.`}),refresh);
-  if(review.recovered){host.append(el('p',{text:'검증된 저장 보고서를 체크포인트로 연결했습니다. 다음 단계는 별도 Groq Free 범위 검토·승인·실행이 필요합니다.'}));return;}
-  if(postUncertain){host.append(el('p',{text:'복구 POST 응답이 확인되지 않았습니다. 저장 상태를 읽기로 재확인하세요. 같은 요청을 다시 보내지 않습니다.'}));return;}
+  const selectedIndex=stageIndex,review=await api(url());if(!current()||selectedIndex!==stageIndex)return;empty(reviewHost);
+  reviewHost.append(el('p',{text:`raw:${stageIndex} 저장 응답 SHA-256 ${review.responseSha256} · 원본 계약 ${review.contractHash} · ${review.firstRange.firstId}–${review.firstRange.lastId}번 근거 · 요약 ${review.summaryCount}개, 장 ${review.chapterCount}개, 저장 JSON ${review.storedUtf16Length}자.`}),el('p',{text:`기존 실패 ${review.failedOperationId}와 실제 사용량 ${review.confirmedUsage.totalTokens}토큰은 그대로 보존합니다. 이 복구는 모델을 호출하지 않고 다음 요약 단계도 시작하지 않습니다.`}),refresh);
+  if(review.recovered){reviewHost.append(el('p',{text:'검증된 저장 보고서를 체크포인트로 연결했습니다. 다음 단계는 별도 Groq Free 범위 검토·승인·실행이 필요합니다.'}));return;}
+  if(postUncertain){reviewHost.append(el('p',{text:'복구 POST 응답이 확인되지 않았습니다. 저장 상태를 읽기로 재확인하세요. 같은 요청을 다시 보내지 않습니다.'}));return;}
   const form=el('form',{className:'fields'}),labels=['저장 응답의 원본·계약·응답 해시와 근거 검증 범위를 확인했습니다.','기존 사용량을 보존하고 모델 호출 및 다음 단계 자동 실행이 없음을 확인했습니다.'];
   const checks=labels.map(label=>{const input=el('input',{attrs:{type:'checkbox',required:'true'}}),row=el('label',{text:label});row.prepend(input);form.append(row);return input;});
   const submit=el('button',{className:'btn secondary small',text:`Groq Free raw:${stageIndex} 저장 보고서만 복구`});form.append(submit);
@@ -470,9 +472,9 @@ function showGroqCheckpointRecoveryChoice(job,target,requestId){
    try{await api(url(),{method:'POST',body:{step:'recover',evidenceHash:review.evidenceHash,failedOperationId:review.failedOperationId,contractHash:review.contractHash,responseSha256:review.responseSha256,acknowledgeOriginalUsage:review.confirmedUsage.totalTokens,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true}});if(current())await render();}
    catch(error){if(current()){postUncertain=true;toast(safeError(error));await refresh.onclick();}}
   };
-  host.append(form);
+  reviewHost.append(form);
  };
- render().catch(error=>{if(current()){empty(host);host.append(el('p',{text:'저장된 첫 보고서의 복구 근거를 확인할 수 없습니다.'}));toast(safeError(error));}});
+ render().catch(error=>{if(current()){empty(reviewHost);reviewHost.append(el('p',{text:'선택한 원시 구간의 복구 근거를 확인할 수 없습니다.'}));toast(safeError(error));}});
 }
 function showGroqPilotChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),url='/api/jobs/'+job.id+'/groq-summary-pilot',host=el('div');target.append(host);
