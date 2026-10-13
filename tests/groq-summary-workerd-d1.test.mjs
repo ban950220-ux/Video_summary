@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {routeApi} from '../src/worker.mjs';
 import {promptAudit} from '../src/groq-summary.mjs';
+import {groqLiveResolutionProofSql} from '../src/groq-synthesis-execution.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
@@ -15,6 +16,8 @@ test('first Groq summary admission executes every SQL binding against local Work
  try{
   const DB=await mf.getD1Database('DB');
   for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  assert.equal((await DB.prepare(`SELECT ${groqLiveResolutionProofSql} AS ok`).bind('[]').first()).ok,1);
+  await DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT json_extract(c.value,'$.failedId')||':live-resolved',j.id,'groq-summary-live-resolution',0,'DONE',?,c.value FROM jobs j CROSS JOIN json_each(?) c WHERE ${groqLiveResolutionProofSql}`).bind(new Date().toISOString(),'[]','[]').run();
   await assert.rejects(DB.prepare('SELECT ? AS value').bind().first(),/Wrong number of parameter bindings/);
   const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
   const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:5892.888,title:'Local D1 summary test'}),env)).json();
@@ -44,7 +47,7 @@ test('first Groq summary admission executes every SQL binding against local Work
    return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify(report)}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390}});
   };
   const pending=routeApi(request(path+'/groq-summary','POST',{}),env);
-  await providerStarted;
+  const early=await Promise.race([providerStarted.then(()=>null),pending.then(async reply=>({status:reply.status,body:await reply.clone().text()})),new Promise(resolve=>setTimeout(()=>resolve('provider did not start within five seconds'),5000))]);assert.equal(early,null,JSON.stringify(early));
   const claimed=await status();
   assert.equal(claimed.activeStage.state,'CLAIMED');assert.equal(claimed.activeStage.key,'raw:0');assert.equal(claimed.providerReceiptVerified,false);assert.equal(claimed.completedStages,0);
   release();
