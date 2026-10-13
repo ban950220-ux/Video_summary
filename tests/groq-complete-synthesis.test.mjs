@@ -44,7 +44,9 @@ test('79 raw stages complete offline through bounded tree, full coverage, saved 
   return {summary:[evidence(left.evidenceIds[0])],chapters:[evidence(left.evidenceIds[0]),evidence(right.evidenceIds[0])],claims:[],numbers:[],critical:[],conclusion:'원문 범위의 결론'};
  }});
  assert.equal(calls,notes.length-1);assert.equal(merged.operations.length,calls);
- await assert.rejects(completedSynthesisReport({manifest,notes,root:merged.root,checkpoints:f.checkpoints,excerpts:f.excerpts,segments:f.segments,verifyGrounding:assertGrounding}),/SYNTHESIS_MEANING_REVIEW_REQUIRED/);
+ const automatic=await completedSynthesisReport({manifest,notes,root:merged.root,checkpoints:f.checkpoints,excerpts:f.excerpts,segments:f.segments,verifyGrounding:assertGrounding});
+ assert.equal(automatic.meaningReview.status,'AUTO_CHECK_PASSED_HUMAN_UNREVIEWED');assert.equal(automatic.meaningReview.reviewedStages.length,0);assert.equal(automatic.appendix.length,79);assert.ok(automatic.meaningReview.suspiciousRanges.some(item=>item.index===8));
+ assert.match(markdownReport({title:'자동 보고서',status:'completed',duration_seconds:5688,source_type:'audio',report:automatic,audit:{audioProcessingCoverage:1}},{raw:f.segments.map(item=>item.text).join('\n'),segments:f.segments}),/사람의 전체 의미 검토 없음/);
  const semanticReview={confirmMeaningAgainstSource:true,confirmRootIncludesAllMeaningfulPoints:true,reviewedStages:reviewedStages(manifest),manifestSha256:manifest.manifestSha256,rootSha256:await digest(merged.root),reviewedAt:new Date().toISOString()};
  const final=await completedSynthesisReport({manifest,notes,root:merged.root,checkpoints:f.checkpoints,excerpts:f.excerpts,segments:f.segments,verifyGrounding:assertGrounding,semanticReview});
  assert.equal(final.synthesisComplete,true);assert.equal(final.kind,'GROQ_EVIDENCE_LINKED');assert.equal(final.appendix.length,79);
