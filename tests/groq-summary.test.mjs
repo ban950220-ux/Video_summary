@@ -64,6 +64,46 @@ async function reviewedGapFixture(){
  return {...setup,groups,correctionResult};
 }
 
+test('reviewed gap recomputes the historical correction quote instead of trusting matching copies',async()=>{
+ const {f,quote}=await reviewedGapFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const url=f.path+'/groq-summary-gap',approvalId=f.id+':groq-summary:correction:'+f.plan.transcriptHash+':raw:8:approval',savedApproval=f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(approvalId).result_json,savedQuote=f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(quote.quoteId).result_json;
+  assert.equal((await routeApi(request(url),f.env)).status,200);
+  const mutated={...JSON.parse(savedQuote),sourceSha256:'b'.repeat(64),originalApprovalSha256:'c'.repeat(64),keyIdentity:'wrong-historical-key',model:'wrong-model',requestSha256:'d'.repeat(64),maxCalls:2,reservedUnits:1};
+  const {quoteSha256:_oldHash,...unsigned}=mutated;mutated.quoteSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(unsigned))))).map(value=>value.toString(16).padStart(2,'0')).join('');
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify(mutated),quote.quoteId);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify({quoteId:quote.quoteId,quote:mutated}),approvalId);
+  globalThis.fetch=async()=>{calls++;throw Error('PROVIDER_CALL_FORBIDDEN');};
+  assert.equal((await routeApi(request(url),f.env)).status,409);assert.equal(calls,0);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(savedQuote,quote.quoteId);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(savedApproval,approvalId);
+  assert.equal((await routeApi(request(url),f.env)).status,200);
+  const invalidExpiry={...JSON.parse(savedQuote),expiresAt:Date.parse(f.db.prepare('SELECT created_at FROM yta_operations WHERE id=?').get(quote.quoteId).created_at)+900_000};
+  const {quoteSha256:_priorHash,...expiryUnsigned}=invalidExpiry;invalidExpiry.quoteSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(expiryUnsigned))))).map(value=>value.toString(16).padStart(2,'0')).join('');
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify(invalidExpiry),quote.quoteId);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify({quoteId:quote.quoteId,quote:invalidExpiry}),approvalId);
+  assert.equal((await routeApi(request(url),f.env)).status,409);assert.equal(calls,0);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('reviewed gap rejects invalid reasoning usage and a non-token usage ledger row',async()=>{
+ const {f,approval,correctionResult}=await reviewedGapFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const url=f.path+'/groq-summary-gap';assert.equal((await routeApi(request(url),f.env)).status,200);
+  globalThis.fetch=async()=>{calls++;throw Error('PROVIDER_CALL_FORBIDDEN');};
+  for(const reasoningTokens of [-1,1577,'53']){
+   const mutated=JSON.parse(correctionResult);mutated.reviewResult.usage.reasoningTokens=reasoningTokens;
+   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify(mutated),approval.attemptId);
+   assert.equal((await routeApi(request(url),f.env)).status,409,String(reasoningTokens));assert.equal(calls,0);
+  }
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(correctionResult,approval.attemptId);
+  f.db.prepare("UPDATE usage_events SET unit='audio_seconds' WHERE job_id=? AND provenance='PROVIDER_REPORTED_CORRECTIVE_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN'").run(f.id);
+  assert.equal((await routeApi(request(url),f.env)).status,409);assert.equal(calls,0);
+  f.db.prepare("UPDATE usage_events SET unit='actual_total_tokens' WHERE job_id=? AND provenance='PROVIDER_REPORTED_CORRECTIVE_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN'").run(f.id);
+  assert.equal((await routeApi(request(url),f.env)).status,200);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
 test('reviewed gap contract preserves raw:8 failures, executes only raw:9 and exposes an incomplete bundle',async()=>{
  const {f,groups,approval,failedId,oldResult,correctionResult}=await reviewedGapFixture(),oldFetch=globalThis.fetch;let calls=0;
  try{
@@ -120,6 +160,7 @@ test('reviewed gap rejects an uncertain correction or a later 429 without anothe
   globalThis.fetch=async()=>{calls++;return Response.json({}, {status:429});};
   assert.equal((await routeApi(request(f.path+'/groq-summary-gap','POST',{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:'raw:9',executeOnce:true}),f.env)).status,409);assert.equal(calls,1);
   assert.equal((await routeApi(request(f.path+'/groq-summary-gap'),f.env)).status,409);
+  const status=await(await routeApi(request(f.path+'/groq-summary-status'),f.env)).json();assert.equal(status.activeStage.key,'raw:9');assert.equal(status.activeStage.state,'FAILED_UNCERTAIN');assert.equal(status.activeStage.errorCode,'429');assert.equal(status.rawProgress.heldRawStages,1);
   assert.equal((await routeApi(request(f.path+'/groq-summary-gap','POST',{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:'raw:9',executeOnce:true}),f.env)).status,409);assert.equal(calls,1);
  }finally{globalThis.fetch=oldFetch;f.db.close();}
 });
