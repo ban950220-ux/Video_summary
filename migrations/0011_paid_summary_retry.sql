@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS yta_paid_retry_attempts(
  source_sha256 TEXT NOT NULL, request_sha256 TEXT NOT NULL, quote_sha256 TEXT NOT NULL,
  quote_json TEXT NOT NULL, model TEXT NOT NULL, credential_generation TEXT NOT NULL,
  max_micro_usd INTEGER NOT NULL CHECK(max_micro_usd>0), max_calls INTEGER NOT NULL CHECK(max_calls=1),
- expires_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('APPROVED','RESERVED','RELEASED','UNCERTAIN','SETTLED')),
+ expires_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('APPROVED','CANCELLED','RESERVED','RELEASED','UNCERTAIN','SETTLED')),
  token_estimate_micro_usd INTEGER, usage_json TEXT, outcome TEXT,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );

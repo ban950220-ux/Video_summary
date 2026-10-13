@@ -6,6 +6,9 @@ import {createHash} from 'node:crypto';
 import {fullSummaryRequest} from '../src/paid-summary-contract.mjs';
 import {summaryInputAudit,promptAudit} from '../src/groq-summary.mjs';
 import {routeApi} from '../src/worker.mjs';
+import {handleSiteRequest} from '../src/site-worker.mjs';
+import {runPaidGeminiFullSummary} from '../src/paid-summary-adapter.mjs';
+import {generateKeyPairSync,sign} from 'node:crypto';
 import {encryptProviderKey} from '../src/vault.mjs';
 
 const call=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
@@ -80,5 +83,89 @@ test('bad second response keeps a full receipt and revalidation never calls prov
   const before=f.db.prepare('SELECT state,usage_json,token_estimate_micro_usd FROM yta_paid_retry_attempts WHERE id=?').get(approved.attemptId);assert.equal(before.state,'SETTLED');
   const again=await f.api('paid-retry-revalidate','POST',{attemptId:approved.attemptId,confirmNoProviderCall:true});assert.notEqual(again.status,200);assert.equal(fetched,1);
   const after=f.db.prepare('SELECT state,usage_json,token_estimate_micro_usd FROM yta_paid_retry_attempts WHERE id=?').get(approved.attemptId);assert.deepEqual({...after},{...before});
+ }finally{f.db.close();}
+});
+
+test('a complete second receipt can recover from RESERVED with zero new calls and keeps review cost state',async()=>{
+ const f=await fixture();try{
+  paidGate(f.env);const issued=await(await f.api('paid-retry-quote','POST',{})).json();
+  const approved=await(await f.api('paid-retry-approve','POST',{quoteId:issued.quoteId,priorReservationId:'old-reservation',maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmPriorCostPreserved:true,confirmNoAutomaticRetry:true,confirmNoAutomaticFallback:true})).json();
+  let fetched=0;f.env.PAID_SUMMARY_TEST_RUNNER=async({beforeFetch})=>{await beforeFetch();fetched++;return {text:JSON.stringify(report),usage:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20}};};
+  assert.equal((await f.api('paid-retry-execute','POST',{attemptId:approved.attemptId})).status,200);
+  f.db.prepare("UPDATE jobs SET report_json='null',status='TRANSCRIBED',audit_json=json_remove(audit_json,'$.summaryProvider','$.externalFactCheck') WHERE id=?").run(f.id);
+  f.db.prepare("UPDATE yta_paid_retry_attempts SET state='RESERVED',outcome=NULL,usage_json=NULL,token_estimate_micro_usd=NULL WHERE id=?").run(approved.attemptId);
+  f.db.prepare("UPDATE yta_paid_retry_receipts SET state='RECEIVED' WHERE attempt_id=?").run(approved.attemptId);
+  const before=await(await f.api('paid-retry-status')).json();assert.equal(before.receipt.revalidationAvailable,true);assert.equal(before.attempt.state,'RESERVED');
+  const result=await f.api('paid-retry-revalidate','POST',{attemptId:approved.attemptId,confirmNoProviderCall:true});assert.equal(result.status,200,await result.clone().text());assert.equal(fetched,1);
+  const after=await(await f.api('paid-retry-status')).json();assert.equal(after.finalReportSaved,true);assert.equal(after.attempt.state,'RESERVED');assert.equal(after.receipt.state,'SAVED');
+ }finally{f.db.close();}
+});
+
+test('second approval cancels separately and leaves first cost ledger unchanged',async()=>{
+ const f=await fixture();try{
+  paidGate(f.env);const issued=await(await f.api('paid-retry-quote','POST',{})).json();
+  const approved=await(await f.api('paid-retry-approve','POST',{quoteId:issued.quoteId,priorReservationId:'old-reservation',maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmPriorCostPreserved:true,confirmNoAutomaticRetry:true,confirmNoAutomaticFallback:true})).json();
+  const firstBefore={...f.db.prepare("SELECT state,outcome,token_estimate_micro_usd FROM yta_paid_summary_reservations WHERE id='old-reservation'").get()};
+  const cancelled=await f.api('paid-retry-cancel','POST',{attemptId:approved.attemptId,confirmCancelSecondAttempt:true});assert.equal(cancelled.status,200,await cancelled.clone().text());
+  const state=await(await f.api('paid-retry-status')).json();assert.equal(state.attempt.state,'CANCELLED');assert.equal(state.firstTrial.trialState,'CONSUMED');assert.equal(state.cancelReady,false);assert.deepEqual({...f.db.prepare("SELECT state,outcome,token_estimate_micro_usd FROM yta_paid_summary_reservations WHERE id='old-reservation'").get()},firstBefore);
+  let fetched=0;f.env.PAID_SUMMARY_TEST_RUNNER=async()=>{fetched++;throw Error('MUST_NOT_CALL');};const blocked=await f.api('paid-retry-execute','POST',{attemptId:approved.attemptId});assert.notEqual(blocked.status,200);assert.equal(fetched,0);
+  const again=await f.api('paid-retry-cancel','POST',{attemptId:approved.attemptId,confirmCancelSecondAttempt:true});assert.notEqual(again.status,200);
+ }finally{f.db.close();}
+});
+
+
+test('concurrent approval and execute still admit one real adapter fetch',async()=>{
+ const f=await fixture();try{
+  paidGate(f.env);const issued=await(await f.api('paid-retry-quote','POST',{})).json();
+  const body={quoteId:issued.quoteId,priorReservationId:'old-reservation',maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmPriorCostPreserved:true,confirmNoAutomaticRetry:true,confirmNoAutomaticFallback:true};
+  const approvals=await Promise.all([f.api('paid-retry-approve','POST',body),f.api('paid-retry-approve','POST',body)]);assert.equal(approvals.filter(item=>item.status===200).length,1);
+  const approved=await approvals.find(item=>item.status===200).json();let fetches=0;
+  f.env.PAID_SUMMARY_TEST_RUNNER=options=>runPaidGeminiFullSummary({...options,fetchFn:async()=>{fetches++;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(report)}]}}],usageMetadata:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20},modelVersion:'mock'});}});
+  const executions=await Promise.all([f.api('paid-retry-execute','POST',{attemptId:approved.attemptId}),f.api('paid-retry-execute','POST',{attemptId:approved.attemptId})]);assert.equal(executions.filter(item=>item.status===200).length,1);assert.equal(fetches,1);
+  const receipt=f.db.prepare('SELECT response_complete,state FROM yta_paid_retry_receipts WHERE attempt_id=?').get(approved.attemptId);assert.equal(receipt.response_complete,1);assert.equal(receipt.state,'SAVED');
+ }finally{f.db.close();}
+});
+
+test('final awaited D1 expiry check and failed receipt write stop unsafe replay',async()=>{
+ const f=await fixture();try{
+  paidGate(f.env);const issued=await(await f.api('paid-retry-quote','POST',{})).json();const body={quoteId:issued.quoteId,priorReservationId:'old-reservation',maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmPriorCostPreserved:true,confirmNoAutomaticRetry:true,confirmNoAutomaticFallback:true};
+  const approved=await(await f.api('paid-retry-approve','POST',body)).json();let fetches=0;
+  const originalDB=f.env.DB;f.env.DB={prepare(sql){const statement=originalDB.prepare(sql);if(!sql.startsWith('SELECT a.expires_at FROM yta_paid_retry_attempts'))return statement;return {bind(...args){const bound=statement.bind(...args);return {async first(){const row=await bound.first();return {...row,expires_at:Date.now()-1};}};}};}};
+  f.env.PAID_SUMMARY_TEST_RUNNER=options=>runPaidGeminiFullSummary({...options,fetchFn:async()=>{fetches++;throw Error('MUST_NOT_FETCH');}});
+  const expired=await f.api('paid-retry-execute','POST',{attemptId:approved.attemptId});assert.notEqual(expired.status,200);assert.equal(fetches,0);assert.equal(f.db.prepare('SELECT state FROM yta_paid_retry_attempts WHERE id=?').get(approved.attemptId).state,'RELEASED');
+ }finally{f.db.close();}
+ const g=await fixture();try{
+  paidGate(g.env);const issued=await(await g.api('paid-retry-quote','POST',{})).json();const approved=await(await g.api('paid-retry-approve','POST',{quoteId:issued.quoteId,priorReservationId:'old-reservation',maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmPriorCostPreserved:true,confirmNoAutomaticRetry:true,confirmNoAutomaticFallback:true})).json();
+  let fetches=0;const originalDB=g.env.DB;g.env.DB={prepare(sql){if(sql.startsWith('INSERT OR IGNORE INTO yta_paid_retry_receipts'))return {bind(){return {async run(){throw Error('OFFLINE_RECEIPT_WRITE_FAILURE');}};}};return originalDB.prepare(sql);}};
+  g.env.PAID_SUMMARY_TEST_RUNNER=options=>runPaidGeminiFullSummary({...options,fetchFn:async()=>{fetches++;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:JSON.stringify(report)}]}}],usageMetadata:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20}});}});
+  const failed=await g.api('paid-retry-execute','POST',{attemptId:approved.attemptId});assert.notEqual(failed.status,200);assert.equal(fetches,1);assert.equal(g.db.prepare('SELECT state FROM yta_paid_retry_attempts WHERE id=?').get(approved.attemptId).state,'UNCERTAIN');
+  const replay=await g.api('paid-retry-execute','POST',{attemptId:approved.attemptId});assert.notEqual(replay.status,200);assert.equal(fetches,1);
+ }finally{g.db.close();}
+});
+
+test('owner Access and same-origin CSRF protect second approval and cancellation',async()=>{
+ const f=await fixture();try{
+  const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048}),jwk=publicKey.export({format:'jwk'}),domain='https://paid-retry.cloudflareaccess.com',aud='paid-retry-audience',origin='https://private.example.com';
+  Object.assign(f.env,{ACCESS_TEAM_DOMAIN:domain,ACCESS_AUD:aud,ACCESS_OWNER_EMAIL:'owner@example.com'});
+  const encode=x=>Buffer.from(JSON.stringify(x)).toString('base64url'),now=Math.floor(Date.now()/1000),header=encode({alg:'RS256',kid:'retry'}),payload=encode({iss:domain,aud:[aud],iat:now-10,exp:now+3600,email:'owner@example.com'}),token=`${header}.${payload}.${sign('RSA-SHA256',Buffer.from(`${header}.${payload}`),privateKey).toString('base64url')}`;
+  const fetcher=async()=>Response.json({keys:[{...jwk,kid:'retry',alg:'RS256'}]});
+  const site=(action,method,body,headers={})=>handleSiteRequest(new Request(origin+f.path+'/'+action,{method,headers:{'Cf-Access-Jwt-Assertion':token,...headers},body:method==='POST'?JSON.stringify(body??{}):undefined}),f.env,{fetcher,nowMs:Date.now()});
+  const unauthorized=await handleSiteRequest(new Request(origin+f.path+'/paid-retry-status'),f.env,{fetcher,nowMs:Date.now()});assert.equal(unauthorized.status,401);
+  const quoted=await site('paid-retry-quote','POST',{}, {'Origin':origin,'Content-Type':'application/json'});assert.equal(quoted.status,200,await quoted.clone().text());const issued=await quoted.json();
+  const body={quoteId:issued.quoteId,priorReservationId:'old-reservation',maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmPriorCostPreserved:true,confirmNoAutomaticRetry:true,confirmNoAutomaticFallback:true};
+  paidGate(f.env);assert.equal((await site('paid-retry-approve','POST',body,{'Origin':'https://foreign.example','Content-Type':'application/json'})).status,403);
+  const approved=await site('paid-retry-approve','POST',body,{'Origin':origin,'Content-Type':'application/json'});assert.equal(approved.status,200,await approved.clone().text());const attempt=await approved.json();
+  assert.equal((await site('paid-retry-cancel','POST',{attemptId:attempt.attemptId,confirmCancelSecondAttempt:true},{'Origin':'https://foreign.example','Content-Type':'application/json'})).status,403);
+  assert.equal((await site('paid-retry-cancel','POST',{attemptId:attempt.attemptId,confirmCancelSecondAttempt:true},{'Origin':origin,'Content-Type':'application/json'})).status,200);
+ }finally{f.db.close();}
+});
+
+test('real adapter mock fetch is called once and receipt revalidation calls it zero times',async()=>{
+ const f=await fixture();try{
+  paidGate(f.env);const issued=await(await f.api('paid-retry-quote','POST',{})).json();const approved=await(await f.api('paid-retry-approve','POST',{quoteId:issued.quoteId,priorReservationId:'old-reservation',maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmPriorCostPreserved:true,confirmNoAutomaticRetry:true,confirmNoAutomaticFallback:true})).json();
+  let fetches=0;f.env.PAID_SUMMARY_TEST_RUNNER=options=>runPaidGeminiFullSummary({...options,fetchFn:async()=>{fetches++;return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'{}'}]}}],usageMetadata:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20}});}});
+  assert.notEqual((await f.api('paid-retry-execute','POST',{attemptId:approved.attemptId})).status,200);assert.equal(fetches,1);
+  assert.notEqual((await f.api('paid-retry-revalidate','POST',{attemptId:approved.attemptId,confirmNoProviderCall:true})).status,200);assert.equal(fetches,1);
+  assert.equal(f.db.prepare('SELECT state FROM yta_paid_retry_attempts WHERE id=?').get(approved.attemptId).state,'SETTLED');
  }finally{f.db.close();}
 });

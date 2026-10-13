@@ -128,7 +128,7 @@ test('lost paid approval response reconciles read-only and reconnect restores on
  await form.onsubmit({preventDefault(){}});assert.equal(posts.length,2);assert.ok(host.children.some(item=>item.textContent?.includes('승인된 유료 전체 종합 요약 1회 실행')));
  target.replaceChildren();context.__showSummaryChoice(job,target,0);await new Promise(resolve=>setTimeout(resolve,0));let choiceHost=target.children[0];assert.ok(choiceHost.children.some(item=>item.textContent?.includes('승인된 유료 전체 종합 요약 1회 실행')));
  reservations=[{state:'UNCERTAIN'}];target.replaceChildren();context.__showSummaryChoice(job,target,0);await new Promise(resolve=>setTimeout(resolve,0));choiceHost=target.children[0];assert.equal(choiceHost.children.some(item=>item.textContent?.includes('승인된 유료 전체 종합 요약 1회 실행')),false);
- await choiceHost.children.find(item=>item.textContent?.includes('유료 승인 취소')).onclick();assert.ok(posts.at(-1).endsWith('paid-summary-cancel'));assert.equal(approval.state,'CANCELLED');assert.equal(posts.some(path=>path.endsWith('paid-summary-execute')),false);
+ assert.equal(choiceHost.children.some(item=>item.textContent?.includes('첫 시도 승인 취소')),false);assert.equal(posts.some(path=>path.endsWith('paid-summary-cancel')),false);assert.equal(posts.some(path=>path.endsWith('paid-summary-execute')),false);
 });
 
 test('library reopen renders paid full report with evidence and TXT export',async()=>{
@@ -214,4 +214,17 @@ test('paid retry UI shows both costs and requires explicit second approval',asyn
  let host=target.children[0];assert.ok(host.children.some(item=>item.textContent?.includes('19360')));const button=host.children.find(item=>item.tag==='button'&&item.textContent?.includes('별도 1회 재실행'));assert.ok(button);await button.onclick();
  host=target.children[0];const form=host.children.find(item=>item.tag==='form');assert.ok(form);assert.equal(calls.filter(call=>call.method==='POST').length,1);await form.onsubmit({preventDefault(){}});assert.equal(calls.filter(call=>call.path.endsWith('/paid-retry-approve')).length,0);
  form.children[0].children[0].checked=true;await form.onsubmit({preventDefault(){}});const approval=calls.find(call=>call.path.endsWith('/paid-retry-approve'));assert.equal(approval.body.priorReservationId,'old-reservation');assert.equal(approval.body.maxCalls,1);assert.equal(approval.body.confirmPriorCostPreserved,true);assert.equal(calls.some(call=>call.path.endsWith('/paid-retry-execute')),false);
+});
+
+test('saved second paid report keeps UNCERTAIN cost warning and offers separate cancellation only before send',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
+ const old={approval:{state:'APPROVED'},reservations:[{state:'SETTLED'}],costReconciliation:'SETTLED_PRIOR',executionReady:false};
+ const retry={firstTrial:{reservationState:'SETTLED',outcome:'REPORT_NOT_SAVED',reservedMicroUsd:720896,tokenEstimateMicroUsd:19360},attempt:{id:'retry-1',state:'UNCERTAIN',maxMicroUsd:720896,tokenEstimateMicroUsd:null},cancelReady:false,quoteIssueReady:false,ordinaryPaidGateReady:true};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showReport=showReport;globalThis.__showSummaryChoice=showSummaryChoice;globalThis.__state=state;');
+ const choice={transcription:{complete:true},summary:{complete:false,savedRawStages:0,rawStages:1,remainingRawStages:1},free:{model:'free',inputTokensUpperPerCall:1,outputTokensUpperPerCall:1,eta:{reason:'UNKNOWN'}},paid:{executionEnabled:false,quoteIssueReady:false,reason:'기존 승인',model:'gemini',priceVersion:'v1',inputTokensUpper:1,outputTokensUpper:1,maxRetries:0,maxTaxBps:10000,maxMicroUsd:720896}};
+ const fetcher=async(path)=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>path.endsWith('/paid-summary-status')?old:path.endsWith('/paid-retry-status')?retry:choice});
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent,clearTimeout,setTimeout:()=>0};runInNewContext(source,context);context.__state.view='library';
+ context.__showReport({id:'job-a',status:'COMPLETE',report:{kind:'GEMINI_PAID_FULL_EVIDENCE_LINKED',summary:[],chapters:[],claims:[],numbers:[],critical:[],conclusion:'끝'}},target,true);await new Promise(resolve=>setTimeout(resolve,0));
+ assert.ok(target.children.some(item=>item.textContent?.includes('검토가 필요합니다')&&item.textContent?.includes('UNCERTAIN')));
+ target.replaceChildren();context.__showSummaryChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));const host=target.children[0];assert.equal(host.children.some(item=>item.textContent?.includes('첫 시도 승인 취소')),false);assert.equal(host.children.some(item=>item.textContent?.includes('두 번째 시도 승인 취소')),false);
 });

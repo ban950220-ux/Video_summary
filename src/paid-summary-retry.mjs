@@ -55,7 +55,7 @@ async function status(env,id,job){
  const quote=await env.DB.prepare("SELECT id,quote_json,prior_reservation_id FROM yta_paid_retry_quotes WHERE job_id=? AND owner_id='owner' AND state='ISSUED' AND expires_at>? ORDER BY created_at DESC LIMIT 1").bind(id,Date.now()).first();
  const blockedReason=job.report?'SUMMARY_ALREADY_EXISTS':!previous?'PAID_RETRY_PRIOR_NOT_TERMINAL':retainedResponse(previous)?'PAID_REVALIDATION_FIRST':attempt?'PAID_RETRY_ALREADY_APPROVED':null;
  const firstTrial=previous?{approvalId:previous.approval_id,reservationId:previous.reservation_id,trialState:previous.trial_state,reservationState:previous.state,outcome:previous.outcome,reservedMicroUsd:previous.reserved_micro_usd,tokenEstimateMicroUsd:previous.token_estimate_micro_usd,usage:previous.usage_json?checkedJson(previous.usage_json):null,receiptRetained:retainedResponse(previous)}:null;
- return json({jobId:id,firstTrial,attempt:publicAttempt(attempt),receipt:publicReceipt(receipt),issuedQuote:quote&&!blockedReason?{quoteId:quote.id,quote:checkedJson(quote.quote_json),priorReservationId:quote.prior_reservation_id,ordinaryPaidGateReady:paidExecutionEnabled(env)}:null,quoteIssueReady:!blockedReason,blockedReason,ordinaryPaidGateReady:paidExecutionEnabled(env),gateEvidenceRequired:['CURRENT_MODEL_ACCESS_FOR_KEY_AND_PROJECT','APPLICABLE_TAX_UPPER_BOUND','CURRENT_CATALOG_PRICE_AND_PREPAID_BALANCE'],finalReportSaved:job.report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED',priorCostPreserved:true,providerInvoiceAmount:'UNKNOWN'});
+ return json({jobId:id,firstTrial,attempt:publicAttempt(attempt),receipt:publicReceipt(receipt),cancelReady:attempt?.state==='APPROVED'&&!receipt,issuedQuote:quote&&!blockedReason?{quoteId:quote.id,quote:checkedJson(quote.quote_json),priorReservationId:quote.prior_reservation_id,ordinaryPaidGateReady:paidExecutionEnabled(env)}:null,quoteIssueReady:!blockedReason,blockedReason,ordinaryPaidGateReady:paidExecutionEnabled(env),gateEvidenceRequired:['CURRENT_MODEL_ACCESS_FOR_KEY_AND_PROJECT','APPLICABLE_TAX_UPPER_BOUND','CURRENT_CATALOG_PRICE_AND_PREPAID_BALANCE'],finalReportSaved:job.report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED',priorCostPreserved:true,providerInvoiceAmount:'UNKNOWN'});
 }
 async function issueQuote(env,id,job,sourceOf){
  const previous=await eligible(env,id,job),DB=env.DB;
@@ -118,6 +118,12 @@ async function settle(DB,id,attemptId,quote,usage,outcome){
  const changed=await DB.prepare("UPDATE yta_paid_retry_attempts SET state='SETTLED',outcome=?,usage_json=?,token_estimate_micro_usd=?,updated_at=? WHERE id=? AND job_id=? AND state='RESERVED'").bind(outcome,JSON.stringify({promptTokenCount:input,candidatesTokenCount:output,thoughtsTokenCount:thinking}),estimate,now(),attemptId,id).run();
  if(changed.meta?.changes!==1)fail('PAID_RETRY_LEDGER_CHANGED');
 }
+async function cancel(env,id,body){
+ if(typeof body?.attemptId!=='string'||body.confirmCancelSecondAttempt!==true)fail('PAID_RETRY_CANCEL_REQUIRED');
+ const changed=await env.DB.prepare("UPDATE yta_paid_retry_attempts SET state='CANCELLED',outcome='CANCELLED_BEFORE_SEND',updated_at=? WHERE id=? AND job_id=? AND owner_id='owner' AND state='APPROVED' AND NOT EXISTS(SELECT 1 FROM yta_paid_retry_receipts p WHERE p.attempt_id=yta_paid_retry_attempts.id)").bind(now(),body.attemptId,id).run();
+ if(changed.meta?.changes!==1)fail('PAID_RETRY_CANCEL_BLOCKED','두 번째 시도가 전송됐거나 승인 상태가 아닙니다. 상태를 확인하세요.');
+ return {cancelled:true,attemptId:body.attemptId,firstTrialPreserved:true,automaticRefund:false};
+}
 async function execute(env,id,job,sourceOf,ownedJob,body){
  if(!paidExecutionEnabled(env))fail('PAID_EXECUTION_DISABLED');
  if(typeof body?.attemptId!=='string')fail('PAID_RETRY_APPROVAL_REQUIRED');
@@ -144,7 +150,7 @@ async function execute(env,id,job,sourceOf,ownedJob,body){
   return json({job:await ownedJob(env,id),persisted:true,attemptId:attempt.id,priorCostPreserved:true,providerInvoiceAmount:'UNKNOWN'});
  }catch(error){
   if(!dispatched)await env.DB.prepare("UPDATE yta_paid_retry_attempts SET state='RELEASED',outcome='PROVEN_NOT_SENT',updated_at=? WHERE id=? AND state='RESERVED'").bind(now(),attempt.id).run();
-  else if(result?.usage||recordedUsage)await settle(env.DB,id,attempt.id,quote,result?.usage??recordedUsage,'REPORT_NOT_SAVED');
+  else if(result?.usage||recordedUsage){const saved=await env.DB.prepare("SELECT json_extract(report_json,'$.kind') AS kind FROM jobs WHERE id=? AND owner_id='owner'").bind(id).first();await settle(env.DB,id,attempt.id,quote,result?.usage??recordedUsage,saved?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED'?'REPORT_SAVED':'REPORT_NOT_SAVED');}
   else await env.DB.prepare("UPDATE yta_paid_retry_attempts SET state='UNCERTAIN',updated_at=? WHERE id=? AND state='RESERVED'").bind(now(),attempt.id).run();
   throw error;
  }
@@ -155,7 +161,7 @@ async function revalidate(env,id,job,sourceOf,ownedJob,body){
  if(job.report)fail('SUMMARY_ALREADY_EXISTS');
  const attempt=await env.DB.prepare("SELECT * FROM yta_paid_retry_attempts WHERE id=? AND job_id=? AND owner_id='owner'").bind(body.attemptId,id).first();
  const current=await currentScope(env,job,sourceOf),receipt=attempt?await receiptFor(env.DB,id,attempt.id):null;
- if(!attempt||!['SETTLED','UNCERTAIN'].includes(attempt.state)||!receipt||receipt.response_complete!==1||receipt.http_status!==200||typeof receipt.response_json!=='string'||bytes.encode(receipt.response_json).length!==receipt.response_bytes||receipt.response_bytes>PAID_RECEIPT_MAX_BYTES||await hash(receipt.response_json)!==receipt.response_sha256||receipt.source_sha256!==current.sourceSha256||receipt.request_sha256!==current.requestSha256||receipt.quote_sha256!==attempt.quote_sha256||attempt.source_sha256!==current.sourceSha256||attempt.request_sha256!==current.requestSha256||attempt.quote_sha256!==checkedJson(attempt.quote_json).quoteSha256||await digest(Object.fromEntries(Object.entries(checkedJson(attempt.quote_json)).filter(([key])=>key!=='quoteSha256')))!==attempt.quote_sha256)fail('PAID_RETRY_RECEIPT_SCOPE_CHANGED');
+ if(!attempt||!['SETTLED','UNCERTAIN','RESERVED'].includes(attempt.state)||!receipt||receipt.response_complete!==1||receipt.http_status!==200||typeof receipt.response_json!=='string'||bytes.encode(receipt.response_json).length!==receipt.response_bytes||receipt.response_bytes>PAID_RECEIPT_MAX_BYTES||await hash(receipt.response_json)!==receipt.response_sha256||receipt.source_sha256!==current.sourceSha256||receipt.request_sha256!==current.requestSha256||receipt.quote_sha256!==attempt.quote_sha256||attempt.source_sha256!==current.sourceSha256||attempt.request_sha256!==current.requestSha256||attempt.quote_sha256!==checkedJson(attempt.quote_json).quoteSha256||await digest(Object.fromEntries(Object.entries(checkedJson(attempt.quote_json)).filter(([key])=>key!=='quoteSha256')))!==attempt.quote_sha256)fail('PAID_RETRY_RECEIPT_SCOPE_CHANGED');
  const envelope=checkedJson(receipt.response_json),candidate=envelope.candidates?.[0],output=candidate?.content?.parts?.map(part=>part.text||'').join('')||'';
  if(candidate?.finishReason!=='STOP'||!output)fail('PAID_RETRY_RECEIPT_NOT_COMPLETE');
  let report;try{report=validatePaidFullReport(output,current.source);}catch(error){await markReceipt(env.DB,id,attempt.id,'VALIDATION_FAILED',error.safeValidationCode??error.code??'PAID_RESPONSE_UNGROUNDED');throw error;}
@@ -169,6 +175,7 @@ export async function handlePaidRetryAction(request,env,{id,action,job,sourceOf,
  if(action==='paid-retry-status'&&request.method==='GET')return status(env,id,job);
  if(action==='paid-retry-quote'&&request.method==='POST')return json(await issueQuote(env,id,job,sourceOf));
  if(action==='paid-retry-approve'&&request.method==='POST')return json(await approve(env,id,job,sourceOf,await request.json()));
+ if(action==='paid-retry-cancel'&&request.method==='POST')return json(await cancel(env,id,await request.json()));
  if(action==='paid-retry-execute'&&request.method==='POST')return execute(env,id,job,sourceOf,ownedJob,await request.json());
  if(action==='paid-retry-revalidate'&&request.method==='POST')return revalidate(env,id,job,sourceOf,ownedJob,await request.json());
  return json({error:{code:'METHOD_NOT_ALLOWED'}},405);
