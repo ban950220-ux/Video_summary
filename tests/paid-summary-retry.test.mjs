@@ -5,6 +5,7 @@ import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {fullSummaryRequest} from '../src/paid-summary-contract.mjs';
 import {summaryInputAudit,promptAudit} from '../src/groq-summary.mjs';
+import {capacityIdentity} from '../src/observed-capacity.mjs';
 import {routeApi} from '../src/worker.mjs';
 import {handleSiteRequest} from '../src/site-worker.mjs';
 import {runPaidGeminiFullSummary} from '../src/paid-summary-adapter.mjs';
@@ -12,6 +13,13 @@ import {generateKeyPairSync,sign} from 'node:crypto';
 import {encryptProviderKey} from '../src/vault.mjs';
 
 const call=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+function historicalFirstRequest(source,job){
+ const body=structuredClone(fullSummaryRequest(source,promptAudit(job)).body);
+ const revised='summary는 영상 전체의 핵심, chapters는 시작부터 끝까지 시간 순서를 따른 장이며 발언이 있는 모든 10분 시간 창마다 그 창의 전사 ID를 근거로 연결한 장을 최소 하나씩 포함한다. claims는 발언자 미상 여부를 유지한 주장, numbers는 근거 있는 수치, critical은 근거 있는 한계다. summary,chapters,claims,numbers,critical의 각 항목은 {text:string,evidenceIds:number[]} 형식이며 evidenceIds에는 입력 전사에 실제 있는 ID만 넣는다. 정확히 이 다섯 배열과 conclusion 문자열만 있는 JSON 객체를 출력한다. 수치와 단위 및 직접 인용은 각 항목의 근거 전사에서 확인된 것만 쓰고, 확인할 수 없으면 해당 항목에서 제외한다.';
+ const original='summary는 영상 전체의 핵심, chapters는 시작부터 끝까지 고르게 시간 순서를 따른 장, claims는 발언자 미상 여부를 유지한 주장, numbers는 근거 있는 수치, critical은 근거 있는 한계다. 근거 ID를 각 항목에 붙이고 수치와 직접 인용은 해당 전사에서 확인된 것만 쓴다.';
+ assert.ok(body.contents[0].parts[0].text.includes(revised));body.contents[0].parts[0].text=body.contents[0].parts[0].text.replace(revised,original);
+ return body;
+}
 async function fixture(){
  const db=new DatabaseSync(':memory:');
  for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0008_paid_summary_budget.sql','../migrations/0009_paid_first_trial.sql','../migrations/0010_paid_summary_receipts.sql','../migrations/0011_paid_summary_retry.sql'])db.exec(readFileSync(new URL(file,import.meta.url),'utf8'));
@@ -21,14 +29,14 @@ async function fixture(){
  db.prepare("INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,'GROQ_OWNED_AUDIO',?)").run(id,segments.map(s=>s.text).join('\n'),JSON.stringify(segments),stamp);
  const root=Buffer.alloc(32,7),key=await encryptProviderKey(root,'gemini','OFFLINE_MOCK_KEY');
  db.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','gemini',?,?,?,?)").run(key.version,key.ivB64,key.ciphertextB64,stamp);
- const oldQuote={model:'gemini-3.1-flash-lite'},job={duration_seconds:2,audit:JSON.parse(db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(id).audit_json)},source={raw:segments.map(s=>s.text).join('\n'),segments,segments_json:JSON.stringify(segments)};
- const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex'),sourceSha=digest({raw:source.raw,segmentsJson:source.segments_json,auditJson:JSON.stringify(summaryInputAudit(job.audit))}),requestSha=digest(fullSummaryRequest(source,promptAudit(job)).body);
- db.prepare("INSERT INTO yta_paid_summary_approvals(id,job_id,owner_id,source_sha256,quote_sha256,quote_json,model,price_version,credential_generation,max_micro_usd,max_call_micro_usd,max_calls,expires_at,state,created_at) VALUES(?,?,'owner',?,?,?,?,?,?,720896,720896,1,?,'APPROVED',?)").run('old-approval',id,sourceSha,'b'.repeat(64),JSON.stringify(oldQuote),oldQuote.model,'old-price','old-key',Date.now()+600000,stamp);
+ const oldQuote={model:'gemini-3.1-flash-lite'},keyGeneration=await capacityIdentity({DB},'gemini'),job={duration_seconds:2,audit:JSON.parse(db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(id).audit_json)},source={raw:segments.map(s=>s.text).join('\n'),segments,segments_json:JSON.stringify(segments)};
+ const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex'),sourceSha=digest({raw:source.raw,segmentsJson:source.segments_json,auditJson:JSON.stringify(summaryInputAudit(job.audit))}),newRequestSha=digest(fullSummaryRequest(source,promptAudit(job)).body),requestSha=digest(historicalFirstRequest(source,job));assert.notEqual(requestSha,newRequestSha);
+ db.prepare("INSERT INTO yta_paid_summary_approvals(id,job_id,owner_id,source_sha256,quote_sha256,quote_json,model,price_version,credential_generation,max_micro_usd,max_call_micro_usd,max_calls,expires_at,state,created_at) VALUES(?,?,'owner',?,?,?,?,?,?,720896,720896,1,?,'APPROVED',?)").run('old-approval',id,sourceSha,'b'.repeat(64),JSON.stringify(oldQuote),oldQuote.model,'old-price',keyGeneration,Date.now()+600000,stamp);
  db.prepare("INSERT INTO yta_paid_summary_reservations(id,approval_id,call_index,reserved_micro_usd,token_estimate_micro_usd,usage_json,outcome,state,created_at) VALUES(? ,?,0,720896,19,?,'REPORT_NOT_SAVED','SETTLED',?)").run('old-reservation','old-approval',JSON.stringify({promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20}),stamp);
- db.prepare("INSERT INTO yta_paid_first_trial(id,approval_id,job_id,source_sha256,request_sha256,quote_sha256,model,credential_generation,expires_at,max_calls,max_micro_usd,evidence_json,state,created_at,consumed_at) VALUES('FIRST_GENERATION',?,?,?,?,?,?,?,?,1,720896,?,'CONSUMED',?,?)").run('old-approval',id,sourceSha,requestSha,'b'.repeat(64),oldQuote.model,'old-key',Date.now()+600000,'{}',stamp,stamp);
+ db.prepare("INSERT INTO yta_paid_first_trial(id,approval_id,job_id,source_sha256,request_sha256,quote_sha256,model,credential_generation,expires_at,max_calls,max_micro_usd,evidence_json,state,created_at,consumed_at) VALUES('FIRST_GENERATION',?,?,?,?,?,?,?,?,1,720896,?,'CONSUMED',?,?)").run('old-approval',id,sourceSha,requestSha,'b'.repeat(64),oldQuote.model,keyGeneration,Date.now()+600000,'{}',stamp,stamp);
  const env={DB,KEY_ENCRYPTION_KEY_B64:root.toString('base64'),ENABLE_PAID_SUMMARY:'false',ALLOW_PAID_API:'false'};
  const api=async(action,method='GET',body)=>routeApi(call(path+'/'+action,method,body),env);
- return {db,DB,id,path,env,api};
+ return {db,DB,id,path,env,api,oldRequestSha:requestSha,newRequestSha};
 }
 const report={summary:[{text:'첫 발언과 둘째 발언을 종합했다',evidenceIds:[1,2]}],chapters:[{text:'첫 발언',evidenceIds:[1]},{text:'둘째 발언',evidenceIds:[2]}],claims:[],numbers:[],critical:[],conclusion:'발언 두 개를 요약했다'};
 const paidGate=env=>Object.assign(env,{ENABLE_PAID_SUMMARY:'true',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true'});
@@ -37,19 +45,37 @@ test('a separate one-call approval preserves consumed first-trial cost and saves
  const f=await fixture();try{
   const initial=await(await f.api('paid-retry-status')).json();assert.equal(initial.firstTrial.tokenEstimateMicroUsd,19);assert.equal(initial.quoteIssueReady,true);assert.equal(initial.attempt,null);
   const quotedResponse=await f.api('paid-retry-quote','POST',{});assert.equal(quotedResponse.status,200,await quotedResponse.clone().text());const issued=await quotedResponse.json();
+  assert.equal(issued.quote.priorRequestSha256,f.oldRequestSha);assert.equal(issued.quote.requestSha256,f.newRequestSha);assert.notEqual(issued.quote.priorRequestSha256,issued.quote.requestSha256);
   const body={quoteId:issued.quoteId,priorReservationId:'old-reservation',maxMicroUsd:issued.quote.maxMicroUsd,maxCalls:1,expiresAt:issued.quote.expiresAt,confirmExactQuote:true,confirmPriorCostPreserved:true,confirmNoAutomaticRetry:true,confirmNoAutomaticFallback:true};
   const blocked=await f.api('paid-retry-approve','POST',body);assert.equal((await blocked.json()).error.code,'PAID_EXECUTION_DISABLED');
   paidGate(f.env);const approvedResponse=await f.api('paid-retry-approve','POST',body);assert.equal(approvedResponse.status,200,await approvedResponse.clone().text());const approved=await approvedResponse.json();
+  const bound=f.db.prepare('SELECT prior_request_sha256,request_sha256 FROM yta_paid_retry_attempts WHERE id=?').get(approved.attemptId);assert.equal(bound.prior_request_sha256,f.oldRequestSha);assert.equal(bound.request_sha256,f.newRequestSha);
   const duplicate=await f.api('paid-retry-approve','POST',body);assert.notEqual(duplicate.status,200);
   let calls=0;f.env.PAID_SUMMARY_TEST_RUNNER=async({beforeFetch})=>{await beforeFetch();calls++;return {text:JSON.stringify(report),usage:{promptTokenCount:300,candidatesTokenCount:90,thoughtsTokenCount:20}};};
   const executed=await f.api('paid-retry-execute','POST',{attemptId:approved.attemptId});assert.equal(executed.status,200,await executed.clone().text());assert.equal(calls,1);
   const second=await f.api('paid-retry-execute','POST',{attemptId:approved.attemptId});assert.notEqual(second.status,200);assert.equal(calls,1);
   const status=await(await f.api('paid-retry-status')).json();assert.equal(status.firstTrial.tokenEstimateMicroUsd,19);assert.equal(status.firstTrial.trialState,'CONSUMED');assert.equal(status.attempt.state,'SETTLED');assert.equal(status.attempt.outcome,'REPORT_SAVED');assert.equal(status.finalReportSaved,true);assert.equal(status.providerInvoiceAmount,'UNKNOWN');
+  assert.equal(f.db.prepare('SELECT request_sha256 FROM yta_paid_first_trial').get().request_sha256,f.oldRequestSha);
+  const receiptBinding=f.db.prepare('SELECT prior_request_sha256,request_sha256 FROM yta_paid_retry_receipts WHERE attempt_id=?').get(approved.attemptId);assert.equal(receiptBinding.prior_request_sha256,f.oldRequestSha);assert.equal(receiptBinding.request_sha256,f.newRequestSha);
   const old=f.db.prepare('SELECT state,outcome,token_estimate_micro_usd FROM yta_paid_summary_reservations WHERE id=?').get('old-reservation');assert.deepEqual({...old},{state:'SETTLED',outcome:'REPORT_NOT_SAVED',token_estimate_micro_usd:19});
   const txt=await(await f.api('export?format=txt')).text();assert.match(txt,/첫 발언/);
   const deleted=await routeApi(call(f.path,'DELETE'),f.env);assert.equal(deleted.status,200,await deleted.clone().text());
   const scrubbed=f.db.prepare('SELECT response_json,response_sha256,response_complete,state FROM yta_paid_retry_receipts WHERE attempt_id=?').get(approved.attemptId);assert.equal(scrubbed.response_json,null);assert.equal(scrubbed.response_sha256,null);assert.equal(scrubbed.response_complete,0);assert.equal(scrubbed.state,'SOURCE_DELETED');
  }finally{f.db.close();}
+});
+
+test('historical source, credential, and model mismatches reject a new quote before approval',async()=>{
+ for(const mode of ['source','credential','model']){
+  const f=await fixture();try{
+   if(mode==='source')f.db.prepare("UPDATE jobs SET audit_json=json_set(audit_json,'$.audioBoundaryAmbiguityCount',1) WHERE id=?").run(f.id);
+   if(mode==='credential')f.db.prepare("UPDATE provider_credentials SET updated_at='rotated' WHERE owner_id='owner' AND provider='gemini'").run();
+   if(mode==='model'){f.db.prepare("UPDATE yta_paid_first_trial SET model='historical-other-model'").run();f.db.prepare("UPDATE yta_paid_summary_approvals SET model='historical-other-model'").run();}
+   const response=await f.api('paid-retry-quote','POST',{});assert.equal(response.status,409,mode+': '+await response.clone().text());
+   assert.equal((await response.json()).error.code,'PAID_RETRY_PRIOR_CHANGED',mode);
+   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM yta_paid_retry_quotes').get().n,0,mode);
+   assert.equal(f.db.prepare('SELECT request_sha256 FROM yta_paid_first_trial').get().request_sha256,f.oldRequestSha,mode);
+  }finally{f.db.close();}
+ }
 });
 
 
@@ -95,6 +121,14 @@ test('a complete second receipt can recover from RESERVED with zero new calls an
   f.db.prepare("UPDATE jobs SET report_json='null',status='TRANSCRIBED',audit_json=json_remove(audit_json,'$.summaryProvider','$.externalFactCheck') WHERE id=?").run(f.id);
   f.db.prepare("UPDATE yta_paid_retry_attempts SET state='RESERVED',outcome=NULL,usage_json=NULL,token_estimate_micro_usd=NULL WHERE id=?").run(approved.attemptId);
   f.db.prepare("UPDATE yta_paid_retry_receipts SET state='RECEIVED' WHERE attempt_id=?").run(approved.attemptId);
+  const historicalSecondSha=createHash('sha256').update('previous second-attempt prompt').digest('hex');assert.notEqual(historicalSecondSha,issued.quote.requestSha256);
+  const historicalQuote={...issued.quote,requestSha256:historicalSecondSha};delete historicalQuote.quoteSha256;
+  const historicalQuoteSha=createHash('sha256').update(JSON.stringify(historicalQuote)).digest('hex');historicalQuote.quoteSha256=historicalQuoteSha;
+  f.db.prepare('UPDATE yta_paid_retry_attempts SET request_sha256=?,quote_sha256=?,quote_json=? WHERE id=?').run(historicalSecondSha,historicalQuoteSha,JSON.stringify(historicalQuote),approved.attemptId);
+  f.db.prepare('UPDATE yta_paid_retry_receipts SET request_sha256=?,quote_sha256=? WHERE attempt_id=?').run(historicalSecondSha,historicalQuoteSha,approved.attemptId);
+  f.db.prepare('UPDATE yta_paid_retry_receipts SET request_sha256=? WHERE attempt_id=?').run(issued.quote.requestSha256,approved.attemptId);
+  const wrongVersion=await f.api('paid-retry-revalidate','POST',{attemptId:approved.attemptId,confirmNoProviderCall:true});assert.equal((await wrongVersion.json()).error.code,'PAID_RETRY_RECEIPT_SCOPE_CHANGED');assert.equal(fetched,1);
+  f.db.prepare('UPDATE yta_paid_retry_receipts SET request_sha256=? WHERE attempt_id=?').run(historicalSecondSha,approved.attemptId);
   const before=await(await f.api('paid-retry-status')).json();assert.equal(before.receipt.revalidationAvailable,true);assert.equal(before.attempt.state,'RESERVED');
   const result=await f.api('paid-retry-revalidate','POST',{attemptId:approved.attemptId,confirmNoProviderCall:true});assert.equal(result.status,200,await result.clone().text());assert.equal(fetched,1);
   const after=await(await f.api('paid-retry-status')).json();assert.equal(after.finalReportSaved,true);assert.equal(after.attempt.state,'RESERVED');assert.equal(after.receipt.state,'SAVED');

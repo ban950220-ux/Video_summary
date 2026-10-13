@@ -8,12 +8,14 @@ Apply `migrations/0011_paid_summary_retry.sql` only after separate production ap
 
 | Object | Purpose and invariant |
 | --- | --- |
-| `yta_paid_retry_quotes` | One active `ISSUED` quote per job, bound to prior approval/reservation, source/request/quote hashes and expiry. |
+| `yta_paid_retry_quotes` | One active `ISSUED` quote per job, bound to prior approval/reservation, source, historical first request hash, current request hash, quote hash and expiry. |
 | `idx_paid_retry_issued_job` | Unique `job_id` only while quote state is `ISSUED`. |
 | `yta_paid_retry_attempts` | At most one second attempt per job; quote ID unique; `max_calls=1`; `APPROVED`, `CANCELLED`, `RESERVED`, `RELEASED`, `UNCERTAIN`, or `SETTLED`. |
-| `yta_paid_retry_receipts` | One bounded response receipt per attempt, with complete bytes/hash, model, finish reason and usage metadata. Job deletion scrubs response text/hash. |
+| `yta_paid_retry_receipts` | One bounded response receipt per attempt, with both request hashes, complete bytes/hash, model, finish reason and usage metadata. Job deletion scrubs response text/hash. |
 
 A read-only schema verification after approved migration should inspect `sqlite_master` for these four names and use `PRAGMA table_info` and `PRAGMA index_list` on the three tables. Confirm pre-existing table/index definitions are unchanged. Do not run the migration from a Worker Build. Runtime route `paid-retry-status` requires all three tables before it serves a status.
+
+The prompt was changed after the first trial. Its saved `request_sha256` must remain the old wire request hash. The second quote uses a new `request_sha256` and records the first hash separately as `prior_request_sha256` throughout quote, attempt, and receipt. Offline migration tests deliberately use different hashes and verify that source, key generation, and model changes still block a new quote. No production first-trial row or cost ledger is rewritten. A retained first response stays bound to its original quote and request during no-call revalidation.
 
 ## Runtime and deployment guard
 

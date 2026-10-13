@@ -70,9 +70,13 @@ export async function handlePaidSummaryAction(request,env,{id,action,job,sourceO
   await requirePaidReceiptSchema(env.DB);
   if(job.report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED')return json({job,cached:true,persisted:true,providerCalled:false,costReconciliation:await savedCostReconciliation(env,id),providerInvoiceAmount:'UNKNOWN'});
   if(job.report)fail('SUMMARY_ALREADY_EXISTS');
-  const current=await scope(env,job,sourceOf),approval=await env.DB.prepare("SELECT quote_json,quote_sha256 FROM yta_paid_summary_approvals WHERE job_id=? AND owner_id='owner'").bind(id).first();
+  // Recovery validates the bytes and request hash recorded for the original call.
+  // A later prompt revision must not reinterpret that receipt as a new request.
+  const source=(await completeSource(env,job,sourceOf)).source,sourceSnapshot=snapshot(job,source);
+  const sourceSha256=await digest(sourceSnapshot),approval=await env.DB.prepare("SELECT quote_json,quote_sha256 FROM yta_paid_summary_approvals WHERE job_id=? AND owner_id='owner'").bind(id).first();
   if(!approval)fail('PAID_RECEIPT_SCOPE_CHANGED');const quote=JSON.parse(approval.quote_json),{quoteSha256,...unsigned}=quote;
-  if(quote.jobId!==id||quote.sourceSha256!==current.sourceSha256||quote.requestSha256!==current.requestSha256||quoteSha256!==approval.quote_sha256||await digest(unsigned)!==quoteSha256)fail('PAID_RECEIPT_SCOPE_CHANGED');
+  if(quote.jobId!==id||quote.sourceSha256!==sourceSha256||quoteSha256!==approval.quote_sha256||await digest(unsigned)!==quoteSha256)fail('PAID_RECEIPT_SCOPE_CHANGED');
+  const current={source,sourceSnapshot,sourceSha256,requestSha256:quote.requestSha256};
   const receipt=await paidReceiptForRecovery(env.DB,{id,reservationId:body.reservationId,current,quote});
   let envelope,output;try{envelope=JSON.parse(receipt.response_json);const candidate=envelope.candidates?.[0];output=candidate?.content?.parts?.map(part=>part.text||'').join('')||'';if(receipt.http_status!==200||candidate?.finishReason!=='STOP'||!output)fail('PAID_RECEIPT_NOT_COMPLETE');}catch(error){await markPaidRevalidation(env.DB,body.reservationId,error instanceof ProviderError?error.code:'PAID_RESPONSE_INVALID');throw error;}
   await completePaidReceiptMetadata(env.DB,body.reservationId,{modelVersion:envelope.modelVersion??null,finishReason:envelope.candidates[0].finishReason,usage:envelope.usageMetadata??null});
