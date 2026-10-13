@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
 import {routeApi} from '../src/worker.mjs';
+import {handleSiteRequest} from '../src/site-worker.mjs';
 import {partitionGroqTranscript,groqInputUpperBound,groqSummaryMessages,groqRawPrompt,groqMergePrompt,promptAudit,GROQ_SUMMARY_INPUT_BOUND} from '../src/groq-summary.mjs';
 import {reportPrompt} from '../src/report.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
@@ -40,6 +41,37 @@ async function sibling(f,{approve=true}={}){
 }
 const valid=id=>({summary:[{text:'원문 검증',evidenceIds:[id]}],chapters:[{text:'시간대 요약',evidenceIds:[id]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'});
 const response=(body=valid(1),extra={})=>Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify(body)}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390,completion_tokens_details:{reasoning_tokens:10}},...extra});
+
+test('owner-only raw:8 diagnostic classifies saved response without writes, provider calls or private text',async()=>{
+ const f=await fixture({large:true,sourceText:'가'.repeat(350)}),priorFetch=globalThis.fetch;let fetches=0;
+ try{
+  const jobRow=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),groups=partitionGroqTranscript(f.segments,promptAudit({audit:JSON.parse(jobRow.audit_json),duration_seconds:jobRow.duration_seconds})),group=groups[8],id=group[0].id,hash=f.plan.transcriptHash,stamp=new Date().toISOString();
+  assert.ok(group&&groups.length>8);
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'STOPPED',?,?)").run(f.id+':groq-summary:approval:0',f.id,stamp,JSON.stringify({...f.approval,sequence:0}));
+  for(let i=0;i<8;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+hash+':raw:'+i,f.id,stamp,JSON.stringify({hash,key:'raw:'+i,report:valid(groups[i][0].id)}));
+  const failedId=f.id+':groq-summary:'+hash+':raw:8',url=f.path+'/groq-summary-stage-diagnostic?stage=raw%3A8';
+  const cases=[
+   ['SCHEMA',JSON.stringify({...valid(id),summary:'PRIVATE_RESPONSE_CONTENT'}),null],
+   ['EVIDENCE_ID',JSON.stringify({...valid(id),summary:[{text:'PRIVATE_RESPONSE_CONTENT',evidenceIds:[groups[9][0].id]}]}),1],
+   ['GROUP_COVERAGE',JSON.stringify({...valid(id),chapters:[]}),1],
+   ['UNSUPPORTED_NUMBER',JSON.stringify({...valid(id),summary:[{text:'PRIVATE_RESPONSE_CONTENT 999원',evidenceIds:[id]}]}),1],
+   ['UNSUPPORTED_QUOTE',JSON.stringify({...valid(id),summary:[{text:'“PRIVATE_RESPONSE_CONTENT”',evidenceIds:[id]}]}),1],
+   ['VALIDATION_PASS_ONLY',JSON.stringify({...valid(id),conclusion:'PRIVATE_RESPONSE_CONTENT'}),0],
+   ['JSON_PARSE','{',null],
+  ];
+  globalThis.fetch=async()=>{fetches++;throw Error('MODEL_CALL_FORBIDDEN');};
+  const denied=await handleSiteRequest(request(url),{...f.env,ACCESS_TEAM_DOMAIN:'https://owner.cloudflareaccess.com',ACCESS_AUD:'diagnostic-owner-audience',ACCESS_OWNER_EMAIL:'owner@example.com'});assert.equal(denied.status,401);
+  for(const [classification,raw,count] of cases){
+   const result=JSON.stringify({reviewResult:{partialText:raw,usage:{inputTokens:1152,outputTokens:987,totalTokens:2139}}});
+   f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?) ON CONFLICT(id) DO UPDATE SET result_json=excluded.result_json").run(failedId,f.id,stamp,result);
+   const before={...f.db.prepare('SELECT * FROM yta_operations WHERE id=?').get(failedId)},reply=await routeApi(request(url),f.env),body=await reply.json();
+   assert.equal(reply.status,200,classification);assert.equal(body.classification,classification);assert.equal(body.mismatchCount,count);assert.equal(body.stage,'raw:8');assert.equal(body.firstId,group[0].id);assert.equal(body.lastId,group.at(-1).id);assert.equal(body.segmentCount,group.length);assert.equal(body.providerCalls,0);assert.equal(body.responseCompleteVerified,false);assert.equal(body.providerReceiptVerified,false);
+   assert.ok(!JSON.stringify(body).includes('PRIVATE_RESPONSE_CONTENT'));assert.deepEqual({...f.db.prepare('SELECT * FROM yta_operations WHERE id=?').get(failedId)},before);
+  }
+  assert.equal(fetches,0);
+  const invalid=await routeApi(request(f.path+'/groq-summary-stage-diagnostic?stage=merge%3A0%3A0'),f.env);assert.equal(invalid.status,409);
+ }finally{globalThis.fetch=priorFetch;f.db.close();}
+});
 
 test('strict summary schema is included in the request estimate and fresh approval hash',async()=>{
  const f=await fixture(),old=fetch;let calls=0;

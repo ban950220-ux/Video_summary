@@ -154,19 +154,24 @@ function showGroqSummaryChoice(job,target,requestId){
  const reviewButton=el('button',{className:'btn secondary small',text:'Groq Free 요약 범위 검토'});
  const statusBox=el('section',{className:'summary-progress',attrs:{role:'status','aria-live':'polite','aria-atomic':'true'}});
  const headline=el('strong'),detail=el('p'),refreshButton=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});
+ const diagnosticButton=el('button',{className:'btn secondary small',text:'실패 단계 무호출 진단'}),diagnosticDetail=el('p');diagnosticButton.hidden=true;
  const scopeHost=el('div');
- statusBox.append(headline,detail,refreshButton);
+ statusBox.append(headline,detail,refreshButton,diagnosticButton,diagnosticDetail);
  target.append(reviewButton,statusBox,scopeHost);
- let status=null,phase='idle',reason=null,waitUntil=null,readSequence=0,running=false,runButton=null,finalizeButton=null,awaitingApprovalScope=null,unknownBaseline=null,safeUnsentInterruption=false,reviewedScope=null;
+ let status=null,phase='idle',reason=null,waitUntil=null,readSequence=0,running=false,runButton=null,finalizeButton=null,awaitingApprovalScope=null,unknownBaseline=null,safeUnsentInterruption=false,reviewedScope=null,diagnosticStage=null;
  const render=()=>{
   if(!current())return;
   const view=groqSummaryProgress(status,{phase,reason,waitUntil});
   headline.textContent=view.headline;
   detail.textContent=view.detail;
   statusBox.dataset.tone=view.tone;
+  const failedKey=status?.activeStage?.state==='FAILED_UNCERTAIN'&&/^raw:(0|[1-9][0-9]{0,2})$/.test(status.activeStage.key)?status.activeStage.key:null;
+  diagnosticButton.hidden=!failedKey;
+  if(failedKey!==diagnosticStage){diagnosticStage=failedKey;diagnosticDetail.textContent=failedKey?`실패 단계 ${failedKey} · 저장된 응답만 진단할 수 있습니다.`:'';}
   if(runButton)runButton.disabled=running||!view.canExecute;
   if(finalizeButton)finalizeButton.disabled=running||status?.finalReportSaved===true;
  };
+ diagnosticButton.onclick=async()=>{const key=diagnosticStage;if(!key)return;diagnosticButton.disabled=true;try{const result=await api('/api/jobs/'+job.id+'/groq-summary-stage-diagnostic?stage='+encodeURIComponent(key));if(current()&&diagnosticStage===key){const categories={EVIDENCE_ID:'근거 ID 범위',GROUP_COVERAGE:'장별 구간 근거',UNSUPPORTED_NUMBER:'근거 없는 수치',UNSUPPORTED_QUOTE:'근거 없는 직접 인용',SCHEMA:'보고서 형식',JSON_PARSE:'JSON 파싱',STORED_TEXT_UNAVAILABLE:'저장된 응답 없음',VALIDATION_PASS_ONLY:'현재 검증 통과'};diagnosticDetail.textContent=`${key} · ${categories[result.classification]??'분류 미확인'} · 원문 구간 ${result.firstId}–${result.lastId} (${result.segmentCount}개) · 불일치 ${result.mismatchCount??'미확인'}개${result.truncationPossible?' · 보존 텍스트 절단 가능':''} · 응답 완전성 미검증 · 제공자 호출 없음 · 복구 아님.`;}}catch(error){if(current()&&diagnosticStage===key)diagnosticDetail.textContent='무호출 진단을 확인할 수 없습니다. '+safeError(error);}finally{diagnosticButton.disabled=false;}};
  const setPhase=(next,nextReason=null,nextWait=null)=>{phase=next;reason=nextReason;waitUntil=nextWait;render();};
  const refreshStatus=async()=>{
   const sequence=++readSequence;
