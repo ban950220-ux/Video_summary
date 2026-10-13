@@ -89,7 +89,7 @@ export async function synthesisAction({body,env,id,job,source,sourceHash,manifes
  };
  try{
   await guard();
-  result=await runOwnedGroqSummary({env:{...env,GROQ_FREE_PLAN_CONFIRMED:'true'},messages:progress.next.request.messages,maxCompletionTokens:COMPLETE_SYNTHESIS_OUTPUT_LIMIT,beforeDispatch:guard,beforeFetch:async()=>{await guard();dispatched=true;}});
+  result=await runOwnedGroqSummary({env:{...env,GROQ_FREE_PLAN_CONFIRMED:'true'},messages:progress.next.request.messages,maxCompletionTokens:COMPLETE_SYNTHESIS_OUTPUT_LIMIT,reviewTextLimit:1_000_000,beforeDispatch:guard,beforeFetch:async()=>{await guard();dispatched=true;}});
   if(result.inputTokens>progress.next.request.inputUpper||result.totalTokens>PER_CALL)fail('SYNTHESIS_USAGE_OVER_BOUND','제공자 사용량이 승인 범위를 넘었습니다.');
   const record=await persistedSynthesisNode({next:progress.next,response:result.text,sourceSegments:source.segments,verifyGrounding});
   usageEventId=crypto.randomUUID();
@@ -101,7 +101,7 @@ export async function synthesisAction({body,env,id,job,source,sourceHash,manifes
  }catch(error){
   const usage=result?.usage??error.reviewResult?.usage;
   if(usage&&int(usage.totalTokens)&&!usageEventId){usageEventId=crypto.randomUUID();try{await env.DB.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,'owner','groq','LIVE_FREE_SYNTHESIS','actual_total_tokens',?,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").bind(usageEventId,id,usage.totalTokens,now()).run();}catch{}}
-  await env.DB.prepare("UPDATE yta_operations SET state=?,error_code=?,result_json=CASE WHEN EXISTS(SELECT 1 FROM jobs WHERE id=? AND owner_id='owner') AND NOT EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING') THEN ? ELSE NULL END,created_at=? WHERE id=? AND job_id=? AND state='CLAIMED'").bind(dispatched?'FAILED_UNCERTAIN':'BLOCKED',String(error.code||error.message||'SYNTHESIS_OUTCOME_UNKNOWN'),id,id+':deleting',JSON.stringify({key:progress.next.key,requestSha256:progress.next.requestSha256,partialText:(result?.text??error.reviewResult?.partialText??'').slice(0,12000),usage:usage??null,usageEventId,dispatched}),now(),opId,id).run();
+  await env.DB.prepare("UPDATE yta_operations SET state=?,error_code=?,result_json=CASE WHEN EXISTS(SELECT 1 FROM jobs WHERE id=? AND owner_id='owner') AND NOT EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING') THEN ? ELSE NULL END,created_at=? WHERE id=? AND job_id=? AND state='CLAIMED'").bind(dispatched?'FAILED_UNCERTAIN':'BLOCKED',String(error.code||error.message||'SYNTHESIS_OUTCOME_UNKNOWN'),id,id+':deleting',JSON.stringify({key:progress.next.key,requestSha256:progress.next.requestSha256,partialText:(result?.text??error.reviewResult?.partialText??'').slice(0,1_000_000),usage:usage??null,usageEventId,dispatched}),now(),opId,id).run();
   await env.DB.prepare("UPDATE yta_operations SET state='STOPPED' WHERE id=? AND state='APPROVED'").bind(aId).run();
   throw error;
  }

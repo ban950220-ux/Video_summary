@@ -77,11 +77,17 @@ the AI synthesis, detailed AI checkpoints, audited derived checkpoints, and
 owner-reviewed source excerpts, including their failure uncertainty. Offline
 tests seed synthetic saved model nodes in SQLite and exercise the actual app
 reopen and TXT routes. There is no production synthesis quote, approval,
-guarded executor, or usage-recording path on this branch; therefore the final
-route cannot advance a real job from notes to complete model synthesis yet.
-Those paths need a separate security review with source/key/approval,
-duplicate, local-limit, pacing, failure-clearance and usage guards before any
-provider call. No migration is needed for this proposal: the existing
+guarded executor and usage-recording path have now been added behind
+`ENABLE_COMPLETE_SYNTHESIS=true`. Every synthesis window needs its own saved
+quote and approval. The D1 claim and final dispatch checks bind the immutable
+transcript, audit, request hash, approval, key identity and free-only flags.
+The executor reserves up to 4,800 input plus 1,800 output units per call,
+shares the 7,000 per-minute and 195,000 per-day local guards with raw Groq
+summary calls, and requires 61 seconds between calls. A failed or uncertain
+call is preserved and blocks continuation; lost HTTP responses are reconciled
+through status reads, never by sending the same POST again. A successful node
+stores its response, usage event and hashes before the next step is shown.
+No migration is needed for this branch: the existing
 `yta_operations`, `usage_events`, and `jobs.report_json` columns suffice.
 
 The browser gap runner now asks the durable status endpoint after a failed
@@ -112,3 +118,16 @@ and an explicit review of important points in the root. Structural checks
 still cannot prove semantic completeness; a heterogeneous-topic test shows
 that a generic root can pass ID checks while omitting substantive content.
 The actual video and provider have not been exercised by these tests.
+
+## Runtime validation boundary
+
+The new Workerd D1 test exercises quote, approval, one mocked Groq response,
+usage/readback and duplicate execution rejection. Other offline tests cover a
+1,226-segment, 79-stage tree, 47 uncertain boundary IDs, year-duration
+ambiguity and distinct claims, numbers and counterexamples. These are
+synthetic fixtures, not recovered responses from the 98-minute production job.
+The feature flag remains absent from production configuration and defaults to
+false. No production provider request, D1 migration or deployment was run.
+Coverage and grounding checks establish source references, numeric and direct
+quote consistency; the owner still must review semantic completeness against
+the original transcript before saving the final report.

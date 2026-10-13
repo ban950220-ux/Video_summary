@@ -1289,3 +1289,12 @@ test('deletion marker blocks the final D1 admission read before any Groq fetch',
   releaseDelete();assert.equal((await deleting).status,200);
  }finally{releaseDelete();globalThis.fetch=old;f.db.close();}
 });
+
+test('raw dispatch shares the D1 in-flight guard with synthesis',async()=>{
+ const f=await fixture();
+ assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',f.approval),f.env)).status,200);
+ const synthesisId=f.id+':groq-summary-complete:'+f.plan.transcriptHash+':note:note:0:0';
+ f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'groq-summary-synthesis',6600,'CLAIMED',?)").run(synthesisId,f.id,new Date().toISOString());
+ const oldFetch=globalThis.fetch;let calls=0;try{globalThis.fetch=async()=>{calls++;throw Error('unexpected provider request');};const result=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.notEqual(result.status,202);assert.equal(calls,0);}finally{globalThis.fetch=oldFetch;}
+ assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(synthesisId).state,'CLAIMED');
+});

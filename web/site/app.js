@@ -571,13 +571,13 @@ async function showCompleteSynthesisReview(job,target,requestId){
    return;
   }
   const review=scope.finalizationReview,checks=[];
-  target.append(el('p',{text:`원본 ${scope.sourceSegmentCount}구간 · ${scope.rawStages}단계 · 경계 불확실성 ${review.boundarySegmentIds.length}개. 아래 원문과 각 구간 결과를 대조한 뒤 핵심 종합에 중요한 내용이 빠지지 않았는지 확인하세요. 일반 표현은 의미가 같으면 바꿔쓸 수 있지만 수치·날짜·부정·인과관계는 원문과 맞아야 합니다.`}));
+  target.append(el('p',{text:`원본 ${scope.sourceSegmentCount}구간 · ${scope.rawStages}단계 · 경계 불확실성 ${review.boundarySegmentIds.length}개. 아래 원문과 각 구간 결과를 대조한 뒤 핵심 종합에 중요한 내용이 빠지지 않았는지 확인하세요. 의미가 같은 자연스러운 바꿔쓰기는 가능하지만 수치·날짜·고유명사·불확실성·부정·인과관계와 직접 인용은 원문과 정확히 맞아야 합니다.`}));
   target.append(el('h3',{text:'핵심 종합'}),el('pre',{text:JSON.stringify(review.rootReport,null,2)}),el('h3',{text:'원문·구간별 상세 부록'}));
   for(const stage of review.reviewedStages){
    const details=el('details'),heading=el('summary',{text:`raw:${stage.index} · ${stage.provenance} · 원문 #${stage.sourceSegments[0]?.id}–#${stage.sourceSegments.at(-1)?.id}`}),check=el('input',{attrs:{type:'checkbox'}}),label=el('label',{text:'이 구간의 원문, 근거, 상세 결과와 핵심 종합 반영을 확인했습니다.'});label.prepend(check);
    details.append(heading,el('pre',{text:stage.sourceSegments.map(item=>`#${item.id} ${item.startMs}–${item.endMs}ms ${item.text}`).join('\n')}),el('pre',{text:JSON.stringify(stage.rawReport??stage.reviewedExcerpt,null,2)}),label);target.append(details);checks.push(check);
   }
-  const meaning=el('input',{attrs:{type:'checkbox'}}),meaningLabel=el('label',{text:'핵심 종합이 모든 중요한 발언·수치·반론·불확실성을 보존하는지 원문과 대조했습니다.'});meaningLabel.prepend(meaning);
+  const meaning=el('input',{attrs:{type:'checkbox'}}),meaningLabel=el('label',{text:'핵심 종합이 모든 중요한 발언·수치·날짜·고유명사·반론·불확실성·부정·인과관계·직접 인용을 보존하는지 원문과 대조했습니다.'});meaningLabel.prepend(meaning);
   const save=el('button',{className:'btn secondary small',text:'검토 확인 후 최종 보고서 저장'});save.disabled=!scope.featureEnabled;
   if(!scope.featureEnabled)target.append(el('p',{className:'tip',text:'전체 종합 요약 저장 기능은 현재 비활성입니다. 읽기 전용 검토만 가능합니다.'}));
   save.onclick=async()=>{if(!current()||!scope.featureEnabled||!meaning.checked||checks.some(check=>!check.checked)){toast('전체 구간과 핵심 종합을 먼저 대조해 주세요.');return;}save.disabled=true;
