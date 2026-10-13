@@ -34,7 +34,7 @@ async function api(path,{method='GET',body}={}){
 async function waitForeground(ms){if(document.hidden)throw Error('브라우저 화면이 비활성화됐습니다. 이력에서 다시 확인하세요.');await new Promise(resolve=>setTimeout(resolve,ms));if(document.hidden)throw Error('브라우저 화면이 비활성화됐습니다. 이력에서 다시 확인하세요.');}
 function switchView(view){
   if(!['analyze','library','usage','settings'].includes(view))view='analyze';
-  if(state.view==='library'&&view!=='library')stopActiveGroqSummary();
+  if(state.view==='library'&&view!=='library'){stopActiveGroqSummary();libraryDetailRequest++;}
   state.view=view;
   document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id===`view-${view}`));
   document.querySelectorAll('[data-view-link]').forEach(x=>x.classList.toggle('active',x.dataset.viewLink===view));
@@ -481,9 +481,12 @@ function libraryCard(job){
       try{
         let body={};
         if(action==='native-poll'){
+          target=$('#library-detail');detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);target.append(el('p',{text:'Supadata 자막 대기 작업을 다시 확인 중…'}));
           const fresh=(await api('/api/jobs/'+encodeURIComponent(job.id))).job;
+          if(!detailCurrent(job.id,detailRequest,target))return;
           if(fresh?.source_type!=='url'||fresh.status!=='NATIVE_PENDING'||typeof fresh.audit?.providerJobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(fresh.audit.providerJobId))throw Error('Supadata 자막 대기 작업이 더 이상 없습니다. 이력을 새로고침하세요.');
-          if(!confirm('Supadata API에 실제 처리 상태를 조회합니다. 앱의 무료 할당 1회를 예약하며 제공자 요청이 발생할 수 있습니다. 계속할까요?'))return;
+          if(!confirm('Supadata API에 실제 처리 상태를 조회합니다. 앱의 무료 할당 1회를 예약하며 제공자 요청이 발생할 수 있습니다. 계속할까요?')){target.append(el('p',{text:'Supadata 조회를 취소했습니다. 제공자 요청은 보내지 않았습니다.'}));return;}
+          if(!detailCurrent(job.id,detailRequest,target))return;
         }
         if(action==='summary'){
           const p=await api('/api/jobs/'+job.id+'/summary-plan');
@@ -493,7 +496,7 @@ function libraryCard(job){
           if(!confirm('저장된 TXT 전사를 확인한 뒤 서비스의 임시 조각 전사 기록만 정리할까요? PC와 Library 원본은 유지됩니다.'))return;
           body={confirmTemporaryTranscriptCleanup:true};
         }
-        target=$('#library-detail');detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);target.append(el('p',{text:'저장된 작업 상태 확인 중…'}));
+        if(action!=='native-poll'){target=$('#library-detail');detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);target.append(el('p',{text:'저장된 작업 상태 확인 중…'}));}
         const d=await api('/api/jobs/'+job.id+'/'+action,{method:'POST',body});
         if(!detailCurrent(job.id,detailRequest,target))return;
         showReport(d.job,target,true);
