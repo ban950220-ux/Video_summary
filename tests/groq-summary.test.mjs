@@ -1641,7 +1641,7 @@ test('raw:8 correction recovers a complete saved response without another provid
   const sent=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.equal(sent.status,500);assert.equal(calls,1);f.env.DB=DB;
   const reviewReply=await routeApi(request(url),f.env);assert.equal(reviewReply.status,200,await reviewReply.clone().text());const candidate=(await reviewReply.json()).recoveryCandidate;assert.ok(candidate);
   const recovered=await routeApi(request(url,'POST',{step:'recover',failedOperationId:approval.attemptId,responseSha256:candidate.responseSha256,recordSha256:candidate.recordSha256,usageTotalTokens:candidate.usageTotalTokens,confirmNoProviderCall:true,confirmOriginalFailurePreserved:true}),f.env);assert.equal(recovered.status,200,await recovered.clone().text());assert.equal(calls,1);
-  assert.equal(f.db.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').get(approval.attemptId).state,'FAILED_UNCERTAIN');assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(failedId).result_json,oldResult);
+  assert.equal(f.db.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').get(approval.attemptId).state,'FAILED_UNCERTAIN');assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(failedId).result_json,oldResult);const resolution=await globallyRecoveredGroq(f.env,f.id,{includeCurrent:true});assert.deepEqual(new Set(resolution.liveResolutionProofs.map(item=>item.failedId)),new Set([failedId,approval.attemptId]));
   const status=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal(status.status,200,await status.clone().text());assert.equal((await status.json()).correctionAttempt,null);
   f.env.ENABLE_COMPLETE_SYNTHESIS='true';const complete=await routeApi(request(f.path+'/groq-summary-complete'),f.env);assert.equal(complete.status,200,await complete.clone().text());assert.equal((await complete.json()).completedRawStages,1);
   const repeated=await routeApi(request(url,'POST',{step:'recover',failedOperationId:approval.attemptId,responseSha256:candidate.responseSha256,recordSha256:candidate.recordSha256,usageTotalTokens:candidate.usageTotalTokens,confirmNoProviderCall:true,confirmOriginalFailurePreserved:true}),f.env);assert.equal(repeated.status,200,await repeated.clone().text());assert.equal(calls,1);
@@ -1685,5 +1685,76 @@ test('full-scale correction reconciles a lost usage write within D1 budget',asyn
   f.env.DB={prepare(sql){const stmt=DB.prepare(sql),wrap=bound=>({bind(...args){return wrap(bound.bind(...args));},async first(){if(++queries>50){attempted51=true;throw Error('D1_QUERY_LIMIT_51');}return bound.first();},async all(){if(++queries>50){attempted51=true;throw Error('D1_QUERY_LIMIT_51');}return bound.all();},async run(){if(++queries>50){attempted51=true;throw Error('D1_QUERY_LIMIT_51');}if(!injected&&sql.startsWith('INSERT INTO usage_events')){injected=true;throw Error('SIMULATED_USAGE_WRITE_FAILURE');}return bound.run();}});return wrap(stmt);}};
   globalThis.fetch=async()=>{calls++;return response(valid(group[0].id));};
   const sent=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env),row=f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(approval.attemptId);assert.equal(sent.status,500);assert.equal(injected,true);assert.equal(attempted51,false);assert.ok(queries<=50);assert.equal(calls,1);assert.equal(row.state,'FAILED_UNCERTAIN');assert.equal(JSON.parse(row.result_json).reviewResult.responseComplete,true);assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(approval.approvalId).state,'STOPPED');t.diagnostic(`full-scale failed correction used ${queries} D1 queries`);
+ }finally{f.env.DB=DB;globalThis.fetch=oldFetch;f.db.close();}
+});
+
+async function recoveredCorrectionFixture({fullScale=false}={}){
+ const setup=await approvedCorrectionFixture({fullScale}),{f,group,url,approval}=setup,job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),groups=partitionGroqTranscript(f.segments,promptAudit({audit:JSON.parse(job.audit_json),duration_seconds:job.duration_seconds})),stamp=new Date(Date.now()-120000).toISOString(),DB=f.env.DB,oldFetch=globalThis.fetch;let calls=0,injected=false;
+ try{
+  for(let i=0;i<8;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+f.plan.transcriptHash+':raw:'+i,f.id,stamp,JSON.stringify({hash:f.plan.transcriptHash,key:'raw:'+i,report:valid(groups[i][0].id)}));
+  f.env.DB={prepare(sql){const stmt=DB.prepare(sql);if(!sql.startsWith("UPDATE yta_operations SET state='DONE'"))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {async run(){if(!injected){injected=true;throw Error('SIMULATED_CHECKPOINT_FAILURE');}return bound.run();}};}};}};
+  globalThis.fetch=async()=>{calls++;return response(valid(group[0].id));};const sent=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.equal(sent.status,500);assert.equal(calls,1);f.env.DB=DB;
+  const candidate=(await(await routeApi(request(url),f.env)).json()).recoveryCandidate;assert.ok(candidate);const recovered=await routeApi(request(url,'POST',{step:'recover',failedOperationId:approval.attemptId,responseSha256:candidate.responseSha256,recordSha256:candidate.recordSha256,usageTotalTokens:candidate.usageTotalTokens,confirmNoProviderCall:true,confirmOriginalFailurePreserved:true}),f.env);assert.equal(recovered.status,200,await recovered.clone().text());f.db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run(stamp,approval.attemptId);return {...setup,groups,calls};
+ }finally{f.env.DB=DB;globalThis.fetch=oldFetch;}
+}
+
+test('recovered correction permits a fresh raw approval and raw:9 execution with both failures retained',async()=>{
+ const {f,groups,approval,failedId,oldResult}=await recoveredCorrectionFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const reviewReply=await routeApi(request(f.path+'/groq-summary-approval'),f.env);assert.equal(reviewReply.status,200,await reviewReply.clone().text());const review=await reviewReply.json();assert.equal(review.windowStart,9);
+  const scope={...f.approval,windowStart:review.windowStart,maxRequests:review.maxRequests,totalTokenUpperBound:review.totalTokenUpperBound,credentialGeneration:review.credentialGeneration};const approved=await routeApi(request(f.path+'/groq-summary-approval','POST',scope),f.env);assert.equal(approved.status,200,await approved.clone().text());
+  globalThis.fetch=async()=>{calls++;return response(valid(groups[9][0].id));};const sent=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal(sent.status,202,await sent.clone().text());assert.equal(calls,1);
+  assert.equal(f.db.prepare('SELECT state,result_json FROM yta_operations WHERE id=?').get(failedId).result_json,oldResult);assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(approval.attemptId).state,'FAILED_UNCERTAIN');
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('recovered correction proof changed at final D1 guard blocks raw:9 before fetch',async()=>{
+ const {f}=await recoveredCorrectionFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const review=await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json(),scope={...f.approval,windowStart:review.windowStart,maxRequests:review.maxRequests,totalTokenUpperBound:review.totalTokenUpperBound,credentialGeneration:review.credentialGeneration};assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',scope),f.env)).status,200);
+  const seal=f.db.prepare("SELECT id,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-live-resolution' LIMIT 1").get(f.id);assert.ok(seal);
+  const restore=tamperBeforeLiveFinalGuard(f,async()=>f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify({...JSON.parse(seal.result_json),usageTokens:0}),seal.id));
+  try{globalThis.fetch=async()=>{calls++;throw Error('provider must stay idle');};const sent=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal(sent.status,409,await sent.clone().text());assert.equal(calls,0);}finally{restore();}
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('a live incomplete recovered correction releases another job only while both proofs stay intact',async()=>{
+ const {f,groups,approval,failedId}=await recoveredCorrectionFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const b=await sibling(f,{approve:false}),seal=f.db.prepare("SELECT id,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-live-resolution' AND id LIKE ?").get(f.id,approval.attemptId+'%');assert.ok(seal);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify({...JSON.parse(seal.result_json),failedUnits:JSON.parse(seal.result_json).failedUnits+1}),seal.id);assert.equal((await routeApi(request(b.path+'/groq-summary-approval'),f.env)).status,409);f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(seal.result_json,seal.id);
+  const usage=f.db.prepare("SELECT id,used_units FROM usage_events WHERE job_id=? AND provenance='PROVIDER_REPORTED_CORRECTIVE_ACCOUNT_REMAINING_UNKNOWN'").get(f.id);f.db.prepare('UPDATE usage_events SET used_units=? WHERE id=?').run(usage.used_units+1,usage.id);assert.equal((await routeApi(request(b.path+'/groq-summary-approval'),f.env)).status,409);f.db.prepare('UPDATE usage_events SET used_units=? WHERE id=?').run(usage.used_units,usage.id);
+  const plan=await(await routeApi(request(b.path+'/groq-summary-plan'),f.env)).json(),reviewReply=await routeApi(request(b.path+'/groq-summary-approval'),f.env);assert.equal(reviewReply.status,200,await reviewReply.clone().text());const review=await reviewReply.json(),scope={...f.approval,jobId:b.id,transcriptHash:plan.transcriptHash,model:plan.model,outputKind:plan.outputKind,windowStart:plan.windowStart,totalRequests:plan.totalRequests,maxRequests:plan.maxRequests,maxInputTokensPerRequest:plan.maxInputTokensPerRequest,maxCompletionTokensPerRequest:plan.maxCompletionTokensPerRequest,totalTokenUpperBound:plan.totalTokenUpperBound,credentialGeneration:review.credentialGeneration};assert.equal((await routeApi(request(b.path+'/groq-summary-approval','POST',scope),f.env)).status,200);
+  globalThis.fetch=async()=>{calls++;return response(valid(groups[0][0].id));};const sent=await routeApi(request(b.path+'/groq-summary','POST',{}),f.env);assert.equal(sent.status,202,await sent.clone().text());assert.equal(calls,1);
+  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(failedId).state,'FAILED_UNCERTAIN');assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(approval.attemptId).state,'FAILED_UNCERTAIN');
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('deleting a recovered correction settles both failures before another job runs',async()=>{
+ const {f,groups,approval,failedId}=await recoveredCorrectionFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const deleted=await routeApi(request(f.path,'DELETE'),f.env);assert.equal(deleted.status,200,await deleted.clone().text());assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-settlement'").get(f.id).n,2);assert.equal(f.db.prepare('SELECT state,result_json FROM yta_operations WHERE id=?').get(failedId).state,'FAILED_UNCERTAIN');assert.equal(f.db.prepare('SELECT state,result_json FROM yta_operations WHERE id=?').get(approval.attemptId).state,'FAILED_UNCERTAIN');
+  const b=await sibling(f,{approve:false}),plan=await(await routeApi(request(b.path+'/groq-summary-plan'),f.env)).json(),reviewReply=await routeApi(request(b.path+'/groq-summary-approval'),f.env);assert.equal(reviewReply.status,200,await reviewReply.clone().text());const review=await reviewReply.json(),scope={...f.approval,jobId:b.id,transcriptHash:plan.transcriptHash,model:plan.model,outputKind:plan.outputKind,windowStart:plan.windowStart,totalRequests:plan.totalRequests,maxRequests:plan.maxRequests,maxInputTokensPerRequest:plan.maxInputTokensPerRequest,maxCompletionTokensPerRequest:plan.maxCompletionTokensPerRequest,totalTokenUpperBound:plan.totalTokenUpperBound,credentialGeneration:review.credentialGeneration};assert.equal((await routeApi(request(b.path+'/groq-summary-approval','POST',scope),f.env)).status,200);globalThis.fetch=async()=>{calls++;return response(valid(groups[0][0].id));};assert.equal((await routeApi(request(b.path+'/groq-summary','POST',{}),f.env)).status,202);assert.equal(calls,1);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('recovered correction enters synthesis with two original failures still preserved',async()=>{
+ const {f,groups,approval,failedId}=await recoveredCorrectionFixture(),oldFetch=globalThis.fetch;f.env.ENABLE_COMPLETE_SYNTHESIS='true';let calls=0;
+ try{
+  const stamp=new Date(Date.now()-120000).toISOString(),hash=f.plan.transcriptHash;
+  for(let i=9;i<groups.length;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+hash+':raw:'+i,f.id,stamp,JSON.stringify({hash,key:'raw:'+i,report:valid(groups[i][0].id)}));
+  const url=f.path+'/groq-summary-complete',readyReply=await routeApi(request(url),f.env);assert.equal(readyReply.status,200,await readyReply.clone().text());const ready=await readyReply.json();assert.equal(ready.ready,true);
+  const quoted=await routeApi(request(url,'POST',{step:'quote',sourceHash:hash,manifestSha256:ready.manifestSha256,confirmFreeOnly:true,acknowledgeUnknownBalance:true}),f.env);assert.equal(quoted.status,200,await quoted.clone().text());const quote=await quoted.json(),approved=await routeApi(request(url,'POST',{step:'approve',quoteId:quote.quoteId,quoteSha256:quote.quoteSha256,reservedUnits:quote.quote.reservedUnits,maxCalls:quote.quote.maxCalls,confirmExactQuote:true,freeTierConfirmed:true,billingDisabled:true,noPaidFallback:true,noAutomaticRetry:true}),f.env);assert.equal(approved.status,200,await approved.clone().text());const scope=await approved.json();
+  globalThis.fetch=async()=>{calls++;return response({summary:[{text:'가',evidenceIds:[groups[0][0].id]}],chapters:[{text:'가',evidenceIds:[groups[0][0].id]},{text:'가',evidenceIds:[groups[1][0].id]}],claims:[],numbers:[],critical:[],conclusion:'가'});};
+  const sent=await routeApi(request(url,'POST',{step:'execute',approvalId:scope.approvalId,expectedNode:ready.nextSynthesisStage,requestSha256:ready.nextSynthesisRequestSha256,executeOnce:true}),f.env);assert.equal(sent.status,200,await sent.clone().text());assert.equal(calls,1);assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(failedId).state,'FAILED_UNCERTAIN');assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(approval.attemptId).state,'FAILED_UNCERTAIN');
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('full-scale recovered correction admits raw:9 within D1 query budget',async t=>{
+ const {f,groups}=await recoveredCorrectionFixture({fullScale:true}),oldFetch=globalThis.fetch,DB=f.env.DB;let calls=0,queries=0,attempted51=false;
+ try{
+  const review=await(await routeApi(request(f.path+'/groq-summary-approval'),f.env)).json(),scope={...f.approval,windowStart:review.windowStart,maxRequests:review.maxRequests,totalTokenUpperBound:review.totalTokenUpperBound,credentialGeneration:review.credentialGeneration};assert.equal((await routeApi(request(f.path+'/groq-summary-approval','POST',scope),f.env)).status,200);
+  f.env.DB={prepare(sql){const stmt=DB.prepare(sql),wrap=bound=>({bind(...args){return wrap(bound.bind(...args));},async first(){if(++queries>50){attempted51=true;throw Error('D1_QUERY_LIMIT_51');}return bound.first();},async all(){if(++queries>50){attempted51=true;throw Error('D1_QUERY_LIMIT_51');}return bound.all();},async run(){if(++queries>50){attempted51=true;throw Error('D1_QUERY_LIMIT_51');}return bound.run();}});return wrap(stmt);}};
+  globalThis.fetch=async()=>{calls++;return response(valid(groups[9][0].id));};const sent=await routeApi(request(f.path+'/groq-summary','POST',{}),f.env);assert.equal(attempted51,false);assert.ok(queries<=50);assert.equal(sent.status,202,await sent.clone().text());assert.equal(calls,1);t.diagnostic(`recovered full-scale raw:9 used ${queries} D1 queries`);
  }finally{f.env.DB=DB;globalThis.fetch=oldFetch;f.db.close();}
 });
