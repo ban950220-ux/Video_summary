@@ -15,7 +15,7 @@ const token=(value)=>new RegExp('(?<!\\d)'+value+'(?!\\d)','g');
 const durationContext=(text,year)=>[...text.matchAll(token(year))].some(match=>{
  const before=text.slice(Math.max(0,match.index-28),match.index).split(/[.!?。！？,，;；]/).at(-1);
  const after=text.slice(match.index+year.length,match.index+year.length+18).split(/[.!?。！？,，;；]/)[0];
- return /(?:기간|동안|경력|근속|재직|소요|걸쳐|연차|연구|살아온|지난)\s*(?:은|는|이|가|을|를|에|의)?\s*$/.test(before)||/^(?:간|동안|째|차|에 걸쳐|이 지났|이었|이었다|을 보냈)/.test(after);
+ return /(?:기간|동안|경력|근속|재직|소요|걸쳐|연차|연구|살아온|지난)\s*(?:은|는|이|가|을|를|에|의)?\s*$/.test(before)||/^\s*(?:간|동안|째|차|만에|만의|이?\s*넘|이?\s*지났|이?\s*흘렀|에 걸쳐|이었|이었다|을 보냈)/.test(after);
 });
 
 export async function abbreviatedYearRecoveryCandidate({stage,sourceHash,auditSha256,failedOperationId,failedResultJson,usageEvidence,approvalEvidence,segments,verifyGrounding}){

@@ -90,7 +90,7 @@ export async function evidenceNotes({manifest,checkpoints,excerpts}){
    if(checkpoint.report.conclusion?.trim())items.push({kind:'conclusion',text:checkpoint.report.conclusion,evidenceIds:stage.ids});
   }
   let chunk=[];
-  const asNote=parts=>({kind:'source_evidence_notes',text:JSON.stringify(parts),evidenceIds:[...new Set(parts.flatMap(item=>item.evidenceIds))].sort((a,b)=>a-b),boundarySegmentIds:stage.boundarySegmentIds.filter(id=>parts.some(item=>item.evidenceIds.includes(id))),stage:index,provenance:stage.provenance});
+  const asNote=parts=>({kind:'source_evidence_notes',text:JSON.stringify(parts),evidenceIds:[...new Set(parts.flatMap(item=>item.evidenceIds))].sort((a,b)=>a-b),boundarySegmentIds:stage.boundarySegmentIds,stage:index,provenance:stage.provenance});
   const fits=part=>noteFitsMergeRequest({...asNote([part]),index:notes.length});
   const split=item=>{
    if(fits(item))return [item];
