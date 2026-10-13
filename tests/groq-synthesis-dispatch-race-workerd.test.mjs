@@ -23,10 +23,10 @@ async function setup(){
 for(const mode of ['cancel','expire'])test(`synthesis final D1 read blocks ${mode} before mock fetch`,async()=>{
  const f=await setup(),oldFetch=globalThis.fetch,clock=Date.now;let reads=0,calls=0;
  try{
-  f.env.DB={prepare(sql){const stmt=f.DB.prepare(sql);if(!sql.startsWith('SELECT 1 AS ok FROM yta_operations a JOIN yta_operations o'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {async first(){reads++;if(reads===3&&mode==='cancel'){const cancelled=await routeApi(request(f.url,'POST',{step:'cancel',approvalId:f.approval.approvalId,confirmCancel:true}),f.env);assert.equal(cancelled.status,200,await cancelled.clone().text());assert.equal((await cancelled.json()).claimedRequestOutcome,'UNKNOWN');}const result=await bound.first();if(reads===3&&mode==='expire')Date.now=()=>clock()+700_000;return result;}};}};}};
+  f.env.DB={prepare(sql){const stmt=f.DB.prepare(sql);if(!sql.startsWith('SELECT 1 AS ok FROM yta_operations a JOIN yta_operations o'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {async first(){reads++;if(reads===2&&mode==='cancel'){const cancelled=await routeApi(request(f.url,'POST',{step:'cancel',approvalId:f.approval.approvalId,confirmCancel:true}),f.env);assert.equal(cancelled.status,200,await cancelled.clone().text());assert.equal((await cancelled.json()).claimedRequestOutcome,'UNKNOWN');}const result=await bound.first();if(reads===2&&mode==='expire')Date.now=()=>clock()+700_000;return result;}};}};}};
   globalThis.fetch=async()=>{calls++;throw Error('unexpected provider fetch');};
   const reply=await routeApi(request(f.url,'POST',{step:'execute',approvalId:f.approval.approvalId,expectedNode:f.scope.nextSynthesisStage,requestSha256:f.scope.nextSynthesisRequestSha256,executeOnce:true}),f.env);
-  assert.notEqual(reply.status,200);assert.equal(reads,3);assert.equal(calls,0);assert.equal((await f.DB.prepare("SELECT state FROM yta_operations WHERE provider='groq-summary-synthesis'").first()).state,'BLOCKED');
+  assert.notEqual(reply.status,200);assert.equal(reads,2);assert.equal(calls,0);assert.equal((await f.DB.prepare("SELECT state FROM yta_operations WHERE provider='groq-summary-synthesis'").first()).state,'BLOCKED');
  }finally{globalThis.fetch=oldFetch;Date.now=clock;await f.mf.dispose();}
 });
 test('synthesis rejects a key replacement between identity check and credential snapshot',async()=>{

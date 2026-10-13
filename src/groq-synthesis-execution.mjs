@@ -90,7 +90,6 @@ export async function synthesisAction({body,env,id,job,source,sourceHash,manifes
   if(!row||approval.expiresAt<=Date.now()||env.ENABLE_COMPLETE_SYNTHESIS!=='true'||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')fail('SYNTHESIS_DISPATCH_CHANGED','최종 D1 승인·작업 범위가 변경됐습니다.');
  };
  try{
-  await guard();
   result=await runOwnedGroqSummary({env:{...env,GROQ_FREE_PLAN_CONFIRMED:'true'},messages:progress.next.request.messages,maxCompletionTokens:COMPLETE_SYNTHESIS_OUTPUT_LIMIT,reviewTextLimit:1_000_000,beforeDispatch:guard,beforeFetch:async()=>{await guard();dispatched=true;}});
   if(result.inputTokens>progress.next.request.inputUpper||result.totalTokens>PER_CALL)fail('SYNTHESIS_USAGE_OVER_BOUND','제공자 사용량이 승인 범위를 넘었습니다.');
   const record=await persistedSynthesisNode({next:progress.next,response:result.text,sourceSegments:source.segments,verifyGrounding});
