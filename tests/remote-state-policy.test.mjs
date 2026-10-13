@@ -21,25 +21,28 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
 ]});
 
 test('guard baseline pins the verified active Worker version and source commit',()=>{
-  assert.equal(approvedRemoteBaseline.activeVersionId,'37ffbd37-a256-41a9-816a-e1967c03d68c');
-  assert.equal(approvedRemoteBaseline.sourceCommit,'415825bef1f152376c6e49ed01fffb3793f940a2');
+  assert.equal(approvedRemoteBaseline.activeVersionId,'1ad94212-8b1b-4399-aebf-8edc4ac5315c');
+  assert.equal(approvedRemoteBaseline.sourceCommit,'d6bc0aabf061bdcf8b0db714d3bbda4a8933de14');
   assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,true);
   const observed=remote();observed.bindings.push({name:'ASSETS',type:'assets'});
   assert.equal(assertRemoteState(observed,approvedRemoteBaseline),true);
 });
 
 test('the one settings version accepts only the pinned annotated predecessor and exact script hash',()=>{
- const state=remote();state.bindings.push({name:'ASSETS',type:'assets'});state.deploymentMessage='Dashboard settings update';
+ const oldBaseline={...baseline,activeVersionId:approvedPreDeployLineage.activeVersionId,sourceCommit:approvedPreDeployLineage.sourceCommit};
+ const state=remote();state.activeVersions[0].id=oldBaseline.activeVersionId;state.bindings.push({name:'ASSETS',type:'assets'});state.deploymentMessage='Dashboard settings update';
  const proof={activeVersionId:approvedPreDeployLineage.activeVersionId,priorVersionId:approvedPreDeployLineage.priorVersionId,activeDeploymentSourceAnnotation:'OTHER',priorDeploymentSourceAnnotation:'EXPECTED',activeScriptEtag:approvedPreDeployLineage.scriptEtag,priorScriptEtag:approvedPreDeployLineage.scriptEtag,scriptContentEqual:true,codeLineageEvidence:'SAME_SCRIPT_AS_ANNOTATED_PRIOR',sourceAnnotationGuardMatch:false,assetSetIdentifier:'NOT_EXPOSED_BY_VERSION_GET'};
- assert.throws(()=>assertRemoteState(state,baseline),/SOURCE_COMMIT_MISMATCH/);
- assert.equal(assertRemoteState(state,baseline,{preDeployLineage:proof}),true);
+ assert.throws(()=>assertRemoteState(state,oldBaseline),/SOURCE_COMMIT_MISMATCH/);
+ assert.equal(assertRemoteState(state,oldBaseline,{preDeployLineage:proof}),true);
+ const current=remote();current.bindings.push({name:'ASSETS',type:'assets'});current.deploymentMessage='Dashboard settings update';
+ assert.throws(()=>assertRemoteState(current,baseline,{preDeployLineage:proof}),/SOURCE_COMMIT_MISMATCH/);
  for(const [key,value] of [['activeVersionId','other'],['priorVersionId','other'],['activeDeploymentSourceAnnotation','MISSING'],['priorDeploymentSourceAnnotation','OTHER'],['activeScriptEtag','a'.repeat(64)],['priorScriptEtag','a'.repeat(64)],['scriptContentEqual',false],['codeLineageEvidence','UNVERIFIED'],['sourceAnnotationGuardMatch',true]]){
-  assert.throws(()=>assertRemoteState(state,baseline,{preDeployLineage:{...proof,[key]:value}}),/SOURCE_COMMIT_MISMATCH/,key);
+  assert.throws(()=>assertRemoteState(state,oldBaseline,{preDeployLineage:{...proof,[key]:value}}),/SOURCE_COMMIT_MISMATCH/,key);
  }
- const changed=structuredClone(state);changed.activeVersions[0].id='other';assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/ACTIVE_VERSION_MISMATCH/);
- changed.activeVersions[0].id=baseline.activeVersionId;changed.bindings.find(item=>item.name==='DB').id='other';assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/D1_MISMATCH/);
- changed.bindings.find(item=>item.name==='DB').id=baseline.databaseId;changed.bindings.find(item=>item.name==='ACCESS_AUD').text='';assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/ACCESS_VARS_MISSING/);
- changed.bindings.find(item=>item.name==='ACCESS_AUD').text='test-audience-value';changed.bindings.pop();assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/BINDINGS_UNEXPECTED/);
+ const changed=structuredClone(state);changed.activeVersions[0].id='other';assert.throws(()=>assertRemoteState(changed,oldBaseline,{preDeployLineage:proof}),/ACTIVE_VERSION_MISMATCH/);
+ changed.activeVersions[0].id=oldBaseline.activeVersionId;changed.bindings.find(item=>item.name==='DB').id='other';assert.throws(()=>assertRemoteState(changed,oldBaseline,{preDeployLineage:proof}),/D1_MISMATCH/);
+ changed.bindings.find(item=>item.name==='DB').id=baseline.databaseId;changed.bindings.find(item=>item.name==='ACCESS_AUD').text='';assert.throws(()=>assertRemoteState(changed,oldBaseline,{preDeployLineage:proof}),/ACCESS_VARS_MISSING/);
+ changed.bindings.find(item=>item.name==='ACCESS_AUD').text='test-audience-value';changed.bindings.pop();assert.throws(()=>assertRemoteState(changed,oldBaseline,{preDeployLineage:proof}),/BINDINGS_UNEXPECTED/);
 });
 
 test('offline remote policy requires exactly one ASSETS before and after later deploys',()=>{

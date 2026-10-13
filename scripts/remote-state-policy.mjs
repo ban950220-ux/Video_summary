@@ -39,15 +39,15 @@ const baselineObservability={
 };
 
 export const approvedRemoteBaseline={
-  activeVersionId:'37ffbd37-a256-41a9-816a-e1967c03d68c',
-  sourceCommit:'415825bef1f152376c6e49ed01fffb3793f940a2',
+  activeVersionId:'1ad94212-8b1b-4399-aebf-8edc4ac5315c',
+  sourceCommit:'d6bc0aabf061bdcf8b0db714d3bbda4a8933de14',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:true,
-  // Read-only Build 1323e142-ee46-47d2-b541-df604c1a7a50 reviewed this
-  // metadata shape: omitted optional fields, explicit null script tail consumers.
-  // The newer version and four paid-trial flags still require a fresh remote
-  // preflight before upload; omission, null and [] remain distinct.
+  // Production Build 7fd19f32-3400-44c7-a077-20aa87f326f0 and its
+  // post-deploy receipt verified this version and source annotation.
+  // A fresh remote preflight still checks all settings before another upload;
+  // omitted optional fields, null and [] remain distinct.
   remoteSettingsReviewed:true,
   runtimeFlags:{ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true',ENABLE_PAID_SUMMARY:'true',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_FIRST_GENERATION_TRIAL_ENABLED:'true',PAID_FIRST_TRIAL_USD_COST_REVIEWED:'true'},
   optionalScriptFields:{limits:{present:false},placement_mode:{present:false},streaming_tail_consumers:{present:false}},

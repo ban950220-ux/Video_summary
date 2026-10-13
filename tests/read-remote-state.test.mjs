@@ -61,18 +61,16 @@ test('guard fails closed when token, API read or observability fields are unavai
   assert.equal((await assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi().fetcher,baseline})).environment,'production');
 });
 
-test('unannotated settings version requires two fresh, exact GET lineage proofs before upload',async()=>{
+test('current annotated version cannot use the old settings-version lineage exception',async()=>{
  const {fetcher,seen}=fakeApi({currentMessage:'Dashboard settings update'});
- const state=await assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher,ciMatchTag:'TEST_WORKER_TAG'});
- assert.equal(state.activeVersions[0].id,approvedRemoteBaseline.activeVersionId);
- assert.equal(seen.length,22);
+ await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher,ciMatchTag:'TEST_WORKER_TAG'}),/SOURCE_COMMIT_MISMATCH/);
+ assert.equal(seen.length,11);
  assert.ok(seen.every(call=>call.method==='GET'&&call.tokenPresent));
- assert.equal(seen.filter(call=>call.url.endsWith('/deployments?per_page=100')).length,2);
- assert.equal(seen.filter(call=>call.url.endsWith('/versions/'+approvedRemoteBaseline.activeVersionId)).length,2);
- assert.equal(seen.filter(call=>call.url.endsWith('/versions/'+approvedPreDeployLineage.priorVersionId)).length,2);
+ assert.equal(seen.filter(call=>call.url.endsWith('/versions/'+approvedRemoteBaseline.activeVersionId)).length,1);
+ assert.equal(seen.filter(call=>call.url.endsWith('/versions/'+approvedPreDeployLineage.priorVersionId)).length,1);
 });
 
-test('lineage GET denial, changed hash or prior annotation cannot authorize upload',async()=>{
+test('missing current annotation fails closed even with old lineage evidence',async()=>{
  for(const changed of [
   {currentEtag:'a'.repeat(64)},
   {priorEtag:'b'.repeat(64)},
@@ -85,14 +83,4 @@ test('lineage GET denial, changed hash or prior annotation cannot authorize uplo
  }
  const {fetcher}=fakeApi({currentMessage:'Dashboard settings update'});
  await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:async(url,options)=>url.includes('/versions/')?{ok:false,status:403}:fetcher(url,options)}),/READ_FAILED/);
- let versionReads=0;
- await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:async(url,options)=>{
-  const response=await fetcher(url,options);
-  if(!url.endsWith('/versions/'+approvedRemoteBaseline.activeVersionId))return response;
-  versionReads++;
-  if(versionReads!==2)return response;
-  const body=await response.json();body.result.resources.script.etag='c'.repeat(64);
-  return {ok:true,json:async()=>body};
- }}),/SOURCE_COMMIT_MISMATCH/);
- assert.equal(versionReads,2);
 });
