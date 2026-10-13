@@ -5,6 +5,24 @@ import {runInNewContext} from 'node:vm';
 import {runApprovedGroqSummary,detailRequestIsCurrent} from '../web/site/audio-runner.mjs';
 import {groqSummaryProgress} from '../web/site/groq-summary-progress.mjs';
 
+test('raw:8 correction UI replaces expired quotes and separates claimed, failed and saved attempts',async()=>{
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqCorrectionChoice=showGroqCorrectionChoice;globalThis.__state=state;');
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}});
+ const base={firstId:144,lastId:165,segmentCount:22,originalMismatchCount:4,originalUsageTotalTokens:2139,approvalState:null,attemptState:null,quote:null,quoteExpired:true};
+ const mount=async preview=>{
+  const target=node('div'),toast=node('div'),posts=[];target.dataset.jobId='job-a';let state={...base,...preview};
+  const fetcher=async(_path,options)=>{if(options.method==='POST'){const body=JSON.parse(options.body);posts.push(body);if(body.step==='quote')state={...state,quoteExpired:false,quote:{quoteId:'new-quote',contract:{quoteSha256:'a'.repeat(64),model:'openai/gpt-oss-120b',firstId:144,lastId:165,inputTokensUpper:4600,outputTokensUpper:1800,reservedUnits:6400,expiresAt:Date.now()+600000}}};}return {ok:true,headers:{get:()=> 'application/json'},json:async()=>state};};
+  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,detailRequestIsCurrent,fmtRetryDate:()=> 'soon'};
+  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCorrectionChoice({id:'job-a'},target,0);await new Promise(resolve=>setImmediate(resolve));
+  return {host:target.children[0],posts};
+ };
+ const expired=await mount({});const requote=expired.host.children.find(item=>item.tag==='button'&&item.textContent.includes('새 견적'));assert.ok(requote);assert.equal(expired.host.children.some(item=>item.tag==='form'),false);await requote.onclick();assert.deepEqual(expired.posts.map(item=>item.step),['quote']);assert.ok(expired.host.children.some(item=>item.tag==='form'));
+ const expiredApproval=await mount({approvalState:'APPROVED',quoteExpired:true});assert.equal(expiredApproval.host.children.some(item=>item.textContent?.includes('실행할 수 없습니다')),true);assert.equal(expiredApproval.host.children.some(item=>item.textContent?.includes('1회 실행')),false);
+ for(const [attemptState,label] of [['CLAIMED','처리 중'],['FAILED_UNCERTAIN','기존 raw:8 실패와 별개'],['DONE','저장됐습니다'],['BLOCKED','전송 전에 차단']]){
+  const view=await mount({attemptState,attemptErrorCode:attemptState==='FAILED_UNCERTAIN'?'429':null});assert.ok(view.host.children.some(item=>item.textContent?.includes(label)),attemptState);assert.equal(view.host.children.some(item=>item.textContent?.includes('1회 실행')),false);assert.equal(view.posts.length,0);
+ }
+});
+
 test('UI offers saved-checkpoint finalization instead of an impossible zero-request approval',async()=>{
  const job={id:'job-a',source_type:'audio',duration_seconds:600,report:null},scope={approved:false,finalizationReady:true,jobId:'job-a',transcriptHash:'a'.repeat(64),completed:1};
  const calls=[];

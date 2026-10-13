@@ -372,15 +372,19 @@ function showGroqCorrectionChoice(job,target,requestId){
   const state=await api(url);if(!current())return;empty(host);
   host.append(el('h2',{text:'Groq Free raw:8 별도 1회 교정'}),el('p',{text:`원문 ${state.firstId}–${state.lastId}번 (${state.segmentCount}개) · 기존 응답의 근거 없는 수치 ${state.originalMismatchCount}건 · 기존 사용량 ${state.originalUsageTotalTokens}토큰은 그대로 보존됩니다. 이전 응답의 완전성과 제공자 영수증은 검증되지 않았습니다. 새 호출은 중복 사용을 일으킬 수 있고 계정 잔여량은 UNKNOWN입니다.`}));
   const reread=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});reread.onclick=refresh;host.append(reread);
-  if(state.attemptState||postUncertain){host.append(el('p',{attrs:{role:'status'},text:`새 요청 상태 ${state.attemptState??'UNKNOWN'} · 자동 재시도와 다음 단계 자동 실행은 없습니다. 저장 상태를 확인하세요.`}));return;}
+  if(state.attemptState||postUncertain){
+   const labels={CLAIMED:'새 교정 요청이 접수되어 처리 중입니다.',DONE:'새 교정 결과가 저장됐습니다. 다음 구간은 별도 승인 후 실행하세요.',FAILED_UNCERTAIN:'새 교정 호출의 결과가 불명확합니다. 기존 raw:8 실패와 별개의 실패입니다.',BLOCKED:'새 교정 요청은 전송 전에 차단됐습니다.'};
+   host.append(el('p',{attrs:{role:'status'},text:`${labels[state.attemptState]??'새 교정 요청의 결과를 확인할 수 없습니다.'} 상태 ${state.attemptState??'UNKNOWN'}${state.attemptErrorCode?' · '+state.attemptErrorCode:''} · 자동 재시도는 없습니다. 저장 상태를 확인하세요.`}));return;
+  }
   if(state.approvalState==='STOPPED'){host.append(el('p',{text:'이 승인은 취소 또는 중단됐습니다. 동일 범위의 새 호출을 자동으로 승인하지 않습니다.'}));return;}
   if(state.approvalState==='APPROVED'){
+   if(state.quoteExpired||!state.quote){host.append(el('p',{text:'승인된 견적이 만료되거나 확인되지 않습니다. 이 승인으로 새 호출을 실행할 수 없습니다. 이력을 검토하세요.'}));return;}
    const quote=state.quote?.contract;
    host.append(el('p',{text:`승인된 교정은 raw:8 한 구간, ${quote?.model??'저장된 모델'}, 최대 1회 호출입니다. 실행 버튼을 누르면 전송될 수 있습니다.`}));
    const run=el('button',{className:'btn secondary small',text:'승인된 raw:8 교정 1회 실행'});run.onclick=async()=>{run.disabled=true;await post({step:'execute',approvalId:state.approvalId,confirmExecuteOnce:true});};
    const cancel=el('button',{className:'btn secondary small',text:'전송 전 승인 취소'});cancel.onclick=()=>post({step:'cancel',confirmCancelBeforeSend:true});host.append(run,cancel);return;
   }
-  if(!state.quote){const quoteButton=el('button',{className:'btn secondary small',text:'교정 1회 견적 만들기'});quoteButton.onclick=()=>post({step:'quote'});host.append(quoteButton);return;}
+  if(!state.quote){const quoteButton=el('button',{className:'btn secondary small',text:state.quoteExpired?'만료된 견적 폐기 후 새 견적 만들기':'교정 1회 견적 만들기'});quoteButton.onclick=()=>post({step:'quote'});host.append(quoteButton);return;}
   const q=state.quote.contract;
   host.append(el('p',{text:`견적 ${q.quoteSha256} · ${q.model} · 근거 ${q.firstId}–${q.lastId}번 · 입력 상한 ${q.inputTokensUpper}, 출력 상한 ${q.outputTokensUpper}, 앱 예약 ${q.reservedUnits}토큰 · 만료 ${fmtRetryDate(q.expiresAt)} · 정확히 1회 · 자동 재시도 0회. 기존 원본, 분할, 실패 응답과 사용량 원장은 보존됩니다.`}));
   const form=el('form',{className:'fields'}),labels=['현재 Groq Free 계정과 결제 비활성을 확인했습니다.','기존 사용량과 중복 사용 위험, 계정 잔여량 UNKNOWN을 확인했습니다.','이 견적의 원문 범위·모델·키 세대·토큰 상한과 1회 호출을 확인했습니다.','유료 또는 Gemini 전환과 자동 재시도가 없음을 확인했습니다.'];
