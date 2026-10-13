@@ -1,5 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
 import {routeApi} from '../src/worker.mjs';
@@ -9,7 +10,7 @@ import {reportPrompt} from '../src/report.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 import {capacityIdentity} from '../src/observed-capacity.mjs';
 import {mergeAudioSegments} from '../src/audio.mjs';
-import {GROQ_SUMMARY_RESPONSE_FORMAT,groqSummaryRequestBody} from '../src/groq-summary-contract.mjs';
+import {GROQ_SUMMARY_CONTRACT_VERSION,GROQ_SUMMARY_RESPONSE_FORMAT,groqSummaryRequestBody} from '../src/groq-summary-contract.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 async function fixture({complete=true,large=false,sourceText=null,longSource=false}={}){
@@ -67,6 +68,7 @@ test('owner-only raw:8 diagnostic classifies saved response without writes, prov
    ['EVIDENCE_ID',JSON.stringify({...valid(id),summary:[{text:'PRIVATE_RESPONSE_CONTENT',evidenceIds:[groups[9][0].id]}]}),1],
    ['GROUP_COVERAGE',JSON.stringify({...valid(id),chapters:[]}),1],
    ['UNSUPPORTED_NUMBER',JSON.stringify({...valid(id),summary:[{text:'PRIVATE_RESPONSE_CONTENT 999원',evidenceIds:[id]}]}),1],
+   ['UNSUPPORTED_NUMBER',JSON.stringify({...valid(id),summary:[{text:'PRIVATE_RESPONSE_CONTENT 999원 999원',evidenceIds:[id]}]}),2],
    ['UNSUPPORTED_QUOTE',JSON.stringify({...valid(id),summary:[{text:'“PRIVATE_RESPONSE_CONTENT”',evidenceIds:[id]}]}),1],
    ['VALIDATION_PASS_ONLY',JSON.stringify({...valid(id),conclusion:'PRIVATE_RESPONSE_CONTENT'}),0],
    ['JSON_PARSE','{',null],
@@ -108,7 +110,7 @@ test('a separately approved free raw:8 correction preserves old ledgers and resu
   const quoteResponse=await routeApi(request(url,'POST',{step:'quote'}),f.env);assert.equal(quoteResponse.status,200,await quoteResponse.clone().text());const quote=await quoteResponse.json();assert.equal(quote.contract.maxCalls,1);assert.equal(quote.contract.automaticRetries,0);
   const approveBody={step:'approve',quoteId:quote.quoteId,quoteSha256:quote.contract.quoteSha256,reservedUnits:quote.contract.reservedUnits,maxCalls:1,confirmExactQuote:true,confirmPriorUsagePreserved:true,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,noAutomaticRetry:true};
   const approved=await routeApi(request(url,'POST',approveBody),f.env);assert.equal(approved.status,200,await approved.clone().text());const approval=await approved.json();
-  let calls=0;globalThis.fetch=async()=>{calls++;return response(valid(group[0].id));};
+  let calls=0;globalThis.fetch=async(_url,options)=>{calls++;const body=JSON.parse(options.body);assert.match(body.messages[1].content,/올해\/내년\/작년\/오늘 등 상대 시점은 원문 그대로 유지하고 달력 연도나 날짜를 추정하지 마라/);assert.deepEqual(body.response_format,GROQ_SUMMARY_RESPONSE_FORMAT);return response(valid(group[0].id));};
   f.env.GROQ_API_KEY='ROTATED_TEST_KEY';
   const changedKey=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.equal(changedKey.status,409);assert.equal((await changedKey.json()).error.code,'SUMMARY_CORRECTION_SCOPE_CHANGED');assert.equal(calls,0);
   f.env.GROQ_API_KEY='NOT_REAL_TEST_KEY';
@@ -397,6 +399,14 @@ test('conservative UTF-8 bound partitions long Korean source below Groq Free inp
  assert.equal(fullLength.map(part=>part.text).join('').length,15000);
  assert.ok(bounded.length<=120);
  assert.ok(Math.min(bounded.length*2-1,Math.floor(195000/6600))*6600<=195000);
+});
+test('corrective wording keeps the original raw prompt, partition and strict response contract unchanged',()=>{
+ const segments=Array.from({length:25},(_,i)=>({id:i+1,startMs:i*24000,endMs:(i+1)*24000,text:'가나다라마바사 '.repeat(12)}));
+ const audit={audioFileSha256:'a'.repeat(64)},digest=value=>createHash('sha256').update(value).digest('hex');
+ assert.equal(digest(groqRawPrompt(segments.slice(0,2),audit)),'011dcbede6e8a260e50c0848b44e5bc8337805e4acd23a4c2ed2391dfde02d82');
+ assert.deepEqual(partitionGroqTranscript(segments,audit).map(group=>[group[0].id,group.at(-1).id]),[[1,7],[8,14],[15,21],[22,25]]);
+ assert.equal(GROQ_SUMMARY_CONTRACT_VERSION,'evidence-summary-v2');
+ assert.equal(digest(JSON.stringify(GROQ_SUMMARY_RESPONSE_FORMAT)),'8c891cb8ec7a91c867660bbd56f553ef2876ffe41eeada882a9437b3d9d74bee');
 });
 test('500-segment future merge packs consecutive source IDs without losing the checkpoint guard',()=>{
  const segments=Array.from({length:500},(_,i)=>({id:i+1,startMs:i*11786,endMs:(i+1)*11786,text:'가나다라마바사아자차'.repeat(10)}));
