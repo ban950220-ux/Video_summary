@@ -52,3 +52,9 @@ test('year repair rejects impossible or out-of-contract provider usage',async()=
   await assert.rejects(abbreviatedYearRecoveryCandidate({...base,failedResultJson,usageEvidence:{unit:'actual_total_tokens',totalTokens:usage.totalTokens}}),/YEAR_RECOVERY_USAGE_INVALID/);
  }
 });
+
+test('elapsed-year phrases are not repaired into calendar dates',async()=>{
+ for(const sourceText of ['22년 동안 근무했다','22년 만에 돌아왔다','22년이 넘게 일했다']){
+  await assert.rejects(abbreviatedYearRecoveryCandidate({...base,segments:[{...segments[0],text:sourceText},segments[1]]}),/YEAR_RECOVERY_SOURCE_AMBIGUOUS/);
+ }
+});

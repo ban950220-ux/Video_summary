@@ -122,6 +122,9 @@ test('feature-disabled year recovery only reads; explicit source-spelling review
  assert.equal(marked.status,200,await marked.clone().text());
  const reviewed=await(await routeApi(request(url),f.env)).json();assert.equal(reviewed.failedStages.find(item=>item.stage==='raw:9').failureDispositionReviewed,true);
  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(operationId).state,'FAILED_UNCERTAIN');
+ const laterScope={...f.approval,sequence:2,windowStart:10,maxRequests:1,totalTokenUpperBound:6600};
+ f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'STOPPED',?,?)").run(id+':groq-summary:approval:2',id,new Date().toISOString(),JSON.stringify(laterScope));
+ const afterLaterApproval=await routeApi(request(url+'?stage=raw:9'),f.env);assert.equal(afterLaterApproval.status,200,await afterLaterApproval.clone().text());
 });
 
 test('complete synthesis finalizes validated persisted nodes and actual app TXT export after owner meaning review',async()=>{
@@ -139,6 +142,10 @@ test('complete synthesis finalizes validated persisted nodes and actual app TXT 
   const row=f.db.prepare("SELECT result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-excerpt' AND id LIKE ?").get(id,'%:raw:'+index);
   excerpts[index]=JSON.parse(row.result_json);
  }
+ for(const index of [8,9]){
+  const review=await(await routeApi(request(url+'?stage=raw:'+index),f.env)).json(),disposition=review.disposition;
+  assert.equal((await routeApi(request(url,'POST',{step:'review-failure-usage',stage:'raw:'+index,sourceHash:hash,auditSha256:disposition.auditSha256,recordSha256:disposition.recordSha256,confirmSeparateFromContent:true,acknowledgeReceiptNotVerified:true,acknowledgeAccountBalanceUnknown:true,acknowledgeConservativeReservation:true,noRetry:true}),f.env)).status,200);
+ }
  const audit=JSON.parse(f.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(id).audit_json),auditSha256=await digest(audit);
  for(let index=0;index<groups.length;index++)if(![8,9].includes(index)){
   const normalized=validateAnalysis(valid(groups[index][0].id),groups[index],'groq'),report={...normalized,evidenceValidation:'REFERENCES_COVERAGE_NUMBERS_QUOTES_ONLY'};
@@ -146,6 +153,22 @@ test('complete synthesis finalizes validated persisted nodes and actual app TXT 
  }
  const manifest=await completeCoverageManifest({sourceHash:hash,auditSha256,segments:f.segments,groups,checkpoints,excerpts,verifyGrounding:assertGrounding}),notes=await evidenceNotes({manifest,checkpoints,excerpts}),saved=new Map();
  let progress=await synthesisTreeProgress({notes,sourceSegments:f.segments,verifyGrounding:assertGrounding,savedNodes:saved});
+ f.db.prepare("UPDATE yta_operations SET created_at=? WHERE provider='groq-summary' AND state IN ('DONE','FAILED_UNCERTAIN')").run(new Date(Date.now()-2*86_400_000).toISOString());
+ const scope=await(await routeApi(request(url),f.env)).json();
+ const quoted=await routeApi(request(url,'POST',{step:'quote',sourceHash:hash,manifestSha256:scope.manifestSha256,confirmFreeOnly:true,acknowledgeUnknownBalance:true}),f.env);assert.equal(quoted.status,200,await quoted.clone().text());
+ const issued=await quoted.json(),approved=await routeApi(request(url,'POST',{step:'approve',quoteId:issued.quoteId,quoteSha256:issued.quoteSha256,reservedUnits:issued.quote.reservedUnits,maxCalls:issued.quote.maxCalls,confirmExactQuote:true,freeTierConfirmed:true,billingDisabled:true,noPaidFallback:true,noAutomaticRetry:true}),f.env);assert.equal(approved.status,200,await approved.clone().text());
+ const approval=await approved.json(),first=progress.next,firstResponse={summary:[{text:'원문 검증',evidenceIds:[first.left.evidenceIds[0]]}],chapters:[{text:'시간대 요약',evidenceIds:[first.left.evidenceIds[0]]},{text:'시간대 요약',evidenceIds:[first.right.evidenceIds[0]]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'};
+ const oldFetch=globalThis.fetch;let synthesisFetches=0;
+ try{globalThis.fetch=async()=>{synthesisFetches++;return response(firstResponse);};const executed=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,expectedNode:first.key,requestSha256:first.requestSha256,executeOnce:true}),f.env);assert.equal(executed.status,200,await executed.clone().text());}finally{globalThis.fetch=oldFetch;}
+ assert.equal(synthesisFetches,1);
+ const firstSaved=JSON.parse(f.db.prepare("SELECT result_json FROM yta_operations WHERE id=? AND provider='groq-summary-synthesis'").get(id+':groq-summary-complete:'+hash+':note:'+first.key).result_json);
+ saved.set(first.key,firstSaved);progress=await synthesisTreeProgress({notes,sourceSegments:f.segments,verifyGrounding:assertGrounding,savedNodes:saved});
+ const afterFirst=await(await routeApi(request(url),f.env)).json();assert.equal(afterFirst.activeSynthesisApproval.approvalId,approval.approvalId);
+ f.db.prepare("UPDATE yta_operations SET created_at=? WHERE id=?").run(new Date(Date.now()-120_000).toISOString(),id+':groq-summary-complete:'+hash+':note:'+first.key);
+ const second=progress.next,secondResponse={summary:[{text:'원문 검증',evidenceIds:[second.left.evidenceIds[0]]}],chapters:[{text:'시간대 요약',evidenceIds:[second.left.evidenceIds[0]]},{text:'시간대 요약',evidenceIds:[second.right.evidenceIds[0]]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'};
+ try{globalThis.fetch=async()=>{synthesisFetches++;return response(secondResponse);};const executed=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,expectedNode:second.key,requestSha256:second.requestSha256,executeOnce:true}),f.env);assert.equal(executed.status,200,await executed.clone().text());}finally{globalThis.fetch=oldFetch;}
+ assert.equal(synthesisFetches,2);
+ saved.set(second.key,JSON.parse(f.db.prepare("SELECT result_json FROM yta_operations WHERE id=? AND provider='groq-summary-synthesis'").get(id+':groq-summary-complete:'+hash+':note:'+second.key).result_json));progress=await synthesisTreeProgress({notes,sourceSegments:f.segments,verifyGrounding:assertGrounding,savedNodes:saved});
  while(!progress.complete){
   const next=progress.next,response={summary:[{text:'원문 검증',evidenceIds:[next.left.evidenceIds[0]]}],chapters:[{text:'시간대 요약',evidenceIds:[next.left.evidenceIds[0]]},{text:'시간대 요약',evidenceIds:[next.right.evidenceIds[0]]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실은 미확인'},record=await persistedSynthesisNode({next,response,sourceSegments:f.segments,verifyGrounding:assertGrounding}),usageEventId=crypto.randomUUID(),usage={inputTokens:300,outputTokens:90,totalTokens:390};
   f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,'owner','groq','LIVE_FREE_SYNTHESIS','actual_total_tokens',390,0,NULL,'PROVIDER_REPORTED_ACCOUNT_REMAINING_UNKNOWN',?)").run(usageEventId,id,stamp);
