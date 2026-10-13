@@ -104,6 +104,22 @@ test('reviewed gap rejects invalid reasoning usage and a non-token usage ledger 
  }finally{globalThis.fetch=oldFetch;f.db.close();}
 });
 
+test('reviewed gap requires actual token units for the original raw:8 failure usage',async()=>{
+ const {f,failedId,oldResult,approval,correctionResult}=await reviewedGapFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const url=f.path+'/groq-summary-gap';assert.equal((await routeApi(request(url),f.env)).status,200);
+  globalThis.fetch=async()=>{calls++;throw Error('PROVIDER_CALL_FORBIDDEN');};
+  const original=f.db.prepare("SELECT id,unit,used_units FROM usage_events WHERE job_id=? AND provenance='PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN'").get(f.id);
+  assert.equal(original.unit,'actual_total_tokens');assert.equal(original.used_units,2139);
+  f.db.prepare("UPDATE usage_events SET unit='audio_seconds' WHERE id=?").run(original.id);
+  const denied=await routeApi(request(url),f.env);assert.equal(denied.status,409,await denied.clone().text());assert.equal((await denied.json()).error.code,'SUMMARY_CORRECTION_EVIDENCE_INVALID');assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(failedId).result_json,oldResult);
+  assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(approval.attemptId).result_json,correctionResult);
+  f.db.prepare("UPDATE usage_events SET unit='actual_total_tokens' WHERE id=?").run(original.id);
+  assert.equal((await routeApi(request(url),f.env)).status,200);assert.equal(calls,0);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
 test('reviewed gap contract preserves raw:8 failures, executes only raw:9 and exposes an incomplete bundle',async()=>{
  const {f,groups,approval,failedId,oldResult,correctionResult}=await reviewedGapFixture(),oldFetch=globalThis.fetch;let calls=0;
  try{

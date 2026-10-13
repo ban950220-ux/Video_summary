@@ -227,7 +227,7 @@ async function correctionContext(env,{id,job,source,transcriptHash,legacyTranscr
  const oldInputBound=oldUnits-GROQ_SUMMARY_COMPLETION_CAP;
  if(usage.inputTokens>oldInputBound||usage.outputTokens>GROQ_SUMMARY_COMPLETION_CAP||usage.totalTokens>oldUnits)stop('SUMMARY_CORRECTION_EVIDENCE_INVALID','기존 제공자 사용량이 승인 상한을 넘습니다.');
  if(failed.units!==oldUnits||!allowSaved&&approval.keyIdentity!==await capacityIdentity(env,'groq'))stop('SUMMARY_CORRECTION_SCOPE_CHANGED','기존 요청 범위 또는 키 세대가 변경됐습니다.');
- const used=await env.DB.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY' AND provenance='PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN' AND used_units=?").bind(id,usage.totalTokens).first();
+ const used=await env.DB.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY' AND unit='actual_total_tokens' AND provenance='PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN' AND used_units=?").bind(id,usage.totalTokens).first();
  if(!used?.count)stop('SUMMARY_CORRECTION_EVIDENCE_INVALID','기존 사용량 원장을 확인하세요.');
  const messages=groqSummaryMessages(correctiveRawPrompt(group,promptAudit(job))),inputBound=groqInputUpperBound(messages),units=inputBound+GROQ_SUMMARY_COMPLETION_CAP;
  if(inputBound>GROQ_SUMMARY_INPUT_BOUND||units>=8_000)stop('SUMMARY_STAGE_TOO_LONG','교정 요청의 입력 상한을 넘습니다.');
