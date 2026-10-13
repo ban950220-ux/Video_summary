@@ -36,7 +36,7 @@ async function sharedLedger(env,excluded=[]){
  if(minute+PER_CALL>MINUTE_CAP||day+PER_CALL>DAY_CAP)fail('SYNTHESIS_LOCAL_LIMIT','공유 Groq 앱 사용 상한을 기다리세요.');
 }
 
-export async function synthesisAction({body,env,id,job,source,sourceHash,manifest,notes,progress,failures,recoveredFailureIds=[],ownedJob,sourceOf,completeSource,verifyGrounding}){
+export async function synthesisAction({body,env,id,job,source,sourceHash,manifest,notes,progress,failures,recoveredFailureIds=[],claimedOutcomeUnsettled=false,ownedJob,sourceOf,completeSource,verifyGrounding}){
  if(env.ENABLE_COMPLETE_SYNTHESIS!=='true'||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')fail('SYNTHESIS_FEATURE_DISABLED','Groq Free 종합 실행은 비활성입니다.');
  if(progress.complete)fail('SYNTHESIS_ALREADY_COMPLETE','모든 종합 노드가 이미 저장됐습니다.');
  if(failures.some(item=>!item.dispositionReviewed))fail('SYNTHESIS_FAILURE_REVIEW_REQUIRED','원시 단계 실패 사용량을 별도로 검토하세요.');
@@ -72,7 +72,7 @@ export async function synthesisAction({body,env,id,job,source,sourceHash,manifes
  if(body.step==='cancel'){
   if(body.approvalId!==aId||body.confirmCancel!==true)throw new InputError('취소할 종합 승인을 확인하세요.');
   const stopped=await env.DB.prepare("UPDATE yta_operations SET state='STOPPED' WHERE id=? AND job_id=? AND provider='groq-summary-synthesis-approval' AND state='APPROVED' AND result_json=?").bind(aId,id,savedApproval.result_json).run();
-  if(stopped.meta?.changes!==1)fail('SYNTHESIS_APPROVAL_CHANGED','종합 승인 취소 상태가 변경됐습니다.');return {cancelled:true,providerCalls:0};
+  if(stopped.meta?.changes!==1)fail('SYNTHESIS_APPROVAL_CHANGED','종합 승인 취소 상태가 변경됐습니다.');return claimedOutcomeUnsettled?{approvalStopped:true,claimedRequestOutcome:'UNKNOWN',providerCalls:'UNKNOWN',reviewRequired:true}:{cancelled:true,providerCalls:0};
  }
  if(body.step!=='execute'||body.approvalId!==aId||body.expectedNode!==progress.next.key||body.requestSha256!==progress.next.requestSha256||body.executeOnce!==true)throw new InputError('현재 다음 종합 노드만 한 번 실행하세요.');
  const excluded=[...failures.flatMap(item=>item.evidence.map(evidence=>evidence.operationId)),...recoveredFailureIds];
