@@ -332,25 +332,37 @@ function showGroqGapChoice(job,target,requestId){
   const scope=await api(url);if(!current())return;empty(host);
   host.append(el('h2',{text:'Groq Free · raw:8 누락 공개 독립 구간 진행'}),el('p',{text:`연속 완료 raw:0–7 · 검증 저장 ${scope.completedRawStages}/${scope.rawStages}구간 · 보류 ${scope.heldRawStages}구간 (raw:8, 원문 #${scope.gap.firstId}–#${scope.gap.lastId}) · 미처리 ${scope.pendingRawStages}구간. raw:8 원요청과 교정은 ${scope.gap.failureCode} 검증 실패로 검토 필요·미완료입니다. 전체 보고서는 저장되지 않습니다.`}),el('p',{text:'기존 실패 응답과 사용량은 보존됩니다. 다음 독립 구간만 진행하며 raw:8 재전송, 새 교정 슬롯, 자동 재시도는 없습니다. 제공자 계정 잔여량은 UNKNOWN입니다.'}));
   if(note)host.append(el('p',{attrs:{role:'status'},text:note}));
-  const view=el('button',{className:'btn secondary small',text:'누락 공개 부분 묶음 보기'});view.onclick=()=>{if(current()){empty(target);showGroqBundleChoice(job,target,requestId,{withGap:true});}};host.append(view);
+  const view=el('button',{className:'btn secondary small',text:'누락 공개 부분 묶음 보기'});view.onclick=()=>{if(current()){const nextRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);empty(target);showGroqBundleChoice(job,target,nextRequest,{withGap:true});}};host.append(view);
   if(scope.bundleAvailable){host.append(el('p',{text:'독립 원시 구간은 모두 검증 저장됐습니다. raw:8은 보류 중이며 전체 요약은 미완료입니다.'}));return;}
   if(scope.approved){
    host.append(el('p',{text:`승인 창 ${scope.windowStart+1}번부터 최대 ${scope.maxRequests}회 · 만료 ${fmtRetryDate(scope.expiresAt)}. 다음 구간 ${scope.nextRawStage}.`}));
    if(scope.state!=='APPROVED'||scope.expiresAt<=Date.now())return;
+   const progress=el('p',{attrs:{role:'status','aria-live':'polite'}});host.append(progress);
    const run=el('button',{className:'btn secondary small',text:'이 탭에서 승인된 독립 구간 순차 진행'});run.disabled=running;
    run.onclick=async()=>{
     if(running||!current())return;running=true;interrupted=false;run.disabled=true;
-    const stop=()=>{interrupted=true;};stopGroqSummarySession=stop;
+    let cancelWait=null,finalNote='';
+    const stop=()=>{interrupted=true;cancelWait?.();if(current())progress.textContent='이 탭의 진행을 멈췄습니다. 이미 보낸 요청의 저장 상태를 확인하세요.';};stopGroqSummarySession=stop;
     const visibility=()=>{if(document.hidden)stop();};document.addEventListener('visibilitychange',visibility);
     try{
+     progress.textContent='승인·원본 상태를 다시 확인 중입니다. 새 모델 요청은 아직 보내지 않았습니다.';
      const outcome=await runApprovedGroqSummary({jobId:job.id,scope,getApproval:()=>api(url),sendStage:async()=>{
       const fresh=await api(url);
       if(!current()||interrupted||document.hidden||!fresh.approved||fresh.outputKind!==scope.outputKind||fresh.gap?.originalSha256!==scope.gap.originalSha256||fresh.gap?.correctionSha256!==scope.gap.correctionSha256||!fresh.nextRawStage)throw Error('FOREGROUND_REQUIRED');
-      return api(url,{method:'POST',body:{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:fresh.nextRawStage,executeOnce:true}});
-     },wait:ms=>waitForeground(ms),foreground:()=>current()&&!document.hidden&&!interrupted,onUpdate:()=>{}});
-     if(current())await render(outcome.reason==='SUMMARY_BUNDLE_AVAILABLE'?'독립 구간 저장 완료 · raw:8 보류와 전체 요약 미완료를 유지합니다.':outcome.reason==='SUMMARY_WINDOW_COMPLETE'?'이번 승인 창이 끝났습니다. 계속하려면 새 범위를 검토·승인하세요.':outcome.reason?'진행 중단: '+outcome.reason+' · 저장 상태를 확인하세요. 자동 재전송은 없습니다.':'저장 상태를 확인하세요.');
-    }catch(error){if(current())await render('요청 결과를 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다. '+safeError(error));}
-    finally{document.removeEventListener('visibilitychange',visibility);if(stopGroqSummarySession===stop)stopGroqSummarySession=null;running=false;if(current())run.disabled=false;}
+      progress.textContent=fresh.nextRawStage+' 전송 중 · 제공자 수신과 저장 결과는 아직 미확인입니다.';
+      const sent=await api(url,{method:'POST',body:{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:fresh.nextRawStage,executeOnce:true}});
+      if(current()&&!interrupted)progress.textContent=sent.stage+' 저장 확인 · raw:8은 계속 보류 중입니다.';
+      return sent;
+     },wait:ms=>new Promise((resolve,reject)=>{
+      if(interrupted||!current()||document.hidden){reject(Error('FOREGROUND_REQUIRED'));return;}
+      const until=Date.now()+ms;
+      const update=()=>{if(current())progress.textContent=`저장 상태 확인 · 다음 독립 구간까지 ${Math.max(0,Math.ceil((until-Date.now())/1000))}초 대기 · raw:8 보류`;};
+      update();const ticker=setInterval(update,1000),timer=setTimeout(()=>{clearInterval(ticker);cancelWait=null;resolve();},ms);
+      cancelWait=()=>{clearTimeout(timer);clearInterval(ticker);cancelWait=null;reject(Error('FOREGROUND_REQUIRED'));};
+     }),foreground:()=>current()&&!document.hidden&&!interrupted,onUpdate:({stage})=>{if(current()&&!interrupted)progress.textContent=stage+' 저장 확인 · raw:8 보류 · 요청 간격 대기';}});
+     finalNote=outcome.reason==='SUMMARY_BUNDLE_AVAILABLE'?'독립 구간 저장 완료 · raw:8 보류와 전체 요약 미완료를 유지합니다.':outcome.reason==='SUMMARY_WINDOW_COMPLETE'?'이번 승인 창이 끝났습니다. 계속하려면 새 범위를 검토·승인하세요.':outcome.reason?'진행 중단: '+outcome.reason+' · 저장 상태를 확인하세요. 자동 재전송은 없습니다.':'저장 상태를 확인하세요.';
+    }catch(error){finalNote='요청 결과를 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다. '+safeError(error);}
+    finally{cancelWait?.();document.removeEventListener('visibilitychange',visibility);if(stopGroqSummarySession===stop)stopGroqSummarySession=null;running=false;if(current())await render(finalNote).catch(error=>{progress.textContent='저장 상태를 읽을 수 없습니다. 자동 재전송은 없습니다. '+safeError(error);});}
    };host.append(run);return;
   }
   const form=el('form',{className:'fields'}),labels=['Groq Free 조직과 결제 비활성을 확인했습니다.','raw:8 검증 실패·누락과 최종 보고서 미완료를 확인했습니다.','계정 잔여량 UNKNOWN, 표시된 호출·토큰 상한, 첫 429/불명확한 전송에서 중단을 확인했습니다.'];

@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
-import {runApprovedGroqSummary,detailRequestIsCurrent} from '../web/site/audio-runner.mjs';
+import {runApprovedGroqSummary,detailRequestIsCurrent,beginDetailAction} from '../web/site/audio-runner.mjs';
 import {groqSummaryProgress} from '../web/site/groq-summary-progress.mjs';
 
 test('reviewed gap UI discloses the held group and records approval before offering execution',async()=>{
@@ -17,6 +17,34 @@ test('reviewed gap UI discloses the held group and records approval before offer
  const form=host.children.find(item=>item.tag==='form');assert.ok(form);for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
  await form.onsubmit({preventDefault(){}});assert.deepEqual(posts.map(item=>item.step),['approve']);assert.equal(posts[0].acknowledgeMissingRaw8,true);assert.equal(posts[0].acknowledgeNoFinalReport,true);
  assert.ok(host.children.some(item=>item.tag==='button'&&item.textContent.includes('순차 진행')));assert.equal(posts.some(item=>item.step==='execute'),false);
+});
+
+test('reviewed gap foreground runner cancels waiting on bundle navigation and restores the button after tab hide',async()=>{
+ const tick=()=>new Promise(resolve=>setImmediate(resolve));
+ const mount=async({delayPost=false}={})=>{
+  const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
+  const listeners=new Map(),timers=new Map(),intervals=new Map();let serial=0,posted=0,resolvePost=null;
+  const scope={approved:true,state:'APPROVED',jobId:'job-a',transcriptHash:'a'.repeat(64),model:'openai/gpt-oss-120b',outputKind:'RAW_CHECKPOINTS_WITH_REVIEW_GAP',gap:{stage:'raw:8',firstId:144,lastId:165,failureCode:'SUMMARY_RESPONSE_INVALID',originalSha256:'b'.repeat(64),correctionSha256:'c'.repeat(64)},completedRawStages:8,contiguousRawStages:8,heldRawStages:1,pendingRawStages:11,rawStages:20,nextRawStage:'raw:9',windowStart:9,totalRequests:20,maxRequests:11,maxInputTokensPerRequest:4800,maxCompletionTokensPerRequest:1800,totalTokenUpperBound:72600,credentialGeneration:'opaque',expiresAt:Date.now()+600000};
+  const bundle={sourceCheckpointCount:8,bundleContractVersion:'raw-checkpoints-reviewed-gap-v1',bundleHash:'d'.repeat(64),missingRanges:[{stage:'raw:8',firstId:144,lastId:165,startMs:0,endMs:1,originalState:'FAILED_UNCERTAIN',correctionState:'FAILED_UNCERTAIN',failureCode:'SUMMARY_RESPONSE_INVALID'}],completedRawStages:8,heldRawStages:1,pendingRawStages:11,report:{summary:[],chapters:[],claims:[],numbers:[],critical:[],conclusion:'',warning:'raw:8 미완료'}};
+  const fetcher=async(path,options)=>{
+   if(options.method==='POST'){posted++;if(delayPost)await new Promise(resolve=>resolvePost=resolve);scope.completedRawStages=9;scope.pendingRawStages=10;scope.nextRawStage='raw:10';return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({pending:true,stage:'raw:9'})};}
+   return {ok:true,headers:{get:()=> 'application/json'},json:async()=>path.includes('bundle')?bundle:{...scope}};
+  };
+  const document={createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false,addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:(name,fn)=>{if(listeners.get(name)===fn)listeners.delete(name);}};
+  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqGapChoice=showGroqGapChoice;globalThis.__state=state;');
+  const context={document,window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent,beginDetailAction,runApprovedGroqSummary,fmtRetryDate:()=> 'soon',setTimeout:(fn)=>{const id=++serial;timers.set(id,fn);return id;},clearTimeout:id=>timers.delete(id),setInterval:(fn)=>{const id=++serial;intervals.set(id,fn);return id;},clearInterval:id=>intervals.delete(id)};
+  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqGapChoice({id:'job-a'},target,0);await tick();
+  const host=target.children[0],run=()=>host.children.find(item=>item.tag==='button'&&item.textContent?.includes('순차 진행')),view=()=>host.children.find(item=>item.tag==='button'&&item.textContent?.includes('부분 묶음'));
+  return {target,host,run,view,document,listeners,timers,intervals,posted:()=>posted,resolvePost:()=>resolvePost?.(),tick};
+ };
+ const waiting=await mount();const first=waiting.run().onclick();await waiting.tick();await waiting.tick();
+ assert.equal(waiting.posted(),1);assert.ok(waiting.host.children.some(item=>item.textContent?.includes('61초 대기')));assert.ok(waiting.timers.size>0);
+ waiting.view().onclick();await first;for(const fn of waiting.timers.values())fn();await waiting.tick();assert.equal(waiting.posted(),1);assert.equal(waiting.timers.size,0);
+ const hidden=await mount();const button=hidden.run(),pending=button.onclick();button.onclick();await hidden.tick();await hidden.tick();assert.equal(hidden.posted(),1);
+ hidden.document.hidden=true;hidden.listeners.get('visibilitychange')();hidden.document.hidden=false;await pending;await hidden.tick();
+ assert.equal(hidden.posted(),1);assert.equal(hidden.timers.size,0);assert.equal(hidden.run().disabled,false);
+ const delayed=await mount({delayPost:true});const inFlight=delayed.run().onclick();await delayed.tick();assert.equal(delayed.posted(),1);
+ delayed.view().onclick();delayed.resolvePost();await inFlight;await delayed.tick();assert.equal(delayed.posted(),1);assert.equal(delayed.timers.size,0);
 });
 
 test('raw:8 correction UI replaces expired quotes and separates claimed, failed and saved attempts',async()=>{

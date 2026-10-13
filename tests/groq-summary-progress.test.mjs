@@ -7,10 +7,14 @@ const approved={approval:{state:'APPROVED',expiresAt:200_000,windowStart:0,maxRe
 const view=(status,options={})=>groqSummaryProgress(status,{now,...options});
 
 test('reviewed gap progress separates contiguous, saved, held and pending raw groups',()=>{
- const status={...approved,completedStages:9,rawProgress:{contiguousRawStages:8,completedRawStages:9,heldRawStages:1,pendingRawStages:11,rawStages:21,heldStage:'raw:8'},activeStage:{key:'raw:8:correction',state:'FAILED_UNCERTAIN'}};
+ const status={...approved,completedStages:9,rawProgress:{contiguousRawStages:8,completedRawStages:9,heldRawStages:1,pendingRawStages:11,rawStages:21,heldStage:'raw:8'},activeStage:{key:'raw:8:correction',state:'FAILED_UNCERTAIN',errorCode:'SUMMARY_RESPONSE_INVALID'}};
  const result=view(status);
  assert.match(result.detail,/연속 완료 raw 0–7/);assert.match(result.detail,/검증 저장 9\/21구간/);assert.match(result.detail,/보류 1구간 \(raw:8\)/);assert.match(result.detail,/미처리 11구간/);
  assert.match(result.headline,/전체 요약 미완료/);assert.equal(result.canExecute,false);
+ const claimed=view({...status,activeStage:{key:'raw:9',state:'CLAIMED'}});
+ assert.match(claimed.headline,/앱 서버 접수/);assert.match(claimed.detail,/보류 1구간/);assert.equal(claimed.canExecute,false);
+ const failed=view({...status,activeStage:{key:'raw:9',state:'FAILED_UNCERTAIN',errorCode:'429'}});
+ assert.match(failed.headline,/결과 불확실/);assert.match(failed.detail,/보류 1구간/);assert.equal(failed.canExecute,false);
 });
 
 test('progress wording separates approval, transport, server claim, checkpoint and final report',()=>{
