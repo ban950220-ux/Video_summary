@@ -11,6 +11,13 @@ const failure=(code,status=409)=>({ok:false,status,headers:{get:()=> 'applicatio
 const pause=()=>new Promise(resolve=>setImmediate(resolve));
 const scope=(approved=true)=>({approved,jobId:'job-a',transcriptHash:'a'.repeat(64),model:'openai/gpt-oss-120b',state:'APPROVED',expiresAt:Date.now()+3600000,windowStart:0,totalRequests:3,maxRequests:3,maxInputTokensPerRequest:4800,maxCompletionTokensPerRequest:1800,totalTokenUpperBound:19800,credentialGeneration:'test-proof'});
 const ledger=(approved=true)=>({jobId:'job-a',transcriptHash:'a'.repeat(64),approval:approved?{state:'APPROVED',expiresAt:Date.now()+3600000,windowStart:0,maxRequests:3,totalTokenUpperBound:19800}:null,completedStages:0,plannedMaximumRequests:3,activeStage:null,finalReportSaved:false,nextEligibleAt:null});
+test('ordinary progress marks a correction claim and failure separately without enabling another send',()=>{
+ for(const state of ['CLAIMED','FAILED_UNCERTAIN','BLOCKED']){
+  const view=groqSummaryProgress({...ledger(),activeStage:{key:'raw:8:correction',state,errorCode:state==='FAILED_UNCERTAIN'?'429':null}});
+  assert.match(view.headline,/raw:8 교정/);assert.equal(view.canExecute,false);
+ }
+ assert.doesNotMatch(groqSummaryProgress({...ledger(),activeStage:{key:'raw:8',state:'FAILED_UNCERTAIN'}}).headline,/교정/);
+});
 function harness(fetcher,{setTimeoutFn=()=>0}={}){
  const node=tag=>({tag,children:[],hidden:false,dataset:{},disabled:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}});
  const target=node('div');target.dataset.jobId='job-a';const toast=node('div');

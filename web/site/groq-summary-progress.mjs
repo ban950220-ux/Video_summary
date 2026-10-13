@@ -7,6 +7,11 @@ export function groqSummaryProgress(status,{phase='idle',reason=null,waitUntil=n
  const approval=status?.approval,active=status?.activeStage;
  const result=(headline,detail,tone='neutral',canExecute=false)=>({headline,detail:detail?`${detail} · ${count}`:count,tone,canExecute});
  if(status?.finalReportSaved)return result('최종 요약 저장 완료','이력에서 보고서를 다시 열고 TXT로 내보낼 수 있습니다.','done');
+ if(active?.key==='raw:8:correction'){
+  if(active.state==='CLAIMED')return result('raw:8 교정 1회 접수 확인','새 교정 슬롯이 기록됐습니다. 제공자 수신 여부와 결과는 아직 미확인입니다. 자동 재전송하지 마세요.','working');
+  if(active.state==='FAILED_UNCERTAIN')return result('raw:8 교정 1회 결과 불확실','기존 raw:8 실패와 별개의 새 시도입니다. 제공자 사용량과 안전한 제한 정보를 확인하기 전 재전송하지 마세요.','warning');
+  if(active.state==='BLOCKED')return result('raw:8 교정 1회 전송 전 차단','새 교정 시도는 제공자 전송 전에 차단됐습니다. 저장된 원장과 승인 범위를 확인하세요.','warning');
+ }
  if(active?.state==='FAILED_UNCERTAIN')return result('모델 요청 결과 불확실','원장에 미확정 요청이 있습니다. 제공자 사용량과 기록을 검토하기 전 재전송하지 마세요.','warning');
  if(active?.state==='BLOCKED')return result('요약 요청 차단 기록 확인','승인·원본·키 상태를 검토하세요. 자동 재전송은 없습니다.','warning');
  if(active?.state==='CLAIMED')return phase==='unknown'?result('앱 서버 접수 확인 · 결과 불명','요청 슬롯은 기록됐지만 응답을 받지 못했습니다. 제공자 수신 여부는 미확인이고 재전송하지 마세요.','warning'):result('앱 서버 접수 확인','요청 슬롯이 기록됐습니다. 모델 결과를 기다리거나 확인 중이며 제공자 수신은 확인되지 않았습니다.','working');

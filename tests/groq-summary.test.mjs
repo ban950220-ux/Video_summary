@@ -145,8 +145,25 @@ test('a separately approved free raw:8 correction preserves old ledgers and resu
   const realNow=Date.now;try{Date.now=()=>quote.contract.expiresAt+1;assert.equal((await readStatus()).status,200);}finally{Date.now=realNow;}
   f.env.GROQ_API_KEY='ROTATED_TEST_KEY';assert.equal((await readStatus()).status,200);f.env.GROQ_API_KEY='NOT_REAL_TEST_KEY';
   const next=await routeApi(request(f.path+'/groq-summary-approval'),f.env);assert.equal(next.status,200,await next.clone().text());assert.equal((await next.json()).windowStart,9);
-  f.db.prepare('UPDATE jobs SET report_json=? WHERE id=?').run(JSON.stringify({kind:'GROQ_EVIDENCE_LINKED',summary:[],chapters:[],claims:[],numbers:[],critical:[],conclusion:'저장 완료'}),f.id);
-  assert.equal((await readStatus()).status,200);f.db.prepare('UPDATE jobs SET report_json=NULL WHERE id=?').run(f.id);
+  for(let i=9;i<groups.length;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+hash+':raw:'+i,f.id,stamp,JSON.stringify({hash,key:'raw:'+i,report:valid(groups[i][0].id)}));
+  const promptScope=promptAudit({audit,duration_seconds:jobRow.duration_seconds});
+  let parts=groups.map(item=>({ids:item.map(segment=>segment.id),firstIds:[item[0].id],startMs:item[0].startMs,endMs:item.at(-1).endMs,report:valid(item[0].id)}));
+  for(let level=0;parts.length>1;level++){
+   const batches=[];let batch=[];
+   for(const part of parts){const candidate=[...batch,part];if(groqInputUpperBound(groqSummaryMessages(groqMergePrompt(candidate,promptScope,{final:true})))>GROQ_SUMMARY_INPUT_BOUND){batches.push(batch);batch=[part];}else batch=candidate;}
+   if(batch.length)batches.push(batch);
+   const nextParts=[];
+   for(let i=0;i<batches.length;i++){
+    const items=batches[i];if(items.length===1){nextParts.push(items[0]);continue;}
+    const firstIds=items.flatMap(item=>item.firstIds),ids=items.flatMap(item=>item.ids),key='merge:'+level+':'+i,report={...valid(firstIds[0]),chapters:firstIds.map(id=>({text:'시간대 요약',evidenceIds:[id]}))};
+    f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+hash+':'+key,f.id,stamp,JSON.stringify({hash,key,report}));
+    nextParts.push({ids,firstIds,startMs:items[0].startMs,endMs:items.at(-1).endMs,report});
+   }
+   assert.ok(nextParts.length<parts.length);parts=nextParts;
+  }
+  const finalized=await routeApi(request(f.path+'/groq-summary','POST',{finalizeOnly:true,transcriptHash:hash}),f.env);assert.equal(finalized.status,200,await finalized.clone().text());
+  assert.equal((await readStatus()).status,200);
+  const reopened=await routeApi(request(f.path+'/groq-summary-approval'),f.env);assert.equal(reopened.status,200,await reopened.clone().text());
   const duplicate=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.notEqual(duplicate.status,202);assert.equal(calls,1);
  }finally{globalThis.fetch=oldFetch;f.db.close();}
 });
@@ -192,6 +209,22 @@ test('raw:8 correction preserves safe rate limit headers after an uncertain 429'
   const row=f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(approval.attemptId);assert.equal(row.state,'FAILED_UNCERTAIN');assert.equal(row.error_code,'429');assert.deepEqual(JSON.parse(row.result_json).safeRateLimit,{retryAfterSeconds:120,remainingRequests:0,remainingTokens:0,tokenReset:null});
   assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(failedId).result_json,oldResult);
   assert.equal((await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env)).status,409);assert.equal(calls,1);
+ }finally{globalThis.fetch=priorFetch;f.db.close();}
+});
+
+test('ordinary Groq status distinguishes the new raw:8 correction claim and failure from the old failure',async()=>{
+ const {f,approval,failedId,oldResult}=await approvedCorrectionFixture(),priorFetch=globalThis.fetch;let calls=0;
+ try{
+  globalThis.fetch=async()=>{calls++;throw Error('PROVIDER_CALL_FORBIDDEN');};
+  const at=new Date().toISOString();
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at) VALUES(?,?,'groq-summary',6600,'CLAIMED',?)").run(approval.attemptId,f.id,at);
+  const statusUrl=f.path+'/groq-summary-status',claimed=await(await routeApi(request(statusUrl),f.env)).json();
+  assert.equal(claimed.activeStage.key,'raw:8:correction');assert.equal(claimed.activeStage.state,'CLAIMED');assert.equal(claimed.correctionAttempt.state,'CLAIMED');assert.equal(claimed.completedStages,0);assert.equal(claimed.nextEligibleAt,null);assert.equal(calls,0);
+  f.db.prepare("UPDATE yta_operations SET state='FAILED_UNCERTAIN',error_code='429' WHERE id=?").run(approval.attemptId);
+  const failed=await(await routeApi(request(statusUrl),f.env)).json();assert.equal(failed.activeStage.key,'raw:8:correction');assert.equal(failed.activeStage.state,'FAILED_UNCERTAIN');assert.equal(failed.activeStage.errorCode,'429');assert.equal(failed.correctionAttempt.state,'FAILED_UNCERTAIN');assert.equal(failed.completedStages,0);assert.equal(failed.nextEligibleAt,null);assert.equal(calls,0);
+  f.db.prepare("UPDATE yta_operations SET state='BLOCKED',error_code='VAULT_NOT_READY' WHERE id=?").run(approval.attemptId);
+  const blocked=await(await routeApi(request(statusUrl),f.env)).json();assert.equal(blocked.activeStage.key,'raw:8:correction');assert.equal(blocked.activeStage.state,'BLOCKED');assert.equal(blocked.activeStage.errorCode,'VAULT_NOT_READY');assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(failedId).result_json,oldResult);
  }finally{globalThis.fetch=priorFetch;f.db.close();}
 });
 
