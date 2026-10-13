@@ -39,13 +39,13 @@ const baselineObservability={
 };
 
 export const approvedRemoteBaseline={
-  activeVersionId:'1ad94212-8b1b-4399-aebf-8edc4ac5315c',
-  sourceCommit:'d6bc0aabf061bdcf8b0db714d3bbda4a8933de14',
+  activeVersionId:'f5bb4540-be89-44ff-b362-6719ad22a4ce',
+  sourceCommit:'7a2407bdc0fcf73245399f75917e8dc6b949a272',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:true,
-  // Production Build 7fd19f32-3400-44c7-a077-20aa87f326f0 and its
-  // post-deploy receipt verified this version and source annotation.
+  // Active version/source pins were advanced from the separately supplied
+  // owner readback. The next read-only preflight must independently verify them.
   // A fresh remote preflight still checks all settings before another upload;
   // omitted optional fields, null and [] remain distinct.
   remoteSettingsReviewed:true,
