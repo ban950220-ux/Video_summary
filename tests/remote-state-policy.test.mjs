@@ -21,11 +21,17 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
 ]});
 
 test('guard baseline pins the verified active Worker version and source commit',()=>{
-  assert.equal(approvedRemoteBaseline.activeVersionId,'f5bb4540-be89-44ff-b362-6719ad22a4ce');
-  assert.equal(approvedRemoteBaseline.sourceCommit,'7a2407bdc0fcf73245399f75917e8dc6b949a272');
+  assert.equal(approvedRemoteBaseline.activeVersionId,'589e91f6-67a8-4d14-a895-84135330ed4b');
+  assert.equal(approvedRemoteBaseline.sourceCommit,'e1d75ed25f2c5a04adff6c615a17ffecd2a77d3c');
   assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,true);
   const observed=remote();observed.bindings.push({name:'ASSETS',type:'assets'});
   assert.equal(assertRemoteState(observed,approvedRemoteBaseline),true);
+  const previous=structuredClone(observed);
+  previous.activeVersions[0].id='f5bb4540-be89-44ff-b362-6719ad22a4ce';
+  previous.deploymentMessage='source-commit:7a2407bdc0fcf73245399f75917e8dc6b949a272';
+  assert.throws(()=>assertRemoteState(previous,approvedRemoteBaseline),/ACTIVE_VERSION_MISMATCH/);
+  previous.activeVersions[0].id=approvedRemoteBaseline.activeVersionId;
+  assert.throws(()=>assertRemoteState(previous,approvedRemoteBaseline),/SOURCE_COMMIT_MISMATCH/);
 });
 
 test('the one settings version accepts only the pinned annotated predecessor and exact script hash',()=>{
