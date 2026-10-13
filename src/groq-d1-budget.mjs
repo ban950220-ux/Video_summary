@@ -8,6 +8,11 @@ export const GROQ_D1_POST_DISPATCH_RESERVE=6;
 // Synthesis: key lookup + two shared-claim reads + two four-read guards.
 export const GROQ_RAW_PREFLIGHT_QUERIES=5;
 export const GROQ_SYNTHESIS_PREFLIGHT_QUERIES=11;
+// Correction: key lookup, two shared-claim reads, and two five-read guards.
+export const GROQ_CORRECTION_PREFLIGHT_QUERIES=13;
+// Source recheck (2), uncertain write (1), usage reconciliation (3),
+// failed operation (1) and approval stop (1).
+export const GROQ_CORRECTION_POST_DISPATCH_RESERVE=8;
 export function groqD1Budget(db){
  let used=0;
  const blocked=()=>{const error=new ProviderError('GROQ_D1_BUDGET','요약 요청을 보내기 전에 D1 기록 여유가 부족합니다.');error.preDispatchBlocked=true;throw error;};

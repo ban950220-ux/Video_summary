@@ -430,7 +430,10 @@ function showGroqCorrectionChoice(job,target,requestId){
   const reread=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});reread.onclick=refresh;host.append(reread);
   if(state.attemptState||postUncertain){
    const labels={CLAIMED:'새 교정 요청이 접수되어 처리 중입니다.',DONE:'새 교정 결과가 저장됐습니다. 다음 구간은 별도 승인 후 실행하세요.',FAILED_UNCERTAIN:'새 교정 호출의 결과가 불명확합니다. 기존 raw:8 실패와 별개의 실패입니다.',BLOCKED:'새 교정 요청은 전송 전에 차단됐습니다.'};
-   host.append(el('p',{attrs:{role:'status'},text:`${labels[state.attemptState]??'새 교정 요청의 결과를 확인할 수 없습니다.'} 상태 ${state.attemptState??'UNKNOWN'}${state.attemptErrorCode?' · '+state.attemptErrorCode:''} · 자동 재시도는 없습니다. 저장 상태를 확인하세요.`}));return;
+   host.append(el('p',{attrs:{role:'status'},text:`${labels[state.attemptState]??'새 교정 요청의 결과를 확인할 수 없습니다.'} 상태 ${state.attemptState??'UNKNOWN'}${state.attemptErrorCode?' · '+state.attemptErrorCode:''} · 자동 재시도는 없습니다. 저장 상태를 확인하세요.`}));
+   if(state.recoveryCandidate){const proof=state.recoveryCandidate,button=el('button',{className:'btn secondary small',text:'저장된 raw:8 응답 무호출 복구'});host.append(el('p',{text:`완전한 응답 SHA-256 ${proof.responseSha256} · 실제 사용량 ${proof.usageTotalTokens}토큰. 원 실패와 사용량은 남습니다.`}),button);button.onclick=async()=>{if(!confirm('보존된 응답과 사용량을 검토하고 제공자를 다시 호출하지 않고 복구할까요?'))return;button.disabled=true;await post({step:'recover',failedOperationId:proof.failedOperationId,responseSha256:proof.responseSha256,recordSha256:proof.recordSha256,usageTotalTokens:proof.usageTotalTokens,confirmNoProviderCall:true,confirmOriginalFailurePreserved:true});};}
+   if(state.recoveredWithoutProviderCall)host.append(el('p',{text:'보존된 응답을 재호출 없이 복구했습니다. 교정 실패 기록과 실제 사용량은 보존됩니다.'}));
+   return;
   }
   if(state.approvalState==='STOPPED'){host.append(el('p',{text:'이 승인은 취소 또는 중단됐습니다. 동일 범위의 새 호출을 자동으로 승인하지 않습니다.'}));return;}
   if(state.approvalState==='APPROVED'){
