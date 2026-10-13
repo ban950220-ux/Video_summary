@@ -1,7 +1,7 @@
 import {planMp3,prepareMp3Chunk} from '/audio.mjs';
 import {runAudioChunks,runSummaryStages,runApprovedFreeBatch,runApprovedGroqSummary,detailRequestIsCurrent,beginDetailAction} from '/audio-runner.mjs';
 import {audioProgressPlan,cleanedAudioComplete,fmtRetryDate} from '/audio-progress-plan.mjs';
-import {groqSummaryProgress} from '/groq-summary-progress.mjs';
+import {groqSummaryProgress,groqGapFailureText} from '/groq-summary-progress.mjs';
 // Private owner-only site, no third-party scripts and no API keys in browser storage.
 const $=(sel)=>document.querySelector(sel);
 const state={view:'analyze',mode:'url',page:0,hasMore:false,provider:null,connections:[]};
@@ -328,6 +328,7 @@ function showGroqBundleChoice(job,target,requestId,{withGap=false}={}){
 function showGroqGapChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),url='/api/jobs/'+job.id+'/groq-summary-gap',host=el('div');target.append(host);
  let running=false,interrupted=false;
+ const savedFailure=async()=>{try{return groqGapFailureText(await api('/api/jobs/'+job.id+'/groq-summary-status'));}catch{return null;}};
  const render=async(note='')=>{
   const scope=await api(url);if(!current())return;empty(host);
   host.append(el('h2',{text:'Groq Free · raw:8 누락 공개 독립 구간 진행'}),el('p',{text:`연속 완료 raw:0–7 · 검증 저장 ${scope.completedRawStages}/${scope.rawStages}구간 · 보류 ${scope.heldRawStages}구간 (raw:8, 원문 #${scope.gap.firstId}–#${scope.gap.lastId}) · 미처리 ${scope.pendingRawStages}구간. raw:8 원요청과 교정은 ${scope.gap.failureCode} 검증 실패로 검토 필요·미완료입니다. 전체 보고서는 저장되지 않습니다.`}),el('p',{text:'기존 실패 응답과 사용량은 보존됩니다. 다음 독립 구간만 진행하며 raw:8 재전송, 새 교정 슬롯, 자동 재시도는 없습니다. 제공자 계정 잔여량은 UNKNOWN입니다.'}));
@@ -341,7 +342,7 @@ function showGroqGapChoice(job,target,requestId){
    const run=el('button',{className:'btn secondary small',text:'이 탭에서 승인된 독립 구간 순차 진행'});run.disabled=running;
    run.onclick=async()=>{
     if(running||!current())return;running=true;interrupted=false;run.disabled=true;
-    let cancelWait=null,finalNote='';
+    let cancelWait=null,finalNote='',lastServerError=null;
     const stop=()=>{interrupted=true;cancelWait?.();if(current())progress.textContent='이 탭의 진행을 멈췄습니다. 이미 보낸 요청의 저장 상태를 확인하세요.';};stopGroqSummarySession=stop;
     const visibility=()=>{if(document.hidden)stop();};document.addEventListener('visibilitychange',visibility);
     try{
@@ -350,7 +351,7 @@ function showGroqGapChoice(job,target,requestId){
       const fresh=await api(url);
       if(!current()||interrupted||document.hidden||!fresh.approved||fresh.outputKind!==scope.outputKind||fresh.gap?.originalSha256!==scope.gap.originalSha256||fresh.gap?.correctionSha256!==scope.gap.correctionSha256||!fresh.nextRawStage)throw Error('FOREGROUND_REQUIRED');
       progress.textContent=fresh.nextRawStage+' 전송 중 · 제공자 수신과 저장 결과는 아직 미확인입니다.';
-      const sent=await api(url,{method:'POST',body:{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:fresh.nextRawStage,executeOnce:true}});
+      let sent;try{sent=await api(url,{method:'POST',body:{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:fresh.nextRawStage,executeOnce:true}});}catch(error){if(error?.code)lastServerError={stage:fresh.nextRawStage,code:error.code};throw error;}
       if(current()&&!interrupted)progress.textContent=sent.stage+' 저장 확인 · raw:8은 계속 보류 중입니다.';
       return sent;
      },wait:ms=>new Promise((resolve,reject)=>{
@@ -361,8 +362,8 @@ function showGroqGapChoice(job,target,requestId){
       cancelWait=()=>{clearTimeout(timer);clearInterval(ticker);cancelWait=null;reject(Error('FOREGROUND_REQUIRED'));};
      }),foreground:()=>current()&&!document.hidden&&!interrupted,onUpdate:({stage})=>{if(current()&&!interrupted)progress.textContent=stage+' 저장 확인 · raw:8 보류 · 요청 간격 대기';}});
      finalNote=outcome.reason==='SUMMARY_BUNDLE_AVAILABLE'?'독립 구간 저장 완료 · raw:8 보류와 전체 요약 미완료를 유지합니다.':outcome.reason==='SUMMARY_WINDOW_COMPLETE'?'이번 승인 창이 끝났습니다. 계속하려면 새 범위를 검토·승인하세요.':outcome.reason?'진행 중단: '+outcome.reason+' · 저장 상태를 확인하세요. 자동 재전송은 없습니다.':'저장 상태를 확인하세요.';
-    }catch(error){finalNote='요청 결과를 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다. '+safeError(error);}
-    finally{cancelWait?.();document.removeEventListener('visibilitychange',visibility);if(stopGroqSummarySession===stop)stopGroqSummarySession=null;running=false;if(current())await render(finalNote).catch(error=>{progress.textContent='저장 상태를 읽을 수 없습니다. 자동 재전송은 없습니다. '+safeError(error);});}
+    }catch(error){finalNote=lastServerError?`마지막 서버 응답: ${lastServerError.stage} · ${lastServerError.code}. 저장 상태를 별도로 확인하세요. 자동 재전송은 없습니다.`:'요청 결과를 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다. '+safeError(error);}
+    finally{cancelWait?.();document.removeEventListener('visibilitychange',visibility);if(stopGroqSummarySession===stop)stopGroqSummarySession=null;running=false;if(current())await render(finalNote).catch(async error=>{if(current()){const stored=await savedFailure();progress.textContent=stored??`${lastServerError?`마지막 서버 응답 ${lastServerError.stage} · ${lastServerError.code}. `:''}새 저장 상태 조회 실패. 자동 재전송은 없습니다. ${safeError(error)}`;}});}
    };host.append(run);return;
   }
   const form=el('form',{className:'fields'}),labels=['Groq Free 조직과 결제 비활성을 확인했습니다.','raw:8 검증 실패·누락과 최종 보고서 미완료를 확인했습니다.','계정 잔여량 UNKNOWN, 표시된 호출·토큰 상한, 첫 429/불명확한 전송에서 중단을 확인했습니다.'];
@@ -371,7 +372,7 @@ function showGroqGapChoice(job,target,requestId){
   const approve=el('button',{className:'btn secondary small',text:'누락 공개 무료 범위 승인 저장'});form.append(approve);
   form.onsubmit=async event=>{event.preventDefault();approve.disabled=true;try{await api(url,{method:'POST',body:{...scope,step:'approve',freeTierConfirmed:checks[0].checked,billingDisabled:checks[0].checked,unknownBalanceAcknowledged:checks[2].checked,noPaidFallback:checks[2].checked,noGeminiFallback:checks[2].checked,summaryOnly:true,acknowledgeMissingRaw8:checks[1].checked,acknowledgeNoFinalReport:checks[1].checked,noAutomaticRetry:checks[2].checked}});if(current())await render('승인만 저장했습니다. 실행은 별도 선택입니다.');}catch(error){if(current())await render('승인 저장 상태를 조회로 확인하세요. '+safeError(error));}};host.append(form);
  };
- render().catch(error=>{if(current()){empty(host);host.append(el('p',{text:'누락 공개 진행 가능성을 확인할 수 없습니다. 실패 상태를 검토하세요. '+safeError(error)}));}});
+ render().catch(async error=>{if(current()){const failure=await savedFailure();if(current()){empty(host);host.append(el('p',{text:failure??'누락 공개 진행 가능성을 확인할 수 없습니다. 실패 상태를 검토하세요. '+safeError(error)}));}}});
 }
 function showSummaryChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),host=el('div');target.append(host);

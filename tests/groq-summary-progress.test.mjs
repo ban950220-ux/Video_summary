@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {groqSummaryProgress} from '../web/site/groq-summary-progress.mjs';
+import {groqSummaryProgress,groqGapFailureText} from '../web/site/groq-summary-progress.mjs';
 
 const now=100_000;
 const approved={approval:{state:'APPROVED',expiresAt:200_000,windowStart:0,maxRequests:29,totalTokenUpperBound:191400},completedStages:0,plannedMaximumRequests:191,activeStage:null,finalReportSaved:false};
@@ -15,6 +15,12 @@ test('reviewed gap progress separates contiguous, saved, held and pending raw gr
  assert.match(claimed.headline,/앱 서버 접수/);assert.match(claimed.detail,/보류 1구간/);assert.equal(claimed.canExecute,false);
  const failed=view({...status,activeStage:{key:'raw:9',state:'FAILED_UNCERTAIN',errorCode:'429'}});
  assert.match(failed.headline,/결과 불확실/);assert.match(failed.detail,/보류 1구간/);assert.equal(failed.canExecute,false);
+});
+
+test('saved raw:9 validation failure is shown from status after gap read fails',()=>{
+ const text=groqGapFailureText({...approved,approval:{state:'STOPPED'},activeStage:{key:'raw:9',state:'FAILED_UNCERTAIN',errorCode:'SUMMARY_RESPONSE_INVALID'}});
+ assert.match(text,/raw:9 저장된 실패/);assert.match(text,/SUMMARY_RESPONSE_INVALID/);assert.match(text,/자동 재전송은 없습니다/);
+ assert.equal(groqGapFailureText({...approved,activeStage:{key:'raw:9',state:'CLAIMED'}}),null);
 });
 
 test('progress wording separates approval, transport, server claim, checkpoint and final report',()=>{

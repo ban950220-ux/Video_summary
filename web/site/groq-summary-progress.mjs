@@ -1,5 +1,10 @@
 // Display only durable server evidence. A CLAIMED row reserves the app slot;
 // it does not prove that Groq received the request or started inference.
+export function groqGapFailureText(status){
+ const stage=status?.activeStage;
+ if(!/^raw:(0|[1-9][0-9]*)$/.test(stage?.key??'')||stage.state!=='FAILED_UNCERTAIN')return null;
+ return `${stage.key} 저장된 실패 · ${stage.errorCode??'원인 미확인'} · 승인 ${status.approval?.state??'미확인'} · 전체 요약 미완료. 원본 실패와 사용량을 검토하세요. 자동 재전송은 없습니다.`;
+}
 export function groqSummaryProgress(status,{phase='idle',reason=null,waitUntil=null,now=Date.now()}={}){
  const saved=Number.isSafeInteger(status?.completedStages)?status.completedStages:0;
  const maximum=Number.isSafeInteger(status?.plannedMaximumRequests)?status.plannedMaximumRequests:null;

@@ -1,7 +1,7 @@
 // Dependency-free bundler for this fixed, reviewed module graph.
 // Produces a single Cloudflare Dashboard ESM Worker including protected assets.
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
-const names=['core','vault','access','groq-summary-contract','adapters','provider-keys','audio','report','summary-plan','observed-capacity','groq-summary','paid-summary-contract','paid-summary-budget','paid-summary-trial','paid-summary-receipt','paid-summary-adapter','paid-summary','live','worker','site-worker'];
+const names=['core','vault','access','groq-summary-contract','adapters','provider-keys','audio','report','summary-plan','observed-capacity','groq-complete-synthesis','groq-year-recovery','groq-summary','paid-summary-contract','paid-summary-budget','paid-summary-trial','paid-summary-receipt','paid-summary-adapter','paid-summary','live','worker','site-worker'];
 let output='// Generated from v0.7 source. No secrets. Live calls require owner free-account grants.\n';
 for(const name of names){
   let source=readFileSync(new URL('../src/'+name+'.mjs',import.meta.url),'utf8');

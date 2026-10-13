@@ -6,6 +6,7 @@ import {capacityIdentity} from './observed-capacity.mjs';
 import {configuredMasterKey} from './vault.mjs';
 import {runOwnedGroqSummary} from './provider-keys.mjs';
 import {GROQ_SUMMARY_CONTRACT_VERSION,GROQ_SUMMARY_RESPONSE_FORMAT,groqSummaryRequestBody} from './groq-summary-contract.mjs';
+import {reviewedSourceExcerpt,verifyReviewedSourceExcerpt,completeCoverageManifest,evidenceNotes,synthesisQuoteEstimate,synthesisTreeProgress,completedSynthesisReport,COMPLETE_SYNTHESIS_CONTRACT} from './groq-complete-synthesis.mjs';
 
 export const GROQ_SUMMARY_MODEL='openai/gpt-oss-120b';
 export const GROQ_SUMMARY_INPUT_BOUND=4_800;
@@ -598,7 +599,7 @@ async function reviewedGapContext(env,{id,job,source,transcriptHash,legacyTransc
  const recoveryExists=await env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(recoveryId(id,transcriptHash),id).first();
  const recovery=recoveryExists?await checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash}):null;
  const prefix=id+':groq-summary:'+transcriptHash+':';
- const rows=(await env.DB.prepare("SELECT id,state,error_code,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(id,prefix,prefix).all()).results||[];
+ const rows=(await env.DB.prepare("SELECT id,state,error_code,result_json,units FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(id,prefix,prefix).all()).results||[];
  if(recovery?.recovered){const index=rows.findIndex(row=>row.id===recovery.failedId);if(index<0||rows[index].state!=='FAILED_UNCERTAIN')stop('SUMMARY_GAP_NOT_ELIGIBLE','첫 구간 복구 범위가 다릅니다.');rows[index]={id:recovery.failedId,state:'DONE',result_json:JSON.stringify({hash:transcriptHash,key:'raw:0',report:recovery.record.report,recoveredWithoutProviderCall:true})};}
  if(rows.some(row=>!/^raw:(0|[1-9][0-9]*)$/.test(row.id.slice(prefix.length))||Number(row.id.slice(prefix.length+4))>=groups.length))stop('SUMMARY_GAP_NOT_ELIGIBLE','알 수 없는 요약 단계가 있습니다.');
  const parts=[];let firstPending=null;
@@ -715,12 +716,87 @@ async function handleReviewedGap(request,env,context,sourceOf,ownedJob,{bundleOn
  await stage(env,{id,hash:transcriptHash,scope,key,prompt:groqRawPrompt(group,audit),allowed:group,groups:[{ids:group.map(part=>part.id)}],sourceOf,ownedJob,resolvedFailures:gapContext.excluded,gapEvidence:gapContext});
  return json({pending:true,stage:key,completedRawStages:parts.length,heldRawStages:1,minimumWaitSeconds:61,automaticRetries:0,finalReportSaved:false,remainingAccountTokens:'UNKNOWN'},202);
 }
+const completeExcerptId=(id,hash,index)=>id+':groq-summary-complete:'+hash+':excerpt:raw:'+index;
+async function completeStageContext(env,{id,job,source,transcriptHash,legacyTranscriptHash}){
+ const groups=partitionGroqTranscript(source.segments,promptAudit(job)),prefix=id+':groq-summary:'+transcriptHash+':';
+ const rows=(await env.DB.prepare("SELECT id,state,error_code,result_json,units FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(id,prefix,prefix).all()).results||[];
+ if(rows.some(row=>!/^raw:(0|[1-9][0-9]*)$/.test(row.id.slice(prefix.length))||Number(row.id.slice(prefix.length+4))>=groups.length))stop('SUMMARY_COMPLETE_OPERATION_REVIEW_REQUIRED','원시 단계 이외의 요약 작업을 먼저 검토하세요.');
+ const recoveryRow=await env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(recoveryId(id,transcriptHash),id).first();
+ const recovery=recoveryRow?await checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash}):null;
+ const checkpoints=Array(groups.length).fill(null),failures=[],pending=[];
+ async function failureEvidence(row,operationId,provenance){
+  let data;try{data=JSON.parse(row?.result_json);}catch{}
+  const usage=data?.reviewResult?.usage;
+  if(row?.state!=='FAILED_UNCERTAIN'||row.error_code!=='SUMMARY_RESPONSE_INVALID'||!safeInt(row.units)||row.units>GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP||typeof data?.reviewResult?.partialText!=='string'||!data.reviewResult.partialText.length||data.reviewResult.partialText.length>=12000||!safeInt(usage?.inputTokens)||!safeInt(usage?.outputTokens)||!safeInt(usage?.totalTokens)||!(usage.reasoningTokens===null||safeInt(usage.reasoningTokens)&&usage.reasoningTokens<=usage.outputTokens)||usage.inputTokens>GROQ_SUMMARY_INPUT_BOUND||usage.outputTokens>GROQ_SUMMARY_COMPLETION_CAP||usage.totalTokens<usage.inputTokens+usage.outputTokens||usage.totalTokens>row.units)stop('SUMMARY_COMPLETE_FAILURE_EVIDENCE_INVALID','실패 응답 범위를 검토하세요.');
+  const used=await env.DB.prepare("SELECT COUNT(*) AS count FROM usage_events WHERE job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY' AND unit='actual_total_tokens' AND provenance=? AND used_units=?").bind(id,provenance,usage.totalTokens).first();
+  if(!used?.count)stop('SUMMARY_COMPLETE_FAILURE_EVIDENCE_INVALID','실패 사용량 원장을 검토하세요.');
+  return {operationId,resultSha256:await sha(row.result_json),usageTotalTokens:usage.totalTokens,unit:'actual_total_tokens',resultJson:row.result_json};
+ }
+ for(let index=0;index<groups.length;index++){
+  const key='raw:'+index,row=rows.find(item=>item.id===stageId(id,transcriptHash,key)),group=groups[index];
+  if(!row){pending.push(index);continue;}
+  if(row.state==='DONE'||index===0&&recovery?.recovered&&row.id===recovery.failedId){
+   let saved;try{saved=index===0&&recovery?.recovered?{hash:transcriptHash,key,report:recovery.record.report}:JSON.parse(row.result_json);}catch{}
+   if(saved?.hash!==transcriptHash||saved.key!==key||!saved.report)stop('SUMMARY_COMPLETE_OPERATION_REVIEW_REQUIRED','저장된 원시 단계가 현재 원본과 다릅니다.');
+   const report=checkedReport(JSON.stringify(saved.report),group,[{ids:group.map(item=>item.id)}]);
+   checkpoints[index]={key,sourceHash:transcriptHash,provenance:'AI_VALIDATED_RAW_CHECKPOINT',report,reportSha256:await sha(JSON.stringify(report))};continue;
+  }
+  const evidence=[await failureEvidence(row,row.id,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN')];
+  if(index===8){const correction=await env.DB.prepare("SELECT state,error_code,result_json,units FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary'").bind(correctionAttemptId(id,transcriptHash),id).first();if(correction)evidence.push(await failureEvidence(correction,correctionAttemptId(id,transcriptHash),'PROVIDER_REPORTED_CORRECTIVE_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN'));}
+  const safeEvidence=evidence.map(({resultJson,...item})=>item),auditSha256=await sha(JSON.stringify(job.audit)),excerpt=await reviewedSourceExcerpt(transcriptHash,group,group.map(item=>item.id),{stageIndex:index,failureEvidence:safeEvidence,auditSha256}),recordId=completeExcerptId(id,transcriptHash,index);
+  const saved=await env.DB.prepare("SELECT state,result_json FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-excerpt'").bind(recordId,id).first();let registered=null;
+  if(saved){try{registered=JSON.parse(saved.result_json);}catch{}if(saved.state!=='REVIEWED'||!registered)stop('SUMMARY_EXCERPT_SCOPE_CHANGED','저장된 발췌 검토 기록이 잘못됐습니다.');await verifyReviewedSourceExcerpt(registered,transcriptHash,group,safeEvidence,auditSha256);}
+  failures.push({index,row,evidence,excerpt,registered,recordId});
+ }
+ return {groups,checkpoints,failures,pending};
+}
+async function handleCompleteSummary(request,env,context,ownedJob){
+ const {id,job,source,transcriptHash}=context;
+ if(!['GET','POST'].includes(request.method))return json({error:{code:'METHOD_NOT_ALLOWED'}},405);
+ if(job.report)stop('SUMMARY_ALREADY_EXISTS','이미 저장된 전체 보고서가 있습니다.');
+ const state=await completeStageContext(env,context),excerpts=Array(state.groups.length).fill(null);
+ for(const failure of state.failures)excerpts[failure.index]=failure.registered;
+ let body=null;if(request.method==='POST')try{body=await request.json();}catch{throw new InputError('전체 요약 요청 JSON 오류');}
+ if(body?.step==='register-excerpt'){
+  const failure=state.failures.find(item=>body?.stage==='raw:'+item.index),excerpt=failure?.excerpt;
+  if(body?.step!=='register-excerpt'||!failure||failure.registered||body.sourceHash!==transcriptHash||body.auditSha256!==excerpt.auditSha256||body.recordSha256!==excerpt.recordSha256||JSON.stringify(body.selectedIds)!==JSON.stringify(state.groups[failure.index].map(item=>item.id))||body.confirmExactSourceExcerpt!==true||body.confirmNotAiSummary!==true||body.confirmPriorFailureAndUsagePreserved!==true)throw new InputError('실패 구간의 원문 발췌 전체 범위를 별도 검토하세요.');
+  const approval=await readApproval(env,id);
+  if(approval?.state!=='STOPPED'||approval.transcriptHash!==transcriptHash)stop('SUMMARY_EXCERPT_APPROVAL_ACTIVE','진행 중인 요약 승인 또는 원본 범위를 검토하세요.');
+  const original=failure.evidence[0],correction=failure.evidence[1],inserted=await env.DB.prepare("INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT ?,j.id,'groq-summary-excerpt',0,'REVIEWED',?,? FROM jobs j JOIN yta_sources s ON s.job_id=j.id JOIN yta_operations f ON f.job_id=j.id JOIN yta_operations a ON a.job_id=j.id WHERE j.id=? AND j.owner_id='owner' AND j.audit_json=? AND (j.report_json IS NULL OR j.report_json='null') AND s.raw=? AND s.segments_json=? AND f.id=? AND f.provider='groq-summary' AND f.state='FAILED_UNCERTAIN' AND f.error_code='SUMMARY_RESPONSE_INVALID' AND f.result_json=? AND a.id=? AND a.state='STOPPED' AND EXISTS(SELECT 1 FROM usage_events u WHERE u.job_id=j.id AND u.owner_id='owner' AND u.provider='groq' AND u.capability='LIVE_FREE_SUMMARY' AND u.unit='actual_total_tokens' AND u.provenance='PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN' AND u.used_units=?) AND (?=0 OR EXISTS(SELECT 1 FROM yta_operations c WHERE c.id=? AND c.job_id=j.id AND c.provider='groq-summary' AND c.state='FAILED_UNCERTAIN' AND c.error_code='SUMMARY_RESPONSE_INVALID' AND c.result_json=?)) AND (?=0 OR EXISTS(SELECT 1 FROM usage_events u WHERE u.job_id=j.id AND u.owner_id='owner' AND u.provider='groq' AND u.capability='LIVE_FREE_SUMMARY' AND u.unit='actual_total_tokens' AND u.provenance='PROVIDER_REPORTED_CORRECTIVE_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN' AND u.used_units=?)) AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=? AND d.provider='deletion' AND d.state='DELETING')").bind(failure.recordId,nowIso(),JSON.stringify(excerpt),id,JSON.stringify(job.audit),source.raw,source.segments_json,original.operationId,original.resultJson,approvalId(id,approval.sequence),original.usageTotalTokens,correction?1:0,correction?.operationId??'',correction?.resultJson??'',correction?1:0,correction?.usageTotalTokens??0,id+':deleting').run();
+  if(inserted.meta?.changes!==1)stop('SUMMARY_EXCERPT_SCOPE_CHANGED','원본·실패·승인 증거가 변경됐습니다.');
+  const readBack=await env.DB.prepare("SELECT state,result_json FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-excerpt'").bind(failure.recordId,id).first();
+  if(readBack?.state!=='REVIEWED'||readBack.result_json!==JSON.stringify(excerpt))stop('SUMMARY_EXCERPT_READBACK_FAILED','원문 발췌 저장을 확인할 수 없습니다.');
+  return json({reviewed:true,stage:body.stage,recordSha256:excerpt.recordSha256,provenance:excerpt.provenance,providerCalls:0});
+ }
+ const failureStatus=state.failures.map(item=>({stage:'raw:'+item.index,errorCode:item.row.error_code,reviewed:Boolean(item.registered),recordSha256:item.excerpt.recordSha256,usageTotalTokens:item.evidence.map(evidence=>evidence.usageTotalTokens),provenance:item.excerpt.provenance}));
+ const requested=new URL(request.url).searchParams.get('stage'),selected=state.failures.find(item=>'raw:'+item.index===requested);
+ if(requested)return selected?json({contract:COMPLETE_SYNTHESIS_CONTRACT,stage:requested,ready:false,reviewed:Boolean(selected.registered),sourceHash:transcriptHash,auditSha256:selected.excerpt.auditSha256,recordSha256:selected.excerpt.recordSha256,selectedIds:state.groups[selected.index].map(item=>item.id),excerpts:selected.excerpt.excerpts,failureEvidence:selected.excerpt.failureEvidence,provenance:selected.excerpt.provenance,providerCalls:0}):json({error:{code:'SUMMARY_EXCERPT_STAGE_NOT_FOUND'}},404);
+ if(state.pending.length||state.failures.some(item=>!item.registered))return json({contract:COMPLETE_SYNTHESIS_CONTRACT,ready:false,rawStages:state.groups.length,completedRawStages:state.checkpoints.filter(Boolean).length,pendingRawStages:state.pending,failedStages:failureStatus,reviewRequired:state.failures.some(item=>!item.registered),providerCalls:0});
+ let manifest,notes;try{manifest=await completeCoverageManifest({sourceHash:transcriptHash,auditSha256:await sha(JSON.stringify(job.audit)),segments:source.segments,groups:state.groups,checkpoints:state.checkpoints,excerpts,verifyGrounding:assertGrounding});notes=await evidenceNotes({manifest,checkpoints:state.checkpoints,excerpts});}catch{stop('SUMMARY_COMPLETE_EVIDENCE_INVALID','전체 구간의 원문·발췌·근거를 다시 검토하세요.');}
+ const prefix=id+':groq-summary-complete:'+transcriptHash+':note:',savedRows=(await env.DB.prepare("SELECT id,state,result_json,units FROM yta_operations WHERE job_id=? AND provider='groq-summary-synthesis' AND substr(id,1,length(?))=?").bind(id,prefix,prefix).all()).results||[],savedNodes=new Map(),usedEventIds=new Set();
+ for(const row of savedRows){let record;try{record=JSON.parse(row.result_json);}catch{}const usage=record?.usage;
+  if(row.state!=='DONE'||!record||row.id!==prefix+record.key||savedNodes.has(record.key)||row.units!==GROQ_SUMMARY_INPUT_BOUND+GROQ_SUMMARY_COMPLETION_CAP||!safeInt(usage?.inputTokens)||!safeInt(usage?.outputTokens)||!safeInt(usage?.totalTokens)||usage.inputTokens>GROQ_SUMMARY_INPUT_BOUND||usage.outputTokens>GROQ_SUMMARY_COMPLETION_CAP||usage.totalTokens<usage.inputTokens+usage.outputTokens||usage.totalTokens>row.units||typeof record.usageEventId!=='string'||usedEventIds.has(record.usageEventId))stop('SYNTHESIS_OPERATION_REVIEW_REQUIRED','저장된 종합 단계와 사용량을 검토하세요.');
+  const metered=await env.DB.prepare("SELECT 1 AS ok FROM usage_events WHERE id=? AND job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SYNTHESIS' AND unit='actual_total_tokens' AND used_units=? AND provenance='PROVIDER_REPORTED_ACCOUNT_REMAINING_UNKNOWN'").bind(record.usageEventId,id,usage.totalTokens).first();
+  if(!metered)stop('SYNTHESIS_OPERATION_REVIEW_REQUIRED','종합 사용량 원장을 검토하세요.');usedEventIds.add(record.usageEventId);savedNodes.set(record.key,record);
+ }
+ let progress;try{progress=await synthesisTreeProgress({notes,sourceSegments:source.segments,verifyGrounding:assertGrounding,savedNodes});}catch{stop('SYNTHESIS_OPERATION_REVIEW_REQUIRED','종합 단계의 원본·요청·응답 근거를 검토하세요.');}
+ if(body?.step==='finalize'){
+  if(!progress.complete||body.sourceHash!==transcriptHash||body.manifestSha256!==manifest.manifestSha256||body.confirmNoProviderCall!==true)stop('SYNTHESIS_FINALIZATION_NOT_READY','저장된 전체 종합과 근거 검토가 완료돼야 합니다.');
+  let report;try{report=await completedSynthesisReport({manifest,notes,root:progress.root,checkpoints:state.checkpoints,excerpts,segments:source.segments,verifyGrounding:assertGrounding,semanticReview:body.semanticReview});}catch{stop('SYNTHESIS_FINALIZATION_NOT_READY','원문 의미 대조·범위·부록을 검토하세요.');}
+  const response=await saveFinalReport(env,id,job,source,report,ownedJob),stored=await env.DB.prepare("SELECT report_json FROM jobs WHERE id=? AND owner_id='owner'").bind(id).first();
+  if(stored?.report_json!==JSON.stringify(report))stop('SYNTHESIS_READBACK_FAILED','최종 보고서 저장 재조회가 일치하지 않습니다.');
+  return response;
+ }
+ if(request.method==='POST')throw new InputError('원문 발췌 또는 최종 저장 단계만 선택하세요.');
+ return json({contract:COMPLETE_SYNTHESIS_CONTRACT,ready:true,sourceHash:transcriptHash,manifestSha256:manifest.manifestSha256,sourceSegmentCount:manifest.segmentCount,rawStages:manifest.rawStageCount,missingSegmentIds:manifest.missingSegmentIds,failedStages:failureStatus,quoteEstimate:synthesisQuoteEstimate(notes.length),model:GROQ_SUMMARY_MODEL,approvalRequired:true,providerCalls:0,completedSynthesisNodes:progress.completed,nextSynthesisStage:progress.complete?null:progress.next.key,nextSynthesisInputUpper:progress.complete?null:progress.next.request.inputUpper,finalizationReady:progress.complete,rootSha256:progress.complete?await sha(JSON.stringify(progress.root)):null,finalReportSaved:false});
+}
 export async function handleGroqSummaryAction(request,env,{id,action,job,sourceOf,ownedJob}){
  if(action==='groq-summary-status'&&request.method==='GET')return summaryStatus(env,job,sourceOf);
  const reviewing=request.method==='GET'&&['groq-summary-plan','groq-summary-approval'].includes(action);
  const read=async(stage,fn)=>{try{return await fn();}catch(error){if(!reviewing||error instanceof InputError||error instanceof ProviderError)throw error;throw Object.assign(new Error('요약 범위 읽기 오류 ('+stage+'). 저장된 원문은 보존됩니다.'),{safeReviewCode:'SUMMARY_REVIEW_'+stage+'_INTERNAL'});}};
  const {source,transcriptHash,legacyTranscriptHash}=await read('SOURCE',()=>completeSource(env,job,sourceOf));
  if(action==='groq-summary-gap'||action==='groq-summary-gap-bundle')return handleReviewedGap(request,env,{id,job,source,transcriptHash,legacyTranscriptHash},sourceOf,ownedJob,{bundleOnly:action==='groq-summary-gap-bundle'});
+ if(action==='groq-summary-complete')return handleCompleteSummary(request,env,{id,job,source,transcriptHash,legacyTranscriptHash},ownedJob);
  if(action==='groq-summary-stage-diagnostic')return diagnoseFailedRawStage(env,{id,job,source,transcriptHash},request);
  if(action==='groq-summary-correction')return handleCorrection(request,env,{id,job,source,transcriptHash,legacyTranscriptHash},sourceOf,ownedJob);
  if(action==='groq-summary-failure-diagnostic'&&request.method==='GET')return diagnoseFailedRaw(env,job,source,transcriptHash,legacyTranscriptHash);
