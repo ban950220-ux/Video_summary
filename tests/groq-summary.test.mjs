@@ -1553,3 +1553,68 @@ test('real synthesis handler leaves no claim when preflight cannot reserve the 5
   const sent=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,expectedNode:scope.nextSynthesisStage,requestSha256:scope.nextSynthesisRequestSha256,executeOnce:true}),f.env);assert.equal(sent.status,409,await sent.clone().text());assert.equal((await sent.json()).error.code,'GROQ_D1_BUDGET');assert.equal(attempted51,false);assert.ok(queries<=50);assert.equal(calls,0);assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-synthesis' AND state='CLAIMED'").get(f.id).n,0);t.diagnostic(`synthesis preflight stopped after ${queries} D1 queries`);
  }finally{globalThis.fetch=oldFetch;f.db.close();}
 });
+
+function tamperBeforeLiveFinalGuard(f,mutate){
+ const DB=f.env.DB;let injected=false;
+ f.env.DB={prepare(sql){const stmt=DB.prepare(sql);if(!sql.startsWith('WITH live_resolution_proof AS MATERIALIZED'))return stmt;return {bind(...args){const bound=stmt.bind(...args);return {async first(){if(!injected){injected=true;await mutate();}return bound.first();}};}};}};
+ return ()=>{f.env.DB=DB;assert.equal(injected,true,'final D1 proof guard must run');};
+}
+
+test('live recovered failure permits another raw job, but proof tamper at final D1 guard blocks dispatch',async()=>{
+ const f=await fixture({large:true,sourceText:'가'.repeat(350)}),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const a=await seedDeletedOversizeRecovery(f,{deleteAfter:false});
+  const b=await sibling(f,{approve:false}),plan=await(await routeApi(request(b.path+'/groq-summary-plan'),f.env)).json(),reviewReply=await routeApi(request(b.path+'/groq-summary-approval'),f.env);assert.equal(reviewReply.status,200,await reviewReply.clone().text());const review=await reviewReply.json();
+  const approval={...f.approval,jobId:b.id,transcriptHash:plan.transcriptHash,model:plan.model,outputKind:plan.outputKind,windowStart:plan.windowStart,totalRequests:plan.totalRequests,maxRequests:plan.maxRequests,maxInputTokensPerRequest:plan.maxInputTokensPerRequest,maxCompletionTokensPerRequest:plan.maxCompletionTokensPerRequest,totalTokenUpperBound:plan.totalTokenUpperBound,credentialGeneration:review.credentialGeneration};
+  assert.equal((await routeApi(request(b.path+'/groq-summary-approval','POST',approval),f.env)).status,200);
+  globalThis.fetch=async()=>{calls++;return response(valid(f.segments[0].id));};
+  const first=await routeApi(request(b.path+'/groq-summary','POST',{}),f.env);assert.equal(first.status,202,await first.clone().text());assert.equal(calls,1);
+  f.db.prepare("UPDATE yta_operations SET created_at=? WHERE job_id=? AND provider='groq-summary' AND state='DONE'").run(new Date(Date.now()-120000).toISOString(),b.id);
+  const c=await sibling(f);const restore=tamperBeforeLiveFinalGuard(f,()=>f.db.prepare('UPDATE usage_events SET used_units=391 WHERE id=?').run(a.id+':usage'));
+  try{const blocked=await routeApi(request(c.path+'/groq-summary','POST',{}),f.env);assert.equal(blocked.status,409,await blocked.clone().text());assert.equal(calls,1);assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND state='BLOCKED'").get(c.id)?.state,'BLOCKED');}finally{restore();}
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('live recovery tamper at correction final D1 guard blocks provider',async()=>{
+ const {f,group,url,approval}=await approvedCorrectionFixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const a=await seedDeletedOversizeRecovery(f,{deleteAfter:false});
+  const restore=tamperBeforeLiveFinalGuard(f,()=>f.db.prepare('UPDATE usage_events SET used_units=391 WHERE id=?').run(a.id+':usage'));
+  globalThis.fetch=async()=>{calls++;return response(valid(group[0].id));};
+  try{const blocked=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.equal(blocked.status,409,await blocked.clone().text());assert.equal(calls,0);}finally{restore();}
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('live recovery tamper at synthesis final D1 guard blocks provider',async()=>{
+ const f=await fixture({large:true,sourceText:'가'.repeat(350)}),oldFetch=globalThis.fetch;f.env.ENABLE_COMPLETE_SYNTHESIS='true';let calls=0;
+ try{
+  const audit=JSON.parse(f.db.prepare('SELECT audit_json FROM jobs WHERE id=?').get(f.id).audit_json),groups=partitionGroqTranscript(f.segments,promptAudit({audit,duration_seconds:600})),stamp=new Date(Date.now()-2*86_400_000).toISOString();
+  for(let i=0;i<groups.length;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+f.plan.transcriptHash+':raw:'+i,f.id,stamp,JSON.stringify({hash:f.plan.transcriptHash,key:'raw:'+i,report:valid(groups[i][0].id)}));
+  const url=f.path+'/groq-summary-complete',scope=await(await routeApi(request(url),f.env)).json(),quoted=await(await routeApi(request(url,'POST',{step:'quote',sourceHash:f.plan.transcriptHash,manifestSha256:scope.manifestSha256,confirmFreeOnly:true,acknowledgeUnknownBalance:true}),f.env)).json(),approved=await routeApi(request(url,'POST',{step:'approve',quoteId:quoted.quoteId,quoteSha256:quoted.quoteSha256,reservedUnits:quoted.quote.reservedUnits,maxCalls:quoted.quote.maxCalls,confirmExactQuote:true,freeTierConfirmed:true,billingDisabled:true,noPaidFallback:true,noAutomaticRetry:true}),f.env);assert.equal(approved.status,200,await approved.clone().text());const approval=await approved.json();
+  const a=await seedDeletedOversizeRecovery(f,{deleteAfter:false}),restore=tamperBeforeLiveFinalGuard(f,()=>f.db.prepare('UPDATE usage_events SET used_units=391 WHERE id=?').run(a.id+':usage'));
+  globalThis.fetch=async()=>{calls++;throw Error('provider must stay idle');};
+  try{const blocked=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,expectedNode:scope.nextSynthesisStage,requestSha256:scope.nextSynthesisRequestSha256,executeOnce:true}),f.env);assert.equal(blocked.status,409,await blocked.clone().text());assert.equal(calls,0);}finally{restore();}
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('live reviewed raw:8 and corrective failures use each operation reservation for next raw dispatch',async()=>{
+ const {f,groups,approval}=await reviewedGapFixture(),oldFetch=globalThis.fetch;f.env.ENABLE_COMPLETE_SYNTHESIS='true';let calls=0;
+ try{
+  const url=f.path+'/groq-summary-complete',evidence=await(await routeApi(request(url+'?stage=raw:8'),f.env)).json();assert.equal((await routeApi(request(url,'POST',{step:'register-excerpt',stage:'raw:8',sourceHash:evidence.sourceHash,auditSha256:evidence.auditSha256,recordSha256:evidence.recordSha256,selectedIds:evidence.selectedIds,confirmExactSourceExcerpt:true,confirmNotAiSummary:true,confirmPriorFailureAndUsagePreserved:true}),f.env)).status,200);const after=await(await routeApi(request(url+'?stage=raw:8'),f.env)).json(),disposition=after.disposition;assert.equal((await routeApi(request(url,'POST',{step:'review-failure-usage',stage:'raw:8',sourceHash:after.sourceHash,auditSha256:disposition.auditSha256,recordSha256:disposition.recordSha256,confirmSeparateFromContent:true,acknowledgeReceiptNotVerified:true,acknowledgeAccountBalanceUnknown:true,acknowledgeConservativeReservation:true,noRetry:true}),f.env)).status,200);
+  const originalUnits=f.db.prepare('SELECT units FROM yta_operations WHERE id=?').get(approval.attemptId).units;assert.notEqual(originalUnits,f.db.prepare("SELECT units FROM yta_operations WHERE job_id=? AND state='FAILED_UNCERTAIN' AND id!=?").get(f.id,approval.attemptId).units);
+  const b=await sibling(f,{approve:false}),plan=await(await routeApi(request(b.path+'/groq-summary-plan'),f.env)).json(),reviewReply=await routeApi(request(b.path+'/groq-summary-approval'),f.env);assert.equal(reviewReply.status,200,await reviewReply.clone().text());const review=await reviewReply.json(),bApproval={...f.approval,jobId:b.id,transcriptHash:plan.transcriptHash,model:plan.model,outputKind:plan.outputKind,windowStart:plan.windowStart,totalRequests:plan.totalRequests,maxRequests:plan.maxRequests,maxInputTokensPerRequest:plan.maxInputTokensPerRequest,maxCompletionTokensPerRequest:plan.maxCompletionTokensPerRequest,totalTokenUpperBound:plan.totalTokenUpperBound,credentialGeneration:review.credentialGeneration};assert.equal((await routeApi(request(b.path+'/groq-summary-approval','POST',bApproval),f.env)).status,200);
+  globalThis.fetch=async()=>{calls++;return response(valid(groups[0][0].id));};const sent=await routeApi(request(b.path+'/groq-summary','POST',{}),f.env);assert.equal(sent.status,202,await sent.clone().text());assert.equal(calls,1);
+  const proof=await globallyRecoveredGroq(f.env,b.id),corrective=proof.liveResolutionProofs.find(item=>item.failedId===approval.attemptId);assert.equal(corrective.failedUnits,originalUnits);assert.equal(proof.liveResolutionProofs.length,2);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('settling a live recovery at final guard blocks stale dispatch and permits a fresh job',async()=>{
+ const f=await fixture({large:true,sourceText:'가'.repeat(350)}),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const a=await seedDeletedOversizeRecovery(f,{deleteAfter:false}),b=await sibling(f);
+  globalThis.fetch=async()=>{calls++;return response(valid(f.segments[0].id));};
+  const restore=tamperBeforeLiveFinalGuard(f,async()=>{const deleted=await routeApi(request(a.path,'DELETE'),f.env);assert.equal(deleted.status,200,await deleted.clone().text());});
+  try{const blocked=await routeApi(request(b.path+'/groq-summary','POST',{}),f.env);assert.equal(blocked.status,409,await blocked.clone().text());assert.equal(calls,0);}finally{restore();}
+  const c=await sibling(f),sent=await routeApi(request(c.path+'/groq-summary','POST',{}),f.env);assert.equal(sent.status,202,await sent.clone().text());assert.equal(calls,1);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
