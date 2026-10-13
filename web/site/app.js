@@ -155,8 +155,9 @@ function showGroqSummaryChoice(job,target,requestId){
  const statusBox=el('section',{className:'summary-progress',attrs:{role:'status','aria-live':'polite','aria-atomic':'true'}});
  const headline=el('strong'),detail=el('p'),refreshButton=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});
  const diagnosticButton=el('button',{className:'btn secondary small',text:'실패 단계 무호출 진단'}),diagnosticDetail=el('p');diagnosticButton.hidden=true;
+ const correctionButton=el('button',{className:'btn secondary small',text:'raw:8 무료 1회 교정 견적 검토'});correctionButton.hidden=true;
  const scopeHost=el('div');
- statusBox.append(headline,detail,refreshButton,diagnosticButton,diagnosticDetail);
+ statusBox.append(headline,detail,refreshButton,diagnosticButton,diagnosticDetail,correctionButton);
  target.append(reviewButton,statusBox,scopeHost);
  let status=null,phase='idle',reason=null,waitUntil=null,readSequence=0,running=false,runButton=null,finalizeButton=null,awaitingApprovalScope=null,unknownBaseline=null,safeUnsentInterruption=false,reviewedScope=null,diagnosticStage=null;
  const render=()=>{
@@ -167,11 +168,13 @@ function showGroqSummaryChoice(job,target,requestId){
   statusBox.dataset.tone=view.tone;
   const failedKey=status?.activeStage?.state==='FAILED_UNCERTAIN'&&/^raw:(0|[1-9][0-9]{0,2})$/.test(status.activeStage.key)?status.activeStage.key:null;
   diagnosticButton.hidden=!failedKey;
+  correctionButton.hidden=failedKey!=='raw:8';
   if(failedKey!==diagnosticStage){diagnosticStage=failedKey;diagnosticDetail.textContent=failedKey?`실패 단계 ${failedKey} · 저장된 응답만 진단할 수 있습니다.`:'';}
   if(runButton)runButton.disabled=running||!view.canExecute;
   if(finalizeButton)finalizeButton.disabled=running||status?.finalReportSaved===true;
  };
  diagnosticButton.onclick=async()=>{const key=diagnosticStage;if(!key)return;diagnosticButton.disabled=true;try{const result=await api('/api/jobs/'+job.id+'/groq-summary-stage-diagnostic?stage='+encodeURIComponent(key));if(current()&&diagnosticStage===key){const categories={EVIDENCE_ID:'근거 ID 범위',GROUP_COVERAGE:'장별 구간 근거',UNSUPPORTED_NUMBER:'근거 없는 수치',UNSUPPORTED_QUOTE:'근거 없는 직접 인용',SCHEMA:'보고서 형식',JSON_PARSE:'JSON 파싱',STORED_TEXT_UNAVAILABLE:'저장된 응답 없음',VALIDATION_PASS_ONLY:'현재 검증 통과'};diagnosticDetail.textContent=`${key} · ${categories[result.classification]??'분류 미확인'} · 원문 구간 ${result.firstId}–${result.lastId} (${result.segmentCount}개) · 불일치 ${result.mismatchCount??'미확인'}개${result.truncationPossible?' · 보존 텍스트 절단 가능':''} · 응답 완전성 미검증 · 제공자 호출 없음 · 복구 아님.`;}}catch(error){if(current()&&diagnosticStage===key)diagnosticDetail.textContent='무호출 진단을 확인할 수 없습니다. '+safeError(error);}finally{diagnosticButton.disabled=false;}};
+ correctionButton.onclick=()=>{if(current()){empty(target);showGroqCorrectionChoice(job,target,requestId);}};
  const setPhase=(next,nextReason=null,nextWait=null)=>{phase=next;reason=nextReason;waitUntil=nextWait;render();};
  const refreshStatus=async()=>{
   const sequence=++readSequence;
@@ -360,6 +363,33 @@ function offerPaidExecution(job,target,requestId,host,status){
  const run=el('button',{className:'btn secondary small',text:status.firstTrial?'승인된 최초 생성 미검증 시험 1회 실행':'승인된 유료 전체 종합 요약 1회 실행'});host._paidRunButton=run;
  run.onclick=async()=>{if(!detailCurrent(job.id,requestId,target))return;run.disabled=true;try{await api('/api/jobs/'+job.id+'/paid-summary-execute',{method:'POST',body:{approvalId:status.approval.id}});}catch(error){if(detailCurrent(job.id,requestId,target))toast(safeError(error));}try{const after=await api('/api/jobs/'+job.id+'/paid-summary-status');if(detailCurrent(job.id,requestId,target))host.append(el('p',{text:`저장된 최종 보고서 ${after.finalReportSaved?'있음':'없음'} · 예약 ${after.reservations.map(item=>item.state).join(', ')||'없음'} · 제공자 청구액 UNKNOWN.`}));}catch{if(detailCurrent(job.id,requestId,target))host.append(el('p',{text:'실행 결과를 읽기로 확인할 수 없습니다. 재전송하지 마세요.'}));}};host.append(run);
 }
+function showGroqCorrectionChoice(job,target,requestId){
+ const current=()=>detailCurrent(job.id,requestId,target),url='/api/jobs/'+job.id+'/groq-summary-correction',host=el('div');target.append(host);
+ let postUncertain=false;
+ const refresh=async()=>{try{await render();}catch(error){if(current()){host.append(el('p',{text:'저장 상태를 읽을 수 없습니다. 실행 요청을 다시 보내지 마세요.'}));toast(safeError(error));}}};
+ const post=async body=>{if(!current())return;try{await api(url,{method:'POST',body});if(current())await render();}catch(error){if(current()){toast(safeError(error));if(body.step==='execute')postUncertain=true;await refresh();}}};
+ const render=async()=>{
+  const state=await api(url);if(!current())return;empty(host);
+  host.append(el('h2',{text:'Groq Free raw:8 별도 1회 교정'}),el('p',{text:`원문 ${state.firstId}–${state.lastId}번 (${state.segmentCount}개) · 기존 응답의 근거 없는 수치 ${state.originalMismatchCount}건 · 기존 사용량 ${state.originalUsageTotalTokens}토큰은 그대로 보존됩니다. 이전 응답의 완전성과 제공자 영수증은 검증되지 않았습니다. 새 호출은 중복 사용을 일으킬 수 있고 계정 잔여량은 UNKNOWN입니다.`}));
+  const reread=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});reread.onclick=refresh;host.append(reread);
+  if(state.attemptState||postUncertain){host.append(el('p',{attrs:{role:'status'},text:`새 요청 상태 ${state.attemptState??'UNKNOWN'} · 자동 재시도와 다음 단계 자동 실행은 없습니다. 저장 상태를 확인하세요.`}));return;}
+  if(state.approvalState==='STOPPED'){host.append(el('p',{text:'이 승인은 취소 또는 중단됐습니다. 동일 범위의 새 호출을 자동으로 승인하지 않습니다.'}));return;}
+  if(state.approvalState==='APPROVED'){
+   const quote=state.quote?.contract;
+   host.append(el('p',{text:`승인된 교정은 raw:8 한 구간, ${quote?.model??'저장된 모델'}, 최대 1회 호출입니다. 실행 버튼을 누르면 전송될 수 있습니다.`}));
+   const run=el('button',{className:'btn secondary small',text:'승인된 raw:8 교정 1회 실행'});run.onclick=async()=>{run.disabled=true;await post({step:'execute',approvalId:state.approvalId,confirmExecuteOnce:true});};
+   const cancel=el('button',{className:'btn secondary small',text:'전송 전 승인 취소'});cancel.onclick=()=>post({step:'cancel',confirmCancelBeforeSend:true});host.append(run,cancel);return;
+  }
+  if(!state.quote){const quoteButton=el('button',{className:'btn secondary small',text:'교정 1회 견적 만들기'});quoteButton.onclick=()=>post({step:'quote'});host.append(quoteButton);return;}
+  const q=state.quote.contract;
+  host.append(el('p',{text:`견적 ${q.quoteSha256} · ${q.model} · 근거 ${q.firstId}–${q.lastId}번 · 입력 상한 ${q.inputTokensUpper}, 출력 상한 ${q.outputTokensUpper}, 앱 예약 ${q.reservedUnits}토큰 · 만료 ${fmtRetryDate(q.expiresAt)} · 정확히 1회 · 자동 재시도 0회. 기존 원본, 분할, 실패 응답과 사용량 원장은 보존됩니다.`}));
+  const form=el('form',{className:'fields'}),labels=['현재 Groq Free 계정과 결제 비활성을 확인했습니다.','기존 사용량과 중복 사용 위험, 계정 잔여량 UNKNOWN을 확인했습니다.','이 견적의 원문 범위·모델·키 세대·토큰 상한과 1회 호출을 확인했습니다.','유료 또는 Gemini 전환과 자동 재시도가 없음을 확인했습니다.'];
+  const checks=labels.map(label=>{const input=el('input',{attrs:{type:'checkbox',required:'true'}}),row=el('label',{text:label});row.prepend(input);form.append(row);return input;});
+  const button=el('button',{className:'btn secondary small',text:'교정 1회 승인 저장'});form.append(button);
+  form.onsubmit=event=>{event.preventDefault();if(checks.some(input=>!input.checked))return;button.disabled=true;post({step:'approve',quoteId:state.quote.quoteId,quoteSha256:q.quoteSha256,reservedUnits:q.reservedUnits,maxCalls:1,confirmExactQuote:true,confirmPriorUsagePreserved:true,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,noAutomaticRetry:true});};host.append(form);
+ };
+ render().catch(error=>{if(current()){empty(host);host.append(el('p',{text:'교정 범위를 확인할 수 없습니다. '+safeError(error)}));}});
+}
 function showGroqCheckpointRecoveryChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),url='/api/jobs/'+job.id+'/groq-summary-checkpoint-recovery',host=el('div');target.append(host);
  let postUncertain=false;
@@ -512,7 +542,7 @@ function libraryCard(job){
     };
     actions.append(b);
   }
-  if(job.source_type==='audio'&&!job.report){const free=el('button',{className:'btn secondary small',text:'Groq Free 요약 승인·실행'});free.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqSummaryChoice(job,target,detailRequest);};actions.append(free);const pilot=el('button',{className:'btn secondary small',text:'실패한 첫 요약 1회 복구 검토'});pilot.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqPilotChoice(job,target,detailRequest);};actions.append(pilot);const recovered=el('button',{className:'btn secondary small',text:'Groq Free 첫 구간 저장 보고서 무호출 복구 검토'});recovered.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCheckpointRecoveryChoice(job,target,detailRequest);};actions.append(recovered);const bundle=el('button',{className:'btn secondary small',text:'구간별 요약 묶음 보기'});bundle.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqBundleChoice(job,target,detailRequest);};actions.append(bundle);const choice=el('button',{className:'btn secondary small',text:'전체 요약 선택·유료 견적'});choice.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showSummaryChoice(job,target,detailRequest);};actions.append(choice);}actions.append(open,remove);card.append(actions);return card;
+  if(job.source_type==='audio'&&!job.report){const free=el('button',{className:'btn secondary small',text:'Groq Free 요약 승인·실행'});free.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqSummaryChoice(job,target,detailRequest);};actions.append(free);const pilot=el('button',{className:'btn secondary small',text:'실패한 첫 요약 1회 복구 검토'});pilot.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqPilotChoice(job,target,detailRequest);};actions.append(pilot);const correction=el('button',{className:'btn secondary small',text:'raw:8 무료 1회 교정 검토'});correction.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCorrectionChoice(job,target,detailRequest);};actions.append(correction);const recovered=el('button',{className:'btn secondary small',text:'Groq Free 첫 구간 저장 보고서 무호출 복구 검토'});recovered.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCheckpointRecoveryChoice(job,target,detailRequest);};actions.append(recovered);const bundle=el('button',{className:'btn secondary small',text:'구간별 요약 묶음 보기'});bundle.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqBundleChoice(job,target,detailRequest);};actions.append(bundle);const choice=el('button',{className:'btn secondary small',text:'전체 요약 선택·유료 견적'});choice.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showSummaryChoice(job,target,detailRequest);};actions.append(choice);}actions.append(open,remove);card.append(actions);return card;
 }
 async function loadLibrary(){
   const q=$('#library-search').value.trim(),out=$('#library-list');empty(out);

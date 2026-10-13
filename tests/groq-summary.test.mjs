@@ -73,6 +73,58 @@ test('owner-only raw:8 diagnostic classifies saved response without writes, prov
  }finally{globalThis.fetch=priorFetch;f.db.close();}
 });
 
+test('a separately approved free raw:8 correction preserves old ledgers and resumes at raw:9',async()=>{
+ const f=await fixture({large:true,sourceText:'가'.repeat(350)}),oldFetch=globalThis.fetch;
+ try{
+  const jobRow=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(jobRow.audit_json),groups=partitionGroqTranscript(f.segments,promptAudit({audit,duration_seconds:jobRow.duration_seconds})),hash=f.plan.transcriptHash,group=groups[8],stamp=new Date(Date.now()-120000).toISOString(),identity=await capacityIdentity(f.env,'groq');
+  assert.ok(group&&groups.length>9);
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'STOPPED',?,?)").run(f.id+':groq-summary:approval:0',f.id,stamp,JSON.stringify({...f.approval,sequence:0,keyIdentity:identity,state:undefined}));
+  for(let i=0;i<8;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+hash+':raw:'+i,f.id,stamp,JSON.stringify({hash,key:'raw:'+i,report:valid(groups[i][0].id)}));
+  const failedId=f.id+':groq-summary:'+hash+':raw:8',oldUnits=groqInputUpperBound(groqSummaryMessages(groqRawPrompt(group,promptAudit({audit,duration_seconds:jobRow.duration_seconds}))))+1800,oldResult=JSON.stringify({reviewResult:{partialText:JSON.stringify({...valid(group[0].id),summary:[{text:'원문에서 확인되지 않은 999원',evidenceIds:[group[0].id]}]}),usage:{inputTokens:1152,outputTokens:987,reasoningTokens:50,totalTokens:2139}}});
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',?,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").run(failedId,f.id,oldUnits,stamp,oldResult);
+  f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(? ,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2139,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").run(crypto.randomUUID(),f.id,stamp);
+  const url=f.path+'/groq-summary-correction';
+  const denied=await handleSiteRequest(request(url),{...f.env,ACCESS_TEAM_DOMAIN:'https://owner.cloudflareaccess.com',ACCESS_AUD:'diagnostic-owner-audience',ACCESS_OWNER_EMAIL:'owner@example.com'});assert.equal(denied.status,401);
+  const initial=await routeApi(request(url),f.env);assert.equal(initial.status,200,await initial.clone().text());assert.equal((await initial.json()).originalMismatchCount,1);
+  const quoteResponse=await routeApi(request(url,'POST',{step:'quote'}),f.env);assert.equal(quoteResponse.status,200,await quoteResponse.clone().text());const quote=await quoteResponse.json();assert.equal(quote.contract.maxCalls,1);assert.equal(quote.contract.automaticRetries,0);
+  const approveBody={step:'approve',quoteId:quote.quoteId,quoteSha256:quote.contract.quoteSha256,reservedUnits:quote.contract.reservedUnits,maxCalls:1,confirmExactQuote:true,confirmPriorUsagePreserved:true,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,noAutomaticRetry:true};
+  const approved=await routeApi(request(url,'POST',approveBody),f.env);assert.equal(approved.status,200,await approved.clone().text());const approval=await approved.json();
+  let calls=0;globalThis.fetch=async()=>{calls++;return response(valid(group[0].id));};
+  f.env.GROQ_API_KEY='ROTATED_TEST_KEY';
+  const changedKey=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.equal(changedKey.status,409);assert.equal((await changedKey.json()).error.code,'SUMMARY_CORRECTION_SCOPE_CHANGED');assert.equal(calls,0);
+  f.env.GROQ_API_KEY='NOT_REAL_TEST_KEY';
+  f.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify({...audit,changedAfterApproval:true}),f.id);
+  const changedSource=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.equal(changedSource.status,409);assert.equal(calls,0);
+  f.db.prepare('UPDATE jobs SET audit_json=? WHERE id=?').run(JSON.stringify(audit),f.id);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify({...quote.contract,expiresAt:Date.now()-1}),quote.quoteId);
+  const expired=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.equal(expired.status,409);assert.equal(calls,0);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify(quote.contract),quote.quoteId);
+  const executed=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.equal(executed.status,202,await executed.clone().text());assert.equal(calls,1);
+  assert.deepEqual({...f.db.prepare('SELECT state,error_code,result_json,units FROM yta_operations WHERE id=?').get(failedId)},{state:'FAILED_UNCERTAIN',error_code:'SUMMARY_RESPONSE_INVALID',result_json:oldResult,units:oldUnits});
+  assert.equal(f.db.prepare('SELECT state FROM yta_operations WHERE id=?').get(approval.attemptId).state,'DONE');assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE job_id=? AND provider='groq'").get(f.id).n,2);
+  const status=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal(status.status,200,await status.clone().text());assert.equal((await status.json()).completedStages,9);
+  const next=await routeApi(request(f.path+'/groq-summary-approval'),f.env);assert.equal(next.status,200,await next.clone().text());assert.equal((await next.json()).windowStart,9);
+  const duplicate=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.notEqual(duplicate.status,202);assert.equal(calls,1);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
+test('raw:8 correction cancelled before send cannot call the provider',async()=>{
+ const f=await fixture({large:true,sourceText:'가'.repeat(350)}),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  const row=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(row.audit_json),groups=partitionGroqTranscript(f.segments,promptAudit({audit,duration_seconds:row.duration_seconds})),group=groups[8],hash=f.plan.transcriptHash,stamp=new Date(Date.now()-120000).toISOString(),identity=await capacityIdentity(f.env,'groq');
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'STOPPED',?,?)").run(f.id+':groq-summary:approval:0',f.id,stamp,JSON.stringify({...f.approval,sequence:0,keyIdentity:identity}));
+  const failedId=f.id+':groq-summary:'+hash+':raw:8',oldUnits=groqInputUpperBound(groqSummaryMessages(groqRawPrompt(group,promptAudit({audit,duration_seconds:row.duration_seconds}))))+1800,oldResult=JSON.stringify({reviewResult:{partialText:JSON.stringify({...valid(group[0].id),summary:[{text:'근거 없는 999원',evidenceIds:[group[0].id]}]}),usage:{inputTokens:1152,outputTokens:987,reasoningTokens:50,totalTokens:2139}}});
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',?,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").run(failedId,f.id,oldUnits,stamp,oldResult);
+  f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(? ,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2139,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").run(crypto.randomUUID(),f.id,stamp);
+  const url=f.path+'/groq-summary-correction',quoted=await routeApi(request(url,'POST',{step:'quote'}),f.env);assert.equal(quoted.status,200);const quote=await quoted.json();
+  const approved=await routeApi(request(url,'POST',{step:'approve',quoteId:quote.quoteId,quoteSha256:quote.contract.quoteSha256,reservedUnits:quote.contract.reservedUnits,maxCalls:1,confirmExactQuote:true,confirmPriorUsagePreserved:true,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,noAutomaticRetry:true}),f.env);assert.equal(approved.status,200);const approval=await approved.json();
+  assert.equal((await routeApi(request(url,'POST',{step:'cancel',confirmCancelBeforeSend:true}),f.env)).status,200);
+  globalThis.fetch=async()=>{calls++;throw Error('PROVIDER_CALL_FORBIDDEN');};
+  const blocked=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),f.env);assert.equal(blocked.status,409);assert.equal(calls,0);
+  assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(failedId).result_json,oldResult);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
 test('strict summary schema is included in the request estimate and fresh approval hash',async()=>{
  const f=await fixture(),old=fetch;let calls=0;
  const stored=f.db.prepare('SELECT raw,segments_json FROM yta_sources WHERE job_id=?').get(f.id),job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(job.audit_json);
