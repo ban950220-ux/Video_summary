@@ -39,6 +39,13 @@ test('paid project cannot be mislabeled free, and the second call needs a separa
   const missing=await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256});assert.equal((await missing.json()).error.code,'TWO_PASS_PAID_APPROVAL_REQUIRED');assert.equal(f.sends,0);
  }finally{f.db.close();}
 });
+test('countTokens quote remains available while paid generation is disabled',async()=>{
+ const f=await fixture();try{f.env.ENABLE_GEMINI_TWO_PASS_PAID='false';f.env.GEMINI_TWO_PASS_PAID_EXECUTION_APPROVED='false';
+  let counts=0;const count=f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async(...args)=>{counts++;return count(...args);};
+  const quoted=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal(quoted.status,200,await quoted.clone().text());const q=(await quoted.json()).quote;assert.equal(counts,1);assert.equal(f.sends,0);
+  const approval=await f.call('approve','POST',{quoteSha256:q.quoteSha256,maxMicroUsd:q.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true});assert.equal((await approval.json()).error.code,'TWO_PASS_PAID_DISABLED');assert.equal(f.sends,0);
+ }finally{f.db.close();}
+});
 test('FIRST_READY cancellation wins against a second-phase count still in flight',async()=>{
  const f=await fixture();try{const q=await quoteApprove(f);await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});
   f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async()=>{const cancelled=await f.call('cancel','POST',{});assert.equal(cancelled.status,200);return 300;};

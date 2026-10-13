@@ -59,6 +59,14 @@ function executionGate(env,mode){
   if(env.ENABLE_GEMINI_TWO_PASS_PAID!=='true'||env.GEMINI_TWO_PASS_PAID_EXECUTION_APPROVED!=='true'||env.PAID_MODEL_ACCESS_VERIFIED!=='true'||env.PAID_TAX_MAX_BPS_VERIFIED!=='true'||env.ALLOW_PAID_API!=='false')fail('TWO_PASS_PAID_DISABLED');
  }else fail('TWO_PASS_PROJECT_MODE_REQUIRED');
 }
+function quoteGate(env,mode){
+ if(env.ENABLE_GEMINI_TWO_PASS!=='true'||env.ALLOW_PAID_API!=='false')fail('TWO_PASS_DISABLED');
+ if(mode==='PAID_APPROVED'){
+  if(env.PAID_MODEL_ACCESS_VERIFIED!=='true')fail('TWO_PASS_PAID_MODEL_UNVERIFIED');
+ }else if(mode==='FREE_ATTESTED'){
+  if(env.ENABLE_LIVE_FREE!=='true'||env.GEMINI_TWO_PASS_FREE_PROJECT_ATTESTED!=='true'||env.GEMINI_PROJECT_BILLING_MODE!=='FREE')fail('TWO_PASS_FREE_PROJECT_UNVERIFIED');
+ }else fail('TWO_PASS_PROJECT_MODE_REQUIRED');
+}
 async function reconcile(env,id,phase,scope,row,receipt){
  if(receipt.response_complete!==1||!receipt.response_json||await sha(receipt.response_json)!==receipt.response_sha256)fail('TWO_PASS_RECEIPT_INCOMPLETE');
  let envelope;try{envelope=JSON.parse(receipt.response_json);}catch{fail('TWO_PASS_RECEIPT_INVALID');}
@@ -92,7 +100,7 @@ export async function handleGeminiTwoPassAction(request,env,{id,action,job,sourc
  if(action==='gemini-two-pass-quote'&&request.method==='POST'){
   if(row||job.report)fail('TWO_PASS_ALREADY_STARTED');const body=await request.json(),mode=body?.projectMode;
   if(body?.confirmFullTranscriptSentToGoogleForTokenCount!==true)fail('TWO_PASS_COUNT_CONSENT_REQUIRED','견적용 공식 토큰 계수에도 전체 전사와 구간 ID가 Google로 전송됩니다. 별도로 동의해야 합니다.');
-  executionGate(env,mode);if(mode==='FREE_ATTESTED'&&body.confirmBillingDisabled!==true)fail('TWO_PASS_FREE_PROJECT_UNVERIFIED');
+  quoteGate(env,mode);if(mode==='FREE_ATTESTED'&&body.confirmBillingDisabled!==true)fail('TWO_PASS_FREE_PROJECT_UNVERIFIED');
   const scope=await scoped(env,job,sourceOf),first=summaryRequest(scope.source,scope.audit),credential=await credentialSnapshot(env),count=await counted(env,first,credential);
   if(!Number.isSafeInteger(count)||count<1||count>TWO_PASS_INPUT_CAP)fail('TWO_PASS_TOKEN_BOUND');
   // The second request contains the first report. If it exceeds this fixed cap, stop before dispatch.
