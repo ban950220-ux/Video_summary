@@ -5,6 +5,7 @@ export const TWO_PASS_MODEL=PAID_SUMMARY_CATALOG.model;
 export const TWO_PASS_OUTPUT_CAP=8192;
 export const TWO_PASS_INPUT_CAP=120000;
 export const TWO_PASS_VALIDATION_VERSION='gemini-two-pass-v1';
+export const countTokensRequest=body=>({generateContentRequest:{model:`models/${TWO_PASS_MODEL}`,...body}});
 export const REVIEW_SCHEMA={type:'object',properties:{verdict:{type:'string',enum:['PASS','ISSUES']},issues:{type:'array',items:{type:'object',properties:{category:{type:'string',enum:['OMISSION','DISTORTION','NUMBER','NEGATION','UNCERTAINTY','CAUSALITY','QUOTE','EVIDENCE','OTHER']},description:{type:'string'},evidenceIds:{type:'array',items:{type:'integer'}}},required:['category','description','evidenceIds'],additionalProperties:false}}},required:['verdict','issues'],additionalProperties:false};
 const fail=code=>{throw new ProviderError(code,'전체 전사·검증 요청 범위를 다시 확인하세요.');};
 export const sha=async value=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))).map(byte=>byte.toString(16).padStart(2,'0')).join('');
@@ -34,7 +35,8 @@ export function validateReview(raw,source,report){
 export function costCeiling({inputTokensPerCall,outputTokensPerCall=TWO_PASS_OUTPUT_CAP,taxBufferBps=10000}){
  if(!Number.isSafeInteger(inputTokensPerCall)||inputTokensPerCall<1||inputTokensPerCall>TWO_PASS_INPUT_CAP||outputTokensPerCall!==TWO_PASS_OUTPUT_CAP)fail('TWO_PASS_TOKEN_BOUND');
  const perCall=Math.ceil(inputTokensPerCall*PAID_SUMMARY_CATALOG.inputPriceMicroUsdPerMillion/1_000_000)+Math.ceil(outputTokensPerCall*PAID_SUMMARY_CATALOG.outputPriceMicroUsdPerMillion/1_000_000);
- return {perCallMicroUsd:perCall,totalPreTaxMicroUsd:2*perCall,totalApprovalMicroUsd:2*Math.ceil(perCall*(10000+taxBufferBps)/10000),taxBufferBps};
+ const totalPreTaxMicroUsd=2*perCall,totalApprovalMicroUsd=2*Math.ceil(perCall*(10000+taxBufferBps)/10000);
+ return {perCallMicroUsd:perCall,totalPreTaxMicroUsd,taxBufferMicroUsd:totalApprovalMicroUsd-totalPreTaxMicroUsd,totalApprovalMicroUsd,taxBufferBps};
 }
 export function assertCountedRequest({body,countedTokens,requestHash,sourceHash,inputCap}){
  if(!Number.isSafeInteger(countedTokens)||countedTokens<1||countedTokens>inputCap||inputCap>TWO_PASS_INPUT_CAP||body?.generationConfig?.maxOutputTokens!==TWO_PASS_OUTPUT_CAP)fail('TWO_PASS_TOKEN_BOUND');
