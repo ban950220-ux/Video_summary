@@ -35,11 +35,11 @@ export function validateReview(raw,source,report){
  validateWindowedSummary(JSON.stringify(Object.fromEntries(['summary','chapters','claims','numbers','critical','conclusion'].map(key=>[key,report[key]]))),source);
  return parsed;
 }
-export function costCeiling({inputTokensPerCall,outputTokensPerCall=TWO_PASS_OUTPUT_CAP,taxBufferBps=10000}){
+export function costCeiling({inputTokensPerCall,outputTokensPerCall=TWO_PASS_OUTPUT_CAP,costBufferBps=10000}){
  if(!Number.isSafeInteger(inputTokensPerCall)||inputTokensPerCall<1||inputTokensPerCall>TWO_PASS_INPUT_CAP||outputTokensPerCall!==TWO_PASS_OUTPUT_CAP)fail('TWO_PASS_TOKEN_BOUND');
  const perCall=Math.ceil(inputTokensPerCall*PAID_SUMMARY_CATALOG.inputPriceMicroUsdPerMillion/1_000_000)+Math.ceil(outputTokensPerCall*PAID_SUMMARY_CATALOG.outputPriceMicroUsdPerMillion/1_000_000);
- const totalPreTaxMicroUsd=2*perCall,totalApprovalMicroUsd=2*Math.ceil(perCall*(10000+taxBufferBps)/10000);
- return {perCallMicroUsd:perCall,totalPreTaxMicroUsd,taxBufferMicroUsd:totalApprovalMicroUsd-totalPreTaxMicroUsd,totalApprovalMicroUsd,taxBufferBps};
+ const totalPreTaxMicroUsd=2*perCall,totalApprovalMicroUsd=2*Math.ceil(perCall*(10000+costBufferBps)/10000);
+ return {perCallMicroUsd:perCall,totalPreTaxMicroUsd,costBufferMicroUsd:totalApprovalMicroUsd-totalPreTaxMicroUsd,totalApprovalMicroUsd,costBufferBps};
 }
 export function assertCountedRequest({body,countedTokens,requestHash,sourceHash,inputCap}){
  if(!Number.isSafeInteger(countedTokens)||countedTokens<1||countedTokens>inputCap||inputCap>TWO_PASS_INPUT_CAP||body?.generationConfig?.maxOutputTokens!==TWO_PASS_OUTPUT_CAP)fail('TWO_PASS_TOKEN_BOUND');

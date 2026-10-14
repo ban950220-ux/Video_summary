@@ -4,6 +4,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {readFileSync} from 'node:fs';
 import {routeApi} from '../src/worker.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
+import {assertRemainingApprovalBudget} from '../src/gemini-two-pass.mjs';
 import {sourceSnapshot,summaryRequest,reviewRequest,validateReview,costCeiling,countTokensRequest,TWO_PASS_MODEL,TWO_PASS_OUTPUT_CAP} from '../src/gemini-two-pass-contract.mjs';
 import {windowedSummarySchema} from '../src/two-pass-windows.mjs';
 
@@ -20,7 +21,7 @@ async function fixture(){
  const root=Buffer.alloc(32,8),secret=await encryptProviderKey(root,'gemini','OFFLINE_TWO_PASS_KEY');db.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','gemini',?,?,?,?)").run(secret.version,secret.ivB64,secret.ciphertextB64,new Date().toISOString());
  let sends=0,review={verdict:'PASS',issues:[]},finishReason='STOP';
  const provider={countTokens:async()=>300,generate:async body=>{sends++;const output=sends===1?report:review,responseText=JSON.stringify({candidates:[{finishReason,content:{parts:[{text:JSON.stringify(output)}]}}],usageMetadata:{promptTokenCount:300,candidatesTokenCount:100,thoughtsTokenCount:20}});return {responseText,responseBytes:new TextEncoder().encode(responseText).length,httpStatus:200,complete:true};}};
- const env={DB,KEY_ENCRYPTION_KEY_B64:root.toString('base64'),ENABLE_GEMINI_TWO_PASS:'true',ENABLE_GEMINI_TWO_PASS_PAID:'true',GEMINI_TWO_PASS_PAID_EXECUTION_APPROVED:'true',GEMINI_TWO_PASS_ALLOWED_JOB_ID:id,ALLOW_PAID_API:'false',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true',GEMINI_TWO_PASS_TEST_PROVIDER:provider};
+ const env={DB,KEY_ENCRYPTION_KEY_B64:root.toString('base64'),ENABLE_GEMINI_TWO_PASS:'true',ENABLE_GEMINI_TWO_PASS_PAID:'true',GEMINI_TWO_PASS_PAID_EXECUTION_APPROVED:'true',GEMINI_TWO_PASS_ALLOWED_JOB_ID:id,ALLOW_PAID_API:'false',PAID_MODEL_ACCESS_VERIFIED:'true',GEMINI_TWO_PASS_COST_BUFFER_APPROVED:'true',GEMINI_TWO_PASS_TEST_PROVIDER:provider};
  const call=(action,method='GET',body)=>routeApi(request(path+'/gemini-two-pass-'+action,method,body),env);
  return {db,DB,id,path,segments,env,call,get sends(){return sends;},setReview:value=>{review=value;},setFinish:value=>{finishReason=value;}};
 }
@@ -47,6 +48,37 @@ test('countTokens quote remains available while paid generation is disabled',asy
   let counts=0;const count=f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async(...args)=>{counts++;return count(...args);};
   const quoted=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal(quoted.status,200,await quoted.clone().text());const q=(await quoted.json()).quote;assert.equal(counts,1);assert.equal(f.sends,0);
   const approval=await f.call('approve','POST',{quoteSha256:q.quoteSha256,maxMicroUsd:q.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true});assert.equal((await approval.json()).error.code,'TWO_PASS_PAID_DISABLED');assert.equal(f.sends,0);
+ }finally{f.db.close();}
+});
+test('two-pass cost buffer approval is separate from actual tax verification',async()=>{
+ const f=await fixture();try{
+  f.env.GEMINI_TWO_PASS_COST_BUFFER_APPROVED='false';f.env.PAID_TAX_MAX_BPS_VERIFIED='true';
+  const quoted=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal(quoted.status,200);const q=(await quoted.json()).quote;
+  assert.equal(q.approvalKind,'CALCULATED_COST_CEILING_NOT_PROVIDER_LIMIT');assert.equal(q.costBufferBps,10000);
+  assert.equal((await(await f.call('status')).json()).actualTaxVerification,'NOT_VERIFIED');
+  const denied=await f.call('approve','POST',{quoteSha256:q.quoteSha256,maxMicroUsd:q.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true});
+  assert.equal((await denied.json()).error.code,'TWO_PASS_PAID_DISABLED');assert.equal(f.sends,0);
+  f.env.GEMINI_TWO_PASS_COST_BUFFER_APPROVED='true';f.env.PAID_TAX_MAX_BPS_VERIFIED='false';
+  const approved=await f.call('approve','POST',{quoteSha256:q.quoteSha256,maxMicroUsd:q.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true});assert.equal(approved.status,200,await approved.clone().text());
+ }finally{f.db.close();}
+});
+test('remaining approval budget counts stored actual usage and blocks excess before phase two',async()=>{
+ const quote={inputTokensPerCallCap:1000,costBufferBps:10000,maxMicroUsd:26000};
+ const receipt={state:'SETTLED',response_complete:1,usage_json:JSON.stringify({promptTokenCount:300,candidatesTokenCount:100,thoughtsTokenCount:20}),token_estimate_micro_usd:255};
+ assert.deepEqual(assertRemainingApprovalBudget(receipt,300,quote),{usageJson:receipt.usage_json,estimateMicroUsd:255});
+ assert.throws(()=>assertRemainingApprovalBudget(receipt,1000,{...quote,maxMicroUsd:1000}),{code:'TWO_PASS_COST_BOUND'});
+ assert.throws(()=>assertRemainingApprovalBudget({...receipt,token_estimate_micro_usd:1000},300,quote),{code:'TWO_PASS_COST_RECONCILIATION_REQUIRED'});
+ const f=await fixture();try{const q=await quoteApprove(f);await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});assert.equal(f.sends,1);
+  f.db.prepare('UPDATE yta_gemini_two_pass_calls SET token_estimate_micro_usd=? WHERE job_id=? AND phase=0').run(1000000,f.id);
+  const blocked=await f.call('run','POST',{phase:1,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});assert.equal((await blocked.json()).error.code,'TWO_PASS_COST_RECONCILIATION_REQUIRED');assert.equal(f.sends,1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM yta_gemini_two_pass_calls WHERE phase=1').get().n,0);
+ }finally{f.db.close();}
+});
+test('a first-call ledger change during second token count cannot reserve the remaining call',async()=>{
+ const f=await fixture();try{const q=await quoteApprove(f);await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});assert.equal(f.sends,1);
+  f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async()=>{f.db.prepare('UPDATE yta_gemini_two_pass_calls SET token_estimate_micro_usd=? WHERE job_id=? AND phase=0').run(1000000,f.id);return 300;};
+  const blocked=await f.call('run','POST',{phase:1,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});assert.equal((await blocked.json()).error.code,'TWO_PASS_DISPATCH_SCOPE_CHANGED');assert.equal(f.sends,1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM yta_gemini_two_pass_calls WHERE phase=1').get().n,0);
  }finally{f.db.close();}
 });
 test('FIRST_READY cancellation wins against a second-phase count still in flight',async()=>{
