@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS yta_gemini_two_pass_jobs(
 CREATE TABLE IF NOT EXISTS yta_gemini_two_pass_calls(
  job_id TEXT NOT NULL, phase INTEGER NOT NULL CHECK(phase IN (0,1)), request_sha256 TEXT NOT NULL,
  input_tokens_counted INTEGER NOT NULL, output_tokens_cap INTEGER NOT NULL,
- state TEXT NOT NULL CHECK(state IN ('RESERVED','RECEIVED','INCOMPLETE','VALIDATION_FAILED','SETTLED','UNCERTAIN')),
+ state TEXT NOT NULL CHECK(state IN ('RESERVED','DISPATCHING','RECEIVED','INCOMPLETE','VALIDATION_FAILED','SETTLED','UNCERTAIN')),
  response_json TEXT, response_sha256 TEXT, response_bytes INTEGER, response_complete INTEGER NOT NULL DEFAULT 0,
  http_status INTEGER, finish_reason TEXT, usage_json TEXT, token_estimate_micro_usd INTEGER,
  error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
