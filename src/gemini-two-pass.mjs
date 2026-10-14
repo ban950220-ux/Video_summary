@@ -11,6 +11,14 @@ const fail=(code,message='Gemini 전체 전사 대조 상태를 확인하세요.
 const digest=async value=>sha(JSON.stringify(value));
 const now=()=>new Date().toISOString();
 const modelUrl=action=>`https://generativelanguage.googleapis.com/v1beta/models/${TWO_PASS_MODEL}:${action}`;
+const MODEL_METADATA_TIMEOUT_MS=15000;
+const COUNT_TOKENS_TIMEOUT_MS=90000;
+const LEGACY_UNCERTAIN_QUOTE_JOB_ID='a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9';
+function quoteEvent(env,correlationId,stage,outcome='STARTED',code=null){
+ const entry={event:'GEMINI_TWO_PASS_QUOTE',correlationId,stage,at:now(),outcome,code};
+ if(env.GEMINI_TWO_PASS_TEST_PROVIDER)env.GEMINI_TWO_PASS_TEST_LOGGER?.(entry);
+ else console.info(JSON.stringify(entry));
+}
 
 async function credentialSnapshot(env){
  const row=await env.DB.prepare("SELECT cipher_version,iv_b64,ciphertext_b64,updated_at FROM provider_credentials WHERE owner_id='owner' AND provider='gemini'").first();
@@ -21,18 +29,19 @@ async function modelMetadata(env,credential){
  let model;
  if(env.GEMINI_TWO_PASS_TEST_PROVIDER){try{model=await env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel(TWO_PASS_MODEL,credential);}catch{fail('TWO_PASS_MODEL_UNAVAILABLE');}}
  else{
-  let response;try{response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${TWO_PASS_MODEL}`,{headers:{'x-goog-api-key':credential.key}});}catch{fail('TWO_PASS_MODEL_UNAVAILABLE');}
+  let response;try{response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${TWO_PASS_MODEL}`,{headers:{'x-goog-api-key':credential.key},signal:AbortSignal.timeout(MODEL_METADATA_TIMEOUT_MS)});}catch{fail('TWO_PASS_MODEL_UNAVAILABLE');}
   if(!response.ok)fail('TWO_PASS_MODEL_UNAVAILABLE');
   try{model=await response.json();}catch{fail('TWO_PASS_MODEL_UNAVAILABLE');}
  }
- if(model?.name!==`models/${TWO_PASS_MODEL}`||!Array.isArray(model.supportedGenerationMethods)||!['generateContent','countTokens'].every(method=>model.supportedGenerationMethods.includes(method))||!Number.isSafeInteger(model.inputTokenLimit)||model.inputTokenLimit<TWO_PASS_INPUT_CAP||!Number.isSafeInteger(model.outputTokenLimit)||model.outputTokenLimit<TWO_PASS_OUTPUT_CAP)fail('TWO_PASS_MODEL_UNAVAILABLE');
+ if(model?.name!==`models/${TWO_PASS_MODEL}`||!Array.isArray(model.supportedGenerationMethods)||!model.supportedGenerationMethods.includes('generateContent')||!Number.isSafeInteger(model.inputTokenLimit)||model.inputTokenLimit<TWO_PASS_INPUT_CAP||!Number.isSafeInteger(model.outputTokenLimit)||model.outputTokenLimit<TWO_PASS_OUTPUT_CAP)fail('TWO_PASS_MODEL_UNAVAILABLE');
  return {kind:'MODEL_METADATA_AND_COUNT_TOKENS_V1',model:TWO_PASS_MODEL,credentialGeneration:credential.generation,methods:['countTokens','generateContent']};
 }
 async function counted(env,body,credential){
  if(env.GEMINI_TWO_PASS_TEST_PROVIDER)return env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens(body,credential);
- const response=await fetch(modelUrl('countTokens'),{method:'POST',headers:{'x-goog-api-key':credential.key,'content-type':'application/json'},body:JSON.stringify(countTokensRequest(body))});
+ let response;try{response=await fetch(modelUrl('countTokens'),{method:'POST',headers:{'x-goog-api-key':credential.key,'content-type':'application/json'},body:JSON.stringify(countTokensRequest(body)),signal:AbortSignal.timeout(COUNT_TOKENS_TIMEOUT_MS)});}catch{fail('TWO_PASS_COUNT_UNAVAILABLE');}
  if(!response.ok)fail('TWO_PASS_COUNT_UNAVAILABLE','공식 입력 토큰 수를 확인하지 못했습니다. 생성 호출은 하지 않습니다.');
- const result=await response.json();if(!Number.isSafeInteger(result.totalTokens)||result.totalTokens<1)fail('TWO_PASS_COUNT_UNAVAILABLE');
+ let result;try{result=await response.json();}catch{fail('TWO_PASS_COUNT_UNAVAILABLE');}
+ if(!Number.isSafeInteger(result.totalTokens)||result.totalTokens<1)fail('TWO_PASS_COUNT_UNAVAILABLE');
  return result.totalTokens;
 }
 async function generated(env,body,credential,onResponse){
@@ -78,6 +87,46 @@ function view(row,calls){
  return {state:row?.state??'NOT_STARTED',projectMode:row?.project_mode??null,quote:quote?{executionId:quote.executionId,model:quote.model,sourceSha256:quote.sourceSha256,firstRequestSha256:quote.firstRequestSha256,inputTokensCounted:quote.inputTokensCounted,inputTokensPerCallCap:quote.inputTokensPerCallCap,outputTokensPerCallCap:quote.outputTokensPerCallCap,maxCalls:2,maxRetries:0,maxMicroUsd:quote.maxMicroUsd,preTaxMicroUsd:quote.preTaxMicroUsd,costBufferMicroUsd:quote.costBufferMicroUsd,costBufferBps:quote.costBufferBps,approvalKind:quote.approvalKind,expiresAt:quote.expiresAt,quoteSha256:row.quote_sha256,priceVersion:quote.priceVersion}:null,firstReport:row?.first_report_json?JSON.parse(row.first_report_json):null,review:row?.review_json?JSON.parse(row.review_json):null,errorCode:row?.error_code??null,calls:calls.map(item=>({phase:item.phase,state:item.state,inputTokensCounted:item.input_tokens_counted,usage:item.usage_json?JSON.parse(item.usage_json):null,responseStored:item.response_complete===1,responseSha256:item.response_sha256,responseBytes:item.response_bytes,errorCode:item.error_code,tokenEstimateMicroUsd:item.token_estimate_micro_usd})),meaningReview:row?.state==='ISSUES'?'SOURCE_REVIEW_REQUIRED':'NOT_PASSED',reviewStage:row?.state==='ISSUES'?'REVIEW_REQUIRED':null,sourceReview:row?.state==='ISSUES'?'REQUIRED':'NOT_PERFORMED',externalFactCheck:'NOT_PERFORMED',audioAccuracy:'NOT_VERIFIED',providerInvoiceAmount:'UNKNOWN',actualTaxVerification:'NOT_VERIFIED',next:row?.state==='FIRST_READY'?(calls.some(item=>item.phase===0&&item.state==='SETTLED')?'RUN_REVIEW':'RECOVER_FIRST_RECEIPT'):row?.state==='ISSUES'?'REVIEW_STORED_SOURCE_OR_USE_GROQ':row?.state==='BLOCKED'?'INSPECT_STORED_RECEIPT_NO_AUTO_RETRY':null};
 }
 async function allCalls(env,id){return (await env.DB.prepare('SELECT * FROM yta_gemini_two_pass_calls WHERE job_id=? ORDER BY phase').bind(id).all()).results||[];}
+const quoteAttemptId=id=>id+':gemini-two-pass-quote';
+async function quoteAttempt(env,id){return env.DB.prepare('SELECT state,result_json,created_at,error_code FROM yta_operations WHERE id=? AND provider=?').bind(quoteAttemptId(id),'gemini-two-pass-quote').first();}
+async function reserveQuote(env,id,scope,requestHash,credential,mode,row,attemptId){
+ const attempt={attemptId,ownerId:'owner',jobId:id,sourceSha256:scope.sourceHash,auditSha256:scope.auditHash,requestSha256:requestHash,model:TWO_PASS_MODEL,credentialGeneration:credential.generation,projectMode:mode};
+ const encoded=JSON.stringify(attempt),idempotencyId=quoteAttemptId(id),stamp=now();
+ const guard="j.id=? AND j.owner_id='owner' AND j.audit_json=? AND (j.report_json IS NULL OR j.report_json='null') AND s.raw=? AND s.segments_json=? AND s.provenance=? AND k.owner_id='owner' AND k.provider='gemini' AND k.cipher_version=? AND k.iv_b64=? AND k.ciphertext_b64=? AND k.updated_at=? AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=j.id||':deleting' AND d.state='DELETING')";
+ const bindings=[id,scope.auditJson,scope.sourceRaw,scope.segmentsJson,scope.source.provenance,credential.cipherVersion,credential.ivB64,credential.ciphertextB64,credential.updatedAt];
+ let changed=0;
+ try{
+  const current=await quoteAttempt(env,id);
+  if(current){
+   if(current.state!=='QUOTE_SAVED'||!row||!(row.state==='CANCELLED'||row.expires_at<=Date.now())||(await allCalls(env,id)).length)fail('TWO_PASS_QUOTE_ATTEMPT_EXISTS');
+   const prior=current.result_json;
+   const update=await env.DB.prepare(`UPDATE yta_operations SET state='RESERVED',result_json=?,created_at=?,error_code=NULL WHERE id=? AND provider='gemini-two-pass-quote' AND state='QUOTE_SAVED' AND result_json=? AND EXISTS(SELECT 1 FROM jobs j JOIN yta_sources s ON s.job_id=j.id JOIN provider_credentials k ON k.owner_id='owner' AND k.provider='gemini' WHERE ${guard})`).bind(encoded,stamp,idempotencyId,prior,...bindings).run();
+   changed=update.meta?.changes??0;
+  }else{
+   const insert=await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT ?,j.id,'gemini-two-pass-quote',0,'RESERVED',?,? FROM jobs j JOIN yta_sources s ON s.job_id=j.id JOIN provider_credentials k ON k.owner_id='owner' AND k.provider='gemini' WHERE ${guard}`).bind(idempotencyId,stamp,encoded,...bindings).run();
+   changed=insert.meta?.changes??0;
+  }
+ }catch(error){
+  const current=await quoteAttempt(env,id);
+  if(current?.state==='RESERVED'&&current.result_json===encoded)return attempt;
+  throw error;
+ }
+ if(changed!==1)fail('TWO_PASS_QUOTE_ATTEMPT_EXISTS');
+ return attempt;
+}
+async function advanceQuoteAttempt(env,id,attempt,from,to,extra={}){
+ const current=await quoteAttempt(env,id);
+ let proof;try{proof=JSON.parse(current?.result_json);}catch{fail('TWO_PASS_QUOTE_ATTEMPT_EXISTS');}
+ if(current.state!==from||proof.attemptId!==attempt.attemptId)fail('TWO_PASS_QUOTE_ATTEMPT_EXISTS');
+ const next=JSON.stringify({...proof,...extra});
+ try{
+  const update=await env.DB.prepare("UPDATE yta_operations SET state=?,result_json=? WHERE id=? AND provider='gemini-two-pass-quote' AND state=? AND result_json=?").bind(to,next,quoteAttemptId(id),from,current.result_json).run();
+  if(update.meta?.changes===1)return;
+ }catch{}
+ const saved=await quoteAttempt(env,id);
+ if(saved?.state===to&&saved.result_json===next)return;
+ fail('TWO_PASS_QUOTE_ATTEMPT_EXISTS');
+}
 function boundRequest(scope,row,phase){
  if(phase===0)return summaryRequest(scope.source,scope.audit);
  if(!row.first_report_json)fail('TWO_PASS_RECOVERY_SCOPE_CHANGED');
@@ -150,27 +199,48 @@ async function reconcile(env,id,phase,scope,row,receipt){
 export async function handleGeminiTwoPassAction(request,env,{id,action,job,sourceOf,ownedJob}){
  const exists=await env.DB.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='yta_gemini_two_pass_jobs'").first();if(!exists)fail('TWO_PASS_SCHEMA_REQUIRED');
  let row=await saved(env,id);
- if(action==='gemini-two-pass-status'&&request.method==='GET')return json(view(row,row?await allCalls(env,id):[]));
+ if(action==='gemini-two-pass-status'&&request.method==='GET'){
+  const attempt=await quoteAttempt(env,id),status=view(row,row?await allCalls(env,id):[]);
+  if(attempt){status.quoteAttempt={state:attempt.state,createdAt:attempt.created_at};if(attempt.state!=='QUOTE_SAVED'&&(!row||row.state==='CANCELLED'||row.expires_at<=Date.now()))status.state='QUOTE_PENDING';}
+  if(id===LEGACY_UNCERTAIN_QUOTE_JOB_ID&&!row&&!attempt)status.state='QUOTE_UNCERTAIN_LEGACY';
+  return json(status);
+ }
  if(action==='gemini-two-pass-quote'&&request.method==='POST'){
+  const correlationId=crypto.randomUUID();let stage='RECEIVED';quoteEvent(env,correlationId,stage);
+  try{
+  if(id===LEGACY_UNCERTAIN_QUOTE_JOB_ID)fail('TWO_PASS_LEGACY_QUOTE_UNCERTAIN');
   if(job.report||row&&!(row.state==='CANCELLED'||row.expires_at<=Date.now()))fail('TWO_PASS_ALREADY_STARTED');
   if(row&&(await allCalls(env,id)).length)fail('TWO_PASS_ALREADY_STARTED');
   const body=await request.json(),mode=body?.projectMode;
   if(body?.confirmFullTranscriptSentToGoogleForTokenCount!==true)fail('TWO_PASS_COUNT_CONSENT_REQUIRED','견적용 공식 토큰 계수에도 전체 전사와 구간 ID가 Google로 전송됩니다. 별도로 동의해야 합니다.');
   quoteGate(env,mode,id);if(mode==='FREE_ATTESTED'&&body.confirmBillingDisabled!==true)fail('TWO_PASS_FREE_PROJECT_UNVERIFIED');
-  const scope=await scoped(env,job,sourceOf),first=summaryRequest(scope.source,scope.audit),credential=await credentialSnapshot(env),metadata=await modelMetadata(env,credential),count=await counted(env,first,credential);
+  const scope=await scoped(env,job,sourceOf),first=summaryRequest(scope.source,scope.audit),credential=await credentialSnapshot(env);
+  const attempt=await reserveQuote(env,id,scope,await digest(first),credential,mode,row,correlationId);
+  await advanceQuoteAttempt(env,id,attempt,'RESERVED','MODEL_LOOKUP');
+  stage='MODEL_LOOKUP';quoteEvent(env,correlationId,stage);const metadata=await modelMetadata(env,credential);quoteEvent(env,correlationId,stage,'SUCCEEDED');
+  await advanceQuoteAttempt(env,id,attempt,'MODEL_LOOKUP','MODEL_READY');
+  await advanceQuoteAttempt(env,id,attempt,'MODEL_READY','COUNT_SENT');
+  stage='COUNT_TOKENS';quoteEvent(env,correlationId,stage);const count=await counted(env,first,credential);quoteEvent(env,correlationId,stage,'SUCCEEDED');
+  await advanceQuoteAttempt(env,id,attempt,'COUNT_SENT','COUNT_RECEIVED',{countedTokens:count});
   if(await capacityIdentity(env,'gemini')!==credential.generation)fail('TWO_PASS_KEY_CHANGED');
   if(!Number.isSafeInteger(count)||count<1||count>TWO_PASS_INPUT_CAP)fail('TWO_PASS_TOKEN_BOUND');
   // The second request contains the first report. If it exceeds this fixed cap, stop before dispatch.
   const inputCap=Math.min(TWO_PASS_INPUT_CAP,count+16384);
   const costs=costCeiling({inputTokensPerCall:inputCap}),checkedAt=Date.now(),expiresAt=checkedAt+1800000,credentialGeneration=credential.generation;
   if(costs.totalApprovalMicroUsd>170000)fail('TWO_PASS_COST_BOUND');
+  stage='QUOTE_SAVE';quoteEvent(env,correlationId,stage);
   const quote={kind:'GEMINI_TWO_PASS_FULL_TRANSCRIPT',executionId:crypto.randomUUID(),revision:row?(JSON.parse(row.quote_json).revision??1)+1:1,model:TWO_PASS_MODEL,priceVersion:PAID_SUMMARY_CATALOG.priceVersion,sourceSha256:scope.sourceHash,auditSha256:scope.auditHash,firstRequestSha256:await digest(first),transcriptCountConsent:true,inputTokensCounted:count,inputTokensPerCallCap:inputCap,outputTokensPerCallCap:TWO_PASS_OUTPUT_CAP,maxCalls:2,maxRetries:0,preTaxMicroUsd:costs.totalPreTaxMicroUsd,costBufferMicroUsd:costs.costBufferMicroUsd,maxMicroUsd:costs.totalApprovalMicroUsd,costBufferBps:costs.costBufferBps,approvalKind:'CALCULATED_COST_CEILING_NOT_PROVIDER_LIMIT',credentialGeneration,modelAccessEvidence:{...metadata,inputTokensCounted:count,checkedAt},expiresAt,projectMode:mode};
   const quoteSha256=await digest(quote),insert=await env.DB.prepare("INSERT OR IGNORE INTO yta_gemini_two_pass_jobs(job_id,owner_id,source_sha256,audit_sha256,first_request_sha256,quote_sha256,quote_json,project_mode,credential_generation,state,expires_at,created_at,updated_at) SELECT j.id,'owner',?,?,?,?,?,?,?,'QUOTED',?,?,? FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=? AND j.owner_id='owner' AND j.audit_json=? AND (j.report_json IS NULL OR j.report_json='null') AND s.raw=? AND s.segments_json=? AND s.provenance=? AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=j.id||':deleting' AND d.state='DELETING')").bind(scope.sourceHash,scope.auditHash,quote.firstRequestSha256,quoteSha256,JSON.stringify(quote),mode,credentialGeneration,expiresAt,now(),now(),id,scope.auditJson,scope.sourceRaw,scope.segmentsJson,scope.source.provenance).run();
   if(insert.meta?.changes!==1){
    const revised=await env.DB.prepare("UPDATE yta_gemini_two_pass_jobs SET source_sha256=?,audit_sha256=?,first_request_sha256=?,quote_sha256=?,quote_json=?,project_mode=?,credential_generation=?,state='QUOTED',first_report_json=NULL,review_json=NULL,error_code=NULL,expires_at=?,created_at=?,updated_at=? WHERE job_id=? AND owner_id='owner' AND (state='CANCELLED' OR expires_at<=?) AND NOT EXISTS(SELECT 1 FROM yta_gemini_two_pass_calls c WHERE c.job_id=?) AND EXISTS(SELECT 1 FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=yta_gemini_two_pass_jobs.job_id AND j.owner_id='owner' AND j.audit_json=? AND (j.report_json IS NULL OR j.report_json='null') AND s.raw=? AND s.segments_json=? AND s.provenance=? AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=j.id||':deleting' AND d.state='DELETING'))").bind(scope.sourceHash,scope.auditHash,quote.firstRequestSha256,quoteSha256,JSON.stringify(quote),mode,credentialGeneration,expiresAt,now(),now(),id,Date.now(),id,scope.auditJson,scope.sourceRaw,scope.segmentsJson,scope.source.provenance).run();
    if(revised.meta?.changes!==1)fail('TWO_PASS_QUOTE_CONFLICT');
   }
-  return json(view(await saved(env,id),[]));
+  const stored=await saved(env,id);await advanceQuoteAttempt(env,id,attempt,'COUNT_RECEIVED','QUOTE_SAVED');quoteEvent(env,correlationId,stage,'SUCCEEDED');
+  return json(view(stored,[]));
+  }catch(error){
+   const code=error instanceof ProviderError&&/^TWO_PASS_[A-Z_]+$/.test(error.code)?error.code:'INTERNAL_ERROR';
+   quoteEvent(env,correlationId,stage,'FAILED',code);throw error;
+  }
  }
  if(!row)fail('TWO_PASS_QUOTE_REQUIRED');
  if(action==='gemini-two-pass-approve'&&request.method==='POST'){

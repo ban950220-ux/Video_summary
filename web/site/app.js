@@ -21,10 +21,10 @@ function el(tag,{className,text,attrs}={}){const x=document.createElement(tag);i
 function empty(x){x.replaceChildren();}
 function fmtDate(s){if(!s)return '미확인';const d=new Date(s);return isNaN(+d)?'미확인':d.toLocaleString('ko-KR',{dateStyle:'medium',timeStyle:'short'});}
 function safeError(e){return e?.message??'요청 처리 중 오류가 발생했습니다.';}
-async function api(path,{method='GET',body}={}){
+async function api(path,{method='GET',body,signal}={}){
   const headers={Accept:'application/json'};
   if(body!==undefined)headers['Content-Type']='application/json';
-  const response=await fetch(path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin',redirect:'follow',cache:'no-store'});
+  const response=await fetch(path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin',redirect:'follow',cache:'no-store',signal});
   const ct=response.headers.get('content-type')||'';
   if(!ct.includes('application/json'))throw Error('로그인 세션 또는 서버 응답을 확인하세요.');
   const data=await response.json();
@@ -381,19 +381,45 @@ function showGroqGapChoice(job,target,requestId){
 }
 function showGeminiTwoPassChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),base='/api/jobs/'+job.id+'/gemini-two-pass',host=el('div');target.append(host);
- let postUncertain=false;
+ let postUncertain=false,quoteUncertain=false,quoteError='';
+ const quoteFailureStage=error=>({TWO_PASS_MODEL_UNAVAILABLE:'모델 조회 실패',TWO_PASS_COUNT_UNAVAILABLE:'토큰 계수 실패',TWO_PASS_QUOTE_CONFLICT:'견적 저장 실패'})[error?.code]??'요청 결과 확인 실패';
+ const showQuoteStatusFailure=error=>{
+  if(!current())return;
+  quoteUncertain=true;empty(host);
+  host.append(el('p',{text:'견적 상태 조회 실패: '+safeError(error)+' 새 견적 요청을 보내지 마세요.'}));
+  const refresh=el('button',{className:'btn secondary small',text:'견적 상태 다시 조회'});
+  refresh.onclick=()=>render().catch(showQuoteStatusFailure);host.append(refresh);
+ };
+ const quoteRequest=async button=>{
+  button.disabled=true;
+  host.append(el('p',{text:'Gemini 모델 확인과 전체 전사 토큰 계산을 기다리는 중입니다. 다시 요청하지 마세요.'}));
+  try{
+   await api(base+'-quote',{method:'POST',body:{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true},signal:typeof AbortSignal==='undefined'?undefined:AbortSignal.timeout(120000)});
+   quoteUncertain=false;quoteError='';
+  }catch(error){quoteUncertain=true;quoteError=quoteFailureStage(error)+': '+safeError(error);}
+  if(current())await render().catch(showQuoteStatusFailure);
+ };
  const render=async()=>{
-  const status=await api(base+'-status');if(!current())return;empty(host);
+  const status=await api(base+'-status',{signal:typeof AbortSignal==='undefined'?undefined:AbortSignal.timeout(15000)});if(!current())return;if(status.state==='QUOTED'&&status.quote?.quoteSha256&&status.quote.expiresAt>Date.now()){quoteUncertain=false;quoteError='';}empty(host);
   host.append(el('h2',{text:'Gemini 전체 전사 요약 + 원문 대조'}),el('p',{text:'저장된 전사만 사용합니다. 생성은 최대 2회, 자동 재시도와 자동 3차 호출은 없습니다. 2차 예약 전에 남은 승인을 취소할 수 있으며, 예약이 먼저 확정되면 그 호출은 취소할 수 없습니다. 대조 PASS도 사람의 의미 검토·원음과 구간 시각의 정확성·외부 사실을 보증하지 않습니다.'}),el('p',{text:'현재 확인된 Gemini 프로젝트는 Tier 1 유료입니다. 별도 무료 프로젝트의 결제 비활성 증거가 없으므로 무료 실행으로 분류할 수 없습니다. 견적 요청은 저장 키로 정확한 모델의 메타데이터와 토큰 계수 접근을 확인합니다. 이는 생성 성공·잔액·결제 가능성을 보증하지 않으며, 유료 실행은 표시한 최대액을 별도로 승인해야 합니다.'}));
+  if(status.state==='QUOTE_PENDING'||status.state==='QUOTE_UNCERTAIN_LEGACY'){
+   host.append(el('p',{text:status.state==='QUOTE_PENDING'?'견적 계수 요청 기록이 남아 있습니다. 마지막 확인 단계: '+(status.quoteAttempt?.state??'UNKNOWN')+'. 결과가 불확실하므로 새 요청을 보내지 마세요.':'이 작업의 이전 견적 요청 결과가 불확실합니다. 저장 기록이 없어도 미전송으로 간주하지 않으며 새 요청은 차단됩니다.'}));
+   const refresh=el('button',{className:'btn secondary small',text:'견적 상태 다시 조회'});refresh.onclick=()=>render().catch(showQuoteStatusFailure);host.append(refresh);return;
+  }
   if(status.state==='NOT_STARTED'){
+   if(quoteUncertain){
+    host.append(el('p',{text:'견적 요청 결과가 불확실합니다. 전사가 Google에 전송되었을 수 있습니다. 이 화면에서 다시 요청하지 말고 상태만 조회하세요. '+quoteError}));
+    const refresh=el('button',{className:'btn secondary small',text:'견적 상태 다시 조회'});refresh.onclick=()=>render().catch(showQuoteStatusFailure);host.append(refresh);return;
+   }
    const confirm=el('input',{attrs:{type:'checkbox'}}),row=el('label',{text:'견적용 공식 토큰 계수를 위해 전체 전사 원문과 구간 ID를 Google에 전송하는 데 동의합니다. 이는 유료 생성 승인과 별개이며, 견적 단계에서 생성은 하지 않습니다.'});row.prepend(confirm);host.append(row);
    const paid=el('button',{className:'btn secondary small',text:'전체 전사 전송 동의 후 견적 요청 · 생성 없음'});
-   paid.onclick=async()=>{if(!confirm.checked)return;paid.disabled=true;try{await api(base+'-quote',{method:'POST',body:{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'견적 발급 결과 조회 실패. 재전송하지 마세요.'}));});};host.append(paid);return;
+   paid.onclick=()=>{if(confirm.checked)return quoteRequest(paid);};host.append(paid);return;
   }
+  if(quoteUncertain)host.append(el('p',{text:'견적 요청 결과가 불확실합니다. 저장된 견적을 확인하거나 상태를 다시 조회하고, 새 요청은 보내지 마세요.'}));
   const q=status.quote;if(status.state==='FIRST_READY'&&status.calls.some(item=>item.phase===0&&item.state==='SETTLED'))postUncertain=false;host.append(el('p',{text:`상태 ${status.state} · 모델 ${q.model} · 공식 계수 1차 입력 ${q.inputTokensCounted}토큰 · 단계별 승인 입력 범위 ${q.inputTokensPerCallCap} / 요청 출력 상한 ${q.outputTokensPerCallCap}토큰 · 최대 생성 2회 · 재시도 0회 · 해당 범위 고정 단가 세전 상한 ${q.preTaxMicroUsd} microUSD + 사용자 승인 비용 여유분 ${q.costBufferMicroUsd} microUSD (${q.costBufferBps/100}%) = 계산 기반 실행 승인 상한 $${(q.maxMicroUsd/1e6).toFixed(6)}. 실제 세금·추가 수수료·공급자 최종 청구액은 UNKNOWN이며 공급자 결제 강제 한도가 아닙니다. · 만료 ${fmtDate(new Date(q.expiresAt).toISOString())}.`}));
-  if(status.calls.length===0&&(status.state==='CANCELLED'||q.expiresAt<=Date.now())){
+  if(!quoteUncertain&&status.calls.length===0&&(status.state==='CANCELLED'||q.expiresAt<=Date.now())){
    const consent=el('input',{attrs:{type:'checkbox'}}),label=el('label',{text:'새 견적을 위해 전체 전사와 구간 ID를 Google 토큰 계수 API에 다시 보내는 데 동의합니다.'});label.prepend(consent);host.append(label);
-   const renew=el('button',{className:'btn secondary small',text:'새 견적 발급'});renew.onclick=async()=>{if(!consent.checked)return;renew.disabled=true;try{await api(base+'-quote',{method:'POST',body:{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(error=>toast(safeError(error)));};host.append(renew);
+   const renew=el('button',{className:'btn secondary small',text:'새 견적 발급'});renew.onclick=()=>{if(consent.checked)return quoteRequest(renew);};host.append(renew);
   }
   for(const item of status.calls)host.append(el('p',{text:`${item.phase===0?'요약':'대조'}: ${item.state} · 공식 입력 계수 ${item.inputTokensCounted} · 수신 보존 ${item.responseStored?'완전':'미완전'} · 사용량 ${item.usage?JSON.stringify(item.usage):'UNKNOWN'} · 비용 추정 ${item.tokenEstimateMicroUsd??'UNKNOWN'} microUSD · ${item.errorCode??''}`}));
   if(status.firstReport){const detail=el('details');detail.append(el('summary',{text:'1차 보고서와 근거 ID 보기'}),el('pre',{text:JSON.stringify(status.firstReport,null,2)}));host.append(detail);}
