@@ -22,5 +22,19 @@ export function markdownReport(job,source){
  if(uncertainIds.size)lines.splice(7,0,'- 겹침 경계 검토 필요: 서로 다른 전사 표현 '+uncertainIds.size+'개를 모두 보존했습니다. 같은 발언의 중복 여부와 정확한 표현은 독립 청취로 확인해야 합니다.');
  const byId=new Map((source?.segments||[]).map(s=>[s.id,s]));
  for(const [key,label] of [['summary','핵심 요약'],['chapters','시간대별 상세 요약'],['claims','발언자별 주장과 근거'],['numbers','주요 수치·검증 항목'],['critical','비판적 분석']]){lines.push('## '+label,'');for(const item of report[key]||[]){if(typeof item==='string'){lines.push('- '+item);continue;}const refs=(item.evidenceIds||[]).map(id=>{const s=byId.get(id);return '#'+id+' '+clock(s?.startMs);}).join(', ');lines.push('- '+item.text+' (근거: '+refs+')');}lines.push('');}
- lines.push('## 결론','',report.conclusion||'AI 결론 미생성','','## 원본 스크립트','',source?.raw||'원본 미보관','','## 정제 스크립트','');for(const s of source?.segments||[])lines.push('['+clock(s.startMs)+'] #'+s.id+(uncertainIds.has(s.id)?' [겹침 경계·발언 확인 필요]':'')+' '+s.text);return lines.join('\n');
+ lines.push('## 결론','',report.conclusion||'AI 결론 미생성','');
+ if(report.compositionMode==='gemini-two-pass-v1')lines.push('## 전체 원문 대조','',`- 판정: ${report.meaningReview?.status??'미확인'}`,`- 두 요청에 포함된 저장 원문 구간: ${report.sourceCoverage?.segmentCount??'미확인'}개 (의미 완전성 검증과는 다름)`,'- 근거 ID·수치·직접 인용·넓은 시간대와 2차 모델 대조를 확인했습니다. 사람의 전체 의미 검토·원음 정확성·구간 시각 정확성·외부 사실 확인은 수행하지 않았습니다.','- 자동 대조에서 발견한 의심 항목: 없음 (모델 판정이며 완전성 보증 아님)','');
+ if(report.compositionMode==='groq-complete-synthesis-v1'){
+  lines.push('## 전체 구간 검증','',`- 원문 구간: ${report.coverageManifest?.segmentCount??'미확인'}개`,`- 원시 단계: ${report.coverageManifest?.rawStageCount??'미확인'}개`,`- 누락 원문 ID: ${(report.coverageManifest?.missingSegmentIds||[]).join(', ')||'없음'}`,`- 근거 목록 SHA-256: ${report.coverageManifest?.manifestSha256??'미확인'}`,`- 의미 대조: ${report.meaningReview?.status==='OWNER_ATTESTED'?'소유자 확인 ('+report.meaningReview.reviewedAt+')':report.meaningReview?.status==='AUTO_CHECK_PASSED_HUMAN_UNREVIEWED'?'자동 검증 통과 · 사람의 전체 의미 검토 없음':'미확인'}`,'');
+  if(report.meaningReview?.status==='AUTO_CHECK_PASSED_HUMAN_UNREVIEWED')lines.push(`- 자동 검증 한계: ${report.meaningReview.limitations}`,`- 추가 검토 권장 구간: ${(report.meaningReview.suspiciousRanges||[]).map(item=>'raw:'+item.index).join(', ')||'없음'}`,'');
+  lines.push('## 전체 상세 결과 부록','');
+  for(const stage of report.appendix||[]){
+   lines.push(`### raw:${stage.index} · ${stage.provenance==='HUMAN_REVIEWED_SOURCE_EXCERPT'?'검토된 원문 발췌 (AI 요약 아님)':stage.provenance==='AUDITED_DERIVED_CHECKPOINT'?'실패 응답의 검토된 표기 파생본':'검증된 AI 구간 보고서'}`,'');
+   if(stage.provenance==='HUMAN_REVIEWED_SOURCE_EXCERPT'){lines.push('- 원 AI 요청 실패·사용량은 별도 원장에 보존; 이 발췌는 네트워크 결과 확정이나 과금 해소를 뜻하지 않습니다.');for(const item of stage.excerpts||[])lines.push(`- #${item.id} @ ${item.startMs}–${item.endMs}ms: ${item.text}`);}
+   else{if(stage.provenance==='AUDITED_DERIVED_CHECKPOINT'){lines.push(`- 원 실패·사용량 보존, 파생 기록 SHA-256: ${stage.recoveryRecordSha256}`);for(const change of stage.transformations||[])lines.push(`- 원문 표기 보정: ${change.from} → ${change.to} (원문 #${change.source.id})`);}for(const key of ['summary','chapters','claims','numbers','critical'])for(const item of stage.report?.[key]||[])lines.push(`- ${key}: ${item.text} (근거: ${item.evidenceIds.map(id=>'#'+id).join(', ')})`);}
+   if(stage.report?.conclusion)lines.push(`- conclusion: ${stage.report.conclusion}`);
+   lines.push('');
+  }
+ }
+ lines.push('## 원본 스크립트','',source?.raw||'원본 미보관','','## 정제 스크립트','');for(const s of source?.segments||[])lines.push('['+clock(s.startMs)+'] #'+s.id+(uncertainIds.has(s.id)?' [겹침 경계·발언 확인 필요]':'')+' '+s.text);return lines.join('\n');
 }

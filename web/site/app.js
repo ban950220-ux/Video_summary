@@ -1,7 +1,7 @@
 import {planMp3,prepareMp3Chunk} from '/audio.mjs';
 import {runAudioChunks,runSummaryStages,runApprovedFreeBatch,runApprovedGroqSummary,detailRequestIsCurrent,beginDetailAction} from '/audio-runner.mjs';
 import {audioProgressPlan,cleanedAudioComplete,fmtRetryDate} from '/audio-progress-plan.mjs';
-import {groqSummaryProgress} from '/groq-summary-progress.mjs';
+import {groqSummaryProgress,groqGapFailureText} from '/groq-summary-progress.mjs';
 // Private owner-only site, no third-party scripts and no API keys in browser storage.
 const $=(sel)=>document.querySelector(sel);
 const state={view:'analyze',mode:'url',page:0,hasMore:false,provider:null,connections:[]};
@@ -72,11 +72,16 @@ function showReport(job,container,persisted,costReconciliation){empty(container)
   if(job.audit){resultLine(container,'전사 범위',Number.isFinite(job.audit.timelineRatio)?`${Math.round(job.audit.timelineRatio*1000)/10}% (시간축 추정)`:'확인 불가');resultLine(container,'범위 설명',job.audit.reason??'확인 필요');}
   const report=job.report;
   if(report){
-    if(['GEMINI_EVIDENCE_LINKED','GROQ_EVIDENCE_LINKED','GEMINI_PAID_FULL_EVIDENCE_LINKED'].includes(report.kind)){if(report.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED')resultLine(container,'요약 계약','전체 영상 단일 종합 요약 · Gemini 유료');for(const [key,label] of [['summary','핵심 요약'],['chapters','시간대별 요약'],['claims','주장과 근거'],['numbers','수치와 확인 항목'],['critical','비판적 분석']]){container.append(el('h3',{text:label}));const list=el('ul');for(const item of report[key]||[])list.append(el('li',{text:item.text+' (원문 #'+item.evidenceIds.join(', #')+')'}));container.append(list);}container.append(el('h3',{text:'결론'}),el('p',{text:report.conclusion}),el('p',{className:'tip',text:report.warning}));}else{const h=el('h3',{text:'원문 추출 · AI 요약 아님'});container.append(h);
+    if(['GEMINI_EVIDENCE_LINKED','GROQ_EVIDENCE_LINKED','GEMINI_PAID_FULL_EVIDENCE_LINKED','GEMINI_TWO_PASS_REVIEWED'].includes(report.kind)){if(report.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED')resultLine(container,'요약 계약','전체 영상 단일 종합 요약 · Gemini 유료');if(report.kind==='GEMINI_TWO_PASS_REVIEWED')resultLine(container,'요약 계약','전체 전사 1차 요약 + 2차 원문 대조 · 자동 검사 통과 / 사람 미검토 · 원음·외부 사실 미검증');for(const [key,label] of [['summary','핵심 요약'],['chapters','시간대별 요약'],['claims','주장과 근거'],['numbers','수치와 확인 항목'],['critical','비판적 분석']]){container.append(el('h3',{text:label}));const list=el('ul');for(const item of report[key]||[])list.append(el('li',{text:item.text+' (원문 #'+item.evidenceIds.join(', #')+')'}));container.append(list);}container.append(el('h3',{text:'결론'}),el('p',{text:report.conclusion}),el('p',{className:'tip',text:report.warning}));}else{const h=el('h3',{text:'원문 추출 · AI 요약 아님'});container.append(h);
     const list=el('ol');for(const sentence of report.summary??[])list.append(el('li',{text:sentence}));container.append(list);
     container.append(el('p',{className:'subtitle',text:report.warning??'실제 AI 모델 분석·번역은 수행되지 않았습니다.'}));}
   }else container.append(el('p',{className:'subtitle',text:'AI 요약은 아직 없습니다. 전사 완료 후 저장된 원문과 내보내기를 확인할 수 있습니다.'}));
-  if(job.id){const tools=el('div',{className:'library-actions'});for(const format of ['md','txt'])tools.append(el('a',{className:'btn secondary small',text:format.toUpperCase()+' 내보내기',attrs:{href:'/api/jobs/'+job.id+'/export?format='+format}}));const source=el('button',{className:'btn secondary small',text:'원문·근거 보기'});source.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/source'),uncertain=new Set((data.audioBoundaryAmbiguities||[]).map(x=>x.segmentId)),warning=data.audioBoundaryAmbiguityCount?`겹침 경계 검토 필요: 서로 다른 전사 표현 ${data.audioBoundaryAmbiguityCount}개를 보존했습니다. 중복 여부와 정확한 표현은 독립 청취로 확인해야 합니다.\n\n`:'';const pre=el('pre',{text:data.source?.segments?.length?warning+(data.source.segments).map(x=>'#'+x.id+(uncertain.has(x.id)?' [겹침 경계·발언 확인 필요]':'')+' ['+(x.startMs===null?'시각 미확인':Math.floor(x.startMs/1000)+'초')+'] '+x.text).join('\n'):'저장된 전체 전사가 아직 없습니다.'});container.append(pre);source.disabled=true;}catch(e){toast(safeError(e));}};tools.append(source);if(!['GEMINI_EVIDENCE_LINKED','GROQ_EVIDENCE_LINKED','GEMINI_PAID_FULL_EVIDENCE_LINKED'].includes(report?.kind)){const review=el('button',{className:'btn secondary small',text:'요약 부분 출력 검토'});review.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/summary-review');container.append(el('pre',{text:data.partialText}));review.disabled=true;}catch(error){toast(safeError(error));}};tools.append(review);}container.append(tools);}
+  if(report?.compositionMode==='groq-complete-synthesis-v1'){
+   container.append(el('h3',{text:'전체 상세 결과 부록'}),el('p',{className:'tip',text:`원문 ${report.coverageManifest?.segmentCount??'미확인'}구간 · 원시 단계 ${report.coverageManifest?.rawStageCount??'미확인'}개 · 경계 불확실성 ${report.coverageManifest?.boundarySegmentIds?.length??0}개` }));
+   container.append(el('p',{className:'tip',text:report.meaningReview?.status==='AUTO_CHECK_PASSED_HUMAN_UNREVIEWED'?`자동 검증 통과 · 사람의 전체 의미 검토 없음 · 추가 검토 권장 raw 단계: ${(report.meaningReview.suspiciousRanges||[]).map(item=>item.index).join(', ')||'없음'}`:'소유자 원문 의미 검토 완료'}));
+   for(const stage of report.appendix||[]){const detail=el('details'),summary=el('summary',{text:`raw:${stage.index} · ${stage.provenance}`});detail.append(summary,el('pre',{text:JSON.stringify(stage.excerpts??stage.report,null,2)}));container.append(detail);}
+  }
+  if(job.id){const tools=el('div',{className:'library-actions'});for(const format of ['md','txt'])tools.append(el('a',{className:'btn secondary small',text:format.toUpperCase()+' 내보내기',attrs:{href:'/api/jobs/'+job.id+'/export?format='+format}}));const source=el('button',{className:'btn secondary small',text:'원문·근거 보기'});source.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/source'),uncertain=new Set((data.audioBoundaryAmbiguities||[]).map(x=>x.segmentId)),warning=data.audioBoundaryAmbiguityCount?`겹침 경계 검토 필요: 서로 다른 전사 표현 ${data.audioBoundaryAmbiguityCount}개를 보존했습니다. 중복 여부와 정확한 표현은 독립 청취로 확인해야 합니다.\n\n`:'';const pre=el('pre',{text:data.source?.segments?.length?warning+(data.source.segments).map(x=>'#'+x.id+(uncertain.has(x.id)?' [겹침 경계·발언 확인 필요]':'')+' ['+(x.startMs===null?'시각 미확인':Math.floor(x.startMs/1000)+'초')+'] '+x.text).join('\n'):'저장된 전체 전사가 아직 없습니다.'});container.append(pre);source.disabled=true;}catch(e){toast(safeError(e));}};tools.append(source);if(!['GEMINI_EVIDENCE_LINKED','GROQ_EVIDENCE_LINKED','GEMINI_PAID_FULL_EVIDENCE_LINKED','GEMINI_TWO_PASS_REVIEWED'].includes(report?.kind)){const review=el('button',{className:'btn secondary small',text:'요약 부분 출력 검토'});review.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/summary-review');container.append(el('pre',{text:data.partialText}));review.disabled=true;}catch(error){toast(safeError(error));}};tools.append(review);}container.append(tools);}
   if(job.id&&report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED'){
    const cost=el('p',{className:'tip',text:paidCostText(costReconciliation)});container.append(cost);
    api('/api/jobs/'+job.id+'/paid-summary-status').then(status=>{cost.textContent=paidCostText(status.costReconciliation);}).catch(()=>{});
@@ -318,7 +323,7 @@ function showGroqBundleChoice(job,target,requestId,{withGap=false}={}){
  const render=async()=>{
   const bundle=await api(url);if(!current())return;empty(host);
   host.append(el('h2',{text:withGap?'누락 공개 구간별 요약 묶음 · 전체 요약 미완료':'구간별 요약 묶음 · 전체 종합 요약 미완료'}),el('p',{text:`저장된 구간 보고서 ${bundle.sourceCheckpointCount}개 · 묶음 계약 ${bundle.bundleContractVersion} · 묶음 SHA-256 ${bundle.bundleHash}. 별도 모델 종합 요약은 아직 없습니다.`}),el('p',{className:'tip',text:bundle.report.warning}));
-  if(withGap){for(const gap of bundle.missingRanges??[])host.append(el('p',{text:`검토 필요·미완료 ${gap.stage} · 원문 #${gap.firstId}–#${gap.lastId} (${gap.startMs}–${gap.endMs}ms) · 원요청 ${gap.originalState}, 교정 ${gap.correctionState}, ${gap.failureCode}. 완료 ${bundle.completedRawStages} / ${bundle.completedRawStages+bundle.heldRawStages+bundle.pendingRawStages}, 보류 ${bundle.heldRawStages}, 미처리 ${bundle.pendingRawStages}.` }));}
+  if(withGap){for(const gap of bundle.missingRanges??[])host.append(el('p',{text:`검토 필요·미완료 ${gap.stage} · 원문 #${gap.firstId}–#${gap.lastId} (${gap.startMs}–${gap.endMs}ms) · 원요청 ${gap.originalState}, 교정 ${gap.correctionState}, ${gap.failureCode}. 완료 ${bundle.completedRawStages} / ${bundle.completedRawStages+bundle.heldRawStages+bundle.pendingRawStages}, 보류 ${bundle.heldRawStages}, 미처리 ${bundle.pendingRawStages}.` }));for(const reviewed of bundle.separatelyReviewedRanges??[])host.append(el('p',{text:`별도 내용 검토 ${reviewed.stage} · 원문 #${reviewed.firstId}–#${reviewed.lastId} · ${reviewed.provenance} · 현재 AI 구간 요약 묶음에는 포함되지 않음. 최종 전체 요약 검토에서 별도 확인 필요.`}));}
   for(const [key,label] of [['summary','구간별 요약 항목'],['chapters','시간순 구간별 장'],['claims','구간별 주장'],['numbers','구간별 수치'],['critical','구간별 비판 항목']]){host.append(el('h3',{text:label}));const list=el('ul');for(const item of bundle.report[key])list.append(el('li',{text:item.text+' (원문 #'+item.evidenceIds.join(', #')+')'}));host.append(list);}
   host.append(el('h3',{text:'구간별 결론 원순서'}),el('p',{text:bundle.report.conclusion}));
   const links=el('div',{className:'library-actions'});for(const format of ['txt','md'])links.append(el('a',{className:'btn secondary small',text:`구간별 묶음 ${format.toUpperCase()} 내보내기`,attrs:{href:url+'?format='+format}}));host.append(links);
@@ -328,6 +333,7 @@ function showGroqBundleChoice(job,target,requestId,{withGap=false}={}){
 function showGroqGapChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),url='/api/jobs/'+job.id+'/groq-summary-gap',host=el('div');target.append(host);
  let running=false,interrupted=false;
+ const savedFailure=async()=>{try{return groqGapFailureText(await api('/api/jobs/'+job.id+'/groq-summary-status'));}catch{return null;}};
  const render=async(note='')=>{
   const scope=await api(url);if(!current())return;empty(host);
   host.append(el('h2',{text:'Groq Free · raw:8 누락 공개 독립 구간 진행'}),el('p',{text:`연속 완료 raw:0–7 · 검증 저장 ${scope.completedRawStages}/${scope.rawStages}구간 · 보류 ${scope.heldRawStages}구간 (raw:8, 원문 #${scope.gap.firstId}–#${scope.gap.lastId}) · 미처리 ${scope.pendingRawStages}구간. raw:8 원요청과 교정은 ${scope.gap.failureCode} 검증 실패로 검토 필요·미완료입니다. 전체 보고서는 저장되지 않습니다.`}),el('p',{text:'기존 실패 응답과 사용량은 보존됩니다. 다음 독립 구간만 진행하며 raw:8 재전송, 새 교정 슬롯, 자동 재시도는 없습니다. 제공자 계정 잔여량은 UNKNOWN입니다.'}));
@@ -341,7 +347,7 @@ function showGroqGapChoice(job,target,requestId){
    const run=el('button',{className:'btn secondary small',text:'이 탭에서 승인된 독립 구간 순차 진행'});run.disabled=running;
    run.onclick=async()=>{
     if(running||!current())return;running=true;interrupted=false;run.disabled=true;
-    let cancelWait=null,finalNote='';
+    let cancelWait=null,finalNote='',lastServerError=null;
     const stop=()=>{interrupted=true;cancelWait?.();if(current())progress.textContent='이 탭의 진행을 멈췄습니다. 이미 보낸 요청의 저장 상태를 확인하세요.';};stopGroqSummarySession=stop;
     const visibility=()=>{if(document.hidden)stop();};document.addEventListener('visibilitychange',visibility);
     try{
@@ -350,7 +356,7 @@ function showGroqGapChoice(job,target,requestId){
       const fresh=await api(url);
       if(!current()||interrupted||document.hidden||!fresh.approved||fresh.outputKind!==scope.outputKind||fresh.gap?.originalSha256!==scope.gap.originalSha256||fresh.gap?.correctionSha256!==scope.gap.correctionSha256||!fresh.nextRawStage)throw Error('FOREGROUND_REQUIRED');
       progress.textContent=fresh.nextRawStage+' 전송 중 · 제공자 수신과 저장 결과는 아직 미확인입니다.';
-      const sent=await api(url,{method:'POST',body:{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:fresh.nextRawStage,executeOnce:true}});
+      let sent;try{sent=await api(url,{method:'POST',body:{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:fresh.nextRawStage,executeOnce:true}});}catch(error){if(error?.code)lastServerError={stage:fresh.nextRawStage,code:error.code};throw error;}
       if(current()&&!interrupted)progress.textContent=sent.stage+' 저장 확인 · raw:8은 계속 보류 중입니다.';
       return sent;
      },wait:ms=>new Promise((resolve,reject)=>{
@@ -361,8 +367,8 @@ function showGroqGapChoice(job,target,requestId){
       cancelWait=()=>{clearTimeout(timer);clearInterval(ticker);cancelWait=null;reject(Error('FOREGROUND_REQUIRED'));};
      }),foreground:()=>current()&&!document.hidden&&!interrupted,onUpdate:({stage})=>{if(current()&&!interrupted)progress.textContent=stage+' 저장 확인 · raw:8 보류 · 요청 간격 대기';}});
      finalNote=outcome.reason==='SUMMARY_BUNDLE_AVAILABLE'?'독립 구간 저장 완료 · raw:8 보류와 전체 요약 미완료를 유지합니다.':outcome.reason==='SUMMARY_WINDOW_COMPLETE'?'이번 승인 창이 끝났습니다. 계속하려면 새 범위를 검토·승인하세요.':outcome.reason?'진행 중단: '+outcome.reason+' · 저장 상태를 확인하세요. 자동 재전송은 없습니다.':'저장 상태를 확인하세요.';
-    }catch(error){finalNote='요청 결과를 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다. '+safeError(error);}
-    finally{cancelWait?.();document.removeEventListener('visibilitychange',visibility);if(stopGroqSummarySession===stop)stopGroqSummarySession=null;running=false;if(current())await render(finalNote).catch(error=>{progress.textContent='저장 상태를 읽을 수 없습니다. 자동 재전송은 없습니다. '+safeError(error);});}
+    }catch(error){finalNote=lastServerError?`마지막 서버 응답: ${lastServerError.stage} · ${lastServerError.code}. 저장 상태를 별도로 확인하세요. 자동 재전송은 없습니다.`:'요청 결과를 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다. '+safeError(error);}
+    finally{cancelWait?.();document.removeEventListener('visibilitychange',visibility);if(stopGroqSummarySession===stop)stopGroqSummarySession=null;running=false;if(current())await render(finalNote).catch(async error=>{if(current()){const stored=await savedFailure();progress.textContent=stored??`${lastServerError?`마지막 서버 응답 ${lastServerError.stage} · ${lastServerError.code}. `:''}새 저장 상태 조회 실패. 자동 재전송은 없습니다. ${safeError(error)}`;}});}
    };host.append(run);return;
   }
   const form=el('form',{className:'fields'}),labels=['Groq Free 조직과 결제 비활성을 확인했습니다.','raw:8 검증 실패·누락과 최종 보고서 미완료를 확인했습니다.','계정 잔여량 UNKNOWN, 표시된 호출·토큰 상한, 첫 429/불명확한 전송에서 중단을 확인했습니다.'];
@@ -371,13 +377,49 @@ function showGroqGapChoice(job,target,requestId){
   const approve=el('button',{className:'btn secondary small',text:'누락 공개 무료 범위 승인 저장'});form.append(approve);
   form.onsubmit=async event=>{event.preventDefault();approve.disabled=true;try{await api(url,{method:'POST',body:{...scope,step:'approve',freeTierConfirmed:checks[0].checked,billingDisabled:checks[0].checked,unknownBalanceAcknowledged:checks[2].checked,noPaidFallback:checks[2].checked,noGeminiFallback:checks[2].checked,summaryOnly:true,acknowledgeMissingRaw8:checks[1].checked,acknowledgeNoFinalReport:checks[1].checked,noAutomaticRetry:checks[2].checked}});if(current())await render('승인만 저장했습니다. 실행은 별도 선택입니다.');}catch(error){if(current())await render('승인 저장 상태를 조회로 확인하세요. '+safeError(error));}};host.append(form);
  };
- render().catch(error=>{if(current()){empty(host);host.append(el('p',{text:'누락 공개 진행 가능성을 확인할 수 없습니다. 실패 상태를 검토하세요. '+safeError(error)}));}});
+ render().catch(async error=>{if(current()){const failure=await savedFailure();if(current()){empty(host);host.append(el('p',{text:failure??'누락 공개 진행 가능성을 확인할 수 없습니다. 실패 상태를 검토하세요. '+safeError(error)}));}}});
+}
+function showGeminiTwoPassChoice(job,target,requestId){
+ const current=()=>detailCurrent(job.id,requestId,target),base='/api/jobs/'+job.id+'/gemini-two-pass',host=el('div');target.append(host);
+ let postUncertain=false;
+ const render=async()=>{
+  const status=await api(base+'-status');if(!current())return;empty(host);
+  host.append(el('h2',{text:'Gemini 전체 전사 요약 + 원문 대조'}),el('p',{text:'저장된 전사만 사용합니다. 생성은 최대 2회, 자동 재시도와 자동 3차 호출은 없습니다. 2차 예약 전에 남은 승인을 취소할 수 있으며, 예약이 먼저 확정되면 그 호출은 취소할 수 없습니다. 대조 PASS도 사람의 의미 검토·원음과 구간 시각의 정확성·외부 사실을 보증하지 않습니다.'}),el('p',{text:'현재 확인된 Gemini 프로젝트는 Tier 1 유료입니다. 별도 무료 프로젝트의 결제 비활성 증거가 없으므로 무료 실행으로 분류할 수 없습니다. 유료 실행은 표시한 최대액을 별도로 승인해야 합니다.'}));
+  if(status.state==='NOT_STARTED'){
+   const confirm=el('input',{attrs:{type:'checkbox'}}),row=el('label',{text:'견적용 공식 토큰 계수를 위해 전체 전사 원문과 구간 ID를 Google에 전송하는 데 동의합니다. 이는 유료 생성 승인과 별개이며, 견적 단계에서 생성은 하지 않습니다.'});row.prepend(confirm);host.append(row);
+   const paid=el('button',{className:'btn secondary small',text:'전체 전사 전송 동의 후 견적 요청 · 생성 없음'});
+   paid.onclick=async()=>{if(!confirm.checked)return;paid.disabled=true;try{await api(base+'-quote',{method:'POST',body:{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'견적 발급 결과 조회 실패. 재전송하지 마세요.'}));});};host.append(paid);return;
+  }
+  const q=status.quote;if(status.state==='FIRST_READY'&&status.calls.some(item=>item.phase===0&&item.state==='SETTLED'))postUncertain=false;host.append(el('p',{text:`상태 ${status.state} · 모델 ${q.model} · 공식 계수 1차 입력 ${q.inputTokensCounted}토큰 · 단계별 승인 입력 범위 ${q.inputTokensPerCallCap} / 요청 출력 상한 ${q.outputTokensPerCallCap}토큰 · 최대 생성 2회 · 재시도 0회 · 해당 범위 고정 단가 세전 상한 ${q.preTaxMicroUsd} microUSD + 세금 불확실성 완충 ${q.taxBufferMicroUsd} microUSD = 앱 최대 승인 예산 $${(q.maxMicroUsd/1e6).toFixed(6)}. 공급자 최종 청구액은 UNKNOWN. · 만료 ${fmtDate(new Date(q.expiresAt).toISOString())}.`}));
+  if(status.calls.length===0&&(status.state==='CANCELLED'||q.expiresAt<=Date.now())){
+   const consent=el('input',{attrs:{type:'checkbox'}}),label=el('label',{text:'새 견적을 위해 전체 전사와 구간 ID를 Google 토큰 계수 API에 다시 보내는 데 동의합니다.'});label.prepend(consent);host.append(label);
+   const renew=el('button',{className:'btn secondary small',text:'새 견적 발급'});renew.onclick=async()=>{if(!consent.checked)return;renew.disabled=true;try{await api(base+'-quote',{method:'POST',body:{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(error=>toast(safeError(error)));};host.append(renew);
+  }
+  for(const item of status.calls)host.append(el('p',{text:`${item.phase===0?'요약':'대조'}: ${item.state} · 공식 입력 계수 ${item.inputTokensCounted} · 수신 보존 ${item.responseStored?'완전':'미완전'} · 사용량 ${item.usage?JSON.stringify(item.usage):'UNKNOWN'} · 비용 추정 ${item.tokenEstimateMicroUsd??'UNKNOWN'} microUSD · ${item.errorCode??''}`}));
+  if(status.firstReport){const detail=el('details');detail.append(el('summary',{text:'1차 보고서와 근거 ID 보기'}),el('pre',{text:JSON.stringify(status.firstReport,null,2)}));host.append(detail);}
+  if(status.reviewStage==='REVIEW_REQUIRED')host.append(el('p',{className:'tip',text:'두 모델 호출의 구조 검사와 자동 대조가 끝났습니다. 저장 전사의 의미를 출처와 대조한 사람 검토는 완료되지 않았고, 이 작업의 요약은 완료 상태로 게시되지 않았습니다. 전사 공백은 원음 무음을 뜻하지 않습니다.'}));
+  if(status.review){const detail=el('details');detail.append(el('summary',{text:'2차 원문 대조 의심 항목 보기'}),el('pre',{text:JSON.stringify(status.review,null,2)}));host.append(detail);}
+  if(status.errorCode)host.append(el('p',{text:`중단 사유 ${status.errorCode}. 저장된 응답의 무호출 복구 또는 Groq 경로를 검토하세요. 새 유료 호출은 자동으로 보내지 않습니다.`}));
+  if(status.state==='QUOTED'&&q.expiresAt>Date.now()){
+   const confirm=el('input',{attrs:{type:'checkbox'}}),row=el('label',{text:'이 유료 프로젝트의 이 견적·최대 금액·2회 상한·만료·재시도 없음에 별도로 동의합니다.'});row.prepend(confirm);host.append(row);
+   const approve=el('button',{className:'btn secondary small',text:'표시된 최대 금액 승인 저장 · 생성 없음'});approve.onclick=async()=>{if(!confirm.checked)return;approve.disabled=true;try{await api(base+'-approve',{method:'POST',body:{quoteSha256:q.quoteSha256,maxMicroUsd:q.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'승인 상태 조회 실패. 다시 승인하지 말고 상태를 확인하세요.'}));});};host.append(approve);
+  }
+  if(['QUOTED','APPROVED'].includes(status.state)||status.state==='FIRST_READY'&&status.calls.some(item=>item.phase===0&&item.state==='SETTLED')){const cancel=el('button',{className:'btn secondary small',text:status.state==='FIRST_READY'?'남은 2차 유료 호출 승인 취소':'견적·승인 취소'});cancel.onclick=async()=>{cancel.disabled=true;try{await api(base+'-cancel',{method:'POST',body:{}});}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'취소 상태 조회 실패. 상태를 다시 확인하세요.'}));});};host.append(cancel);}
+  if((status.state==='APPROVED'||status.next==='RUN_REVIEW')&&q.expiresAt>Date.now()&&!postUncertain){const phase=status.state==='APPROVED'?0:1,run=el('button',{className:'btn secondary small',text:phase===0?'승인된 1차 전체 요약 실행':'승인된 2차 원문 대조 실행'});run.onclick=async()=>{run.disabled=true;postUncertain=true;try{await api(base+'-run',{method:'POST',body:{phase,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true}});postUncertain=false;}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'호출 결과 조회 실패. 실행 POST를 반복하지 마세요.'}));});};host.append(run);}
+  const recoverable=status.calls.find(item=>item.responseStored&&item.state!=='SETTLED');if(recoverable){const recover=el('button',{className:'btn secondary small',text:'보존 응답 재검증 · 제공자 호출 없음'});recover.onclick=async()=>{recover.disabled=true;try{await api(base+'-recover',{method:'POST',body:{phase:recoverable.phase,confirmNoProviderCall:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'무호출 복구 결과 조회 실패. 상태를 다시 확인하세요.'}));});};host.append(recover);}
+  const unused=status.calls.find(item=>item.state==='RESERVED');if(unused){const release=el('button',{className:'btn secondary small',text:'공급자 호출 전 예약 복구'});release.onclick=async()=>{release.disabled=true;try{await api(base+'-recover',{method:'POST',body:{phase:unused.phase,confirmNoProviderCall:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(error=>toast(safeError(error)));};host.append(release);}
+  const refresh=el('button',{className:'btn secondary small',text:'저장 상태 다시 조회'});refresh.onclick=()=>render().catch(error=>toast(safeError(error)));host.append(refresh);
+  if(['ISSUES','BLOCKED','CANCELLED'].includes(status.state)){const groq=el('button',{className:'btn secondary small',text:'Groq 단계별 경로 검토'});groq.onclick=()=>{if(current()){empty(target);showSummaryChoice(job,target,requestId);}};host.append(groq);}
+  if(status.state==='COMPLETE'){const open=el('button',{className:'btn secondary small',text:'저장 보고서 열기'});open.onclick=async()=>{const fresh=await api('/api/jobs/'+job.id);if(current())showReport(fresh.job,target,true);};host.append(open);}
+ };
+ render().catch(error=>{if(current())host.append(el('p',{text:'2회 경로 상태를 읽을 수 없습니다. 새 요청을 보내지 마세요. '+safeError(error)}));});
 }
 function showSummaryChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),host=el('div');target.append(host);
  api('/api/jobs/'+job.id+'/summary-choice').then(quote=>{
   if(!current())return;
   host.append(el('h2',{text:'저장된 전사의 남은 요약 선택'}),el('p',{text:quote.transcription.complete?'전사 완료 · 남은 전사 0조각 · 완료된 전사는 다시 청구하지 않습니다.':'전사 완료 상태 미확인 · 요약 견적을 확정할 수 없습니다.'}),el('p',{text:`검증된 원시 요약 ${quote.summary.savedRawStages}/${quote.summary.rawStages}단계 · 남은 원시 단계 ${quote.summary.remainingRawStages}. 구간별 요약 묶음은 중간 산출물이며, 요청한 결과는 전체 영상의 단일 종합 요약입니다.`}));
+  if(quote.transcription.complete&&!quote.summary.complete){const twoPass=el('button',{className:'btn secondary small',text:'Gemini 전체 전사 요약 + 원문 대조 2회 대안'});twoPass.onclick=()=>{if(current()){empty(target);showGeminiTwoPassChoice(job,target,requestId);}};host.append(twoPass);}
   host.append(el('h3',{text:'Groq Free · 전체 종합 요약 시도'}),el('p',{text:`모델 ${quote.free.model} · 요청당 입력 상한 ${quote.free.inputTokensUpperPerCall} / 출력 상한 ${quote.free.outputTokensUpperPerCall} 토큰. 소요 시간 UNKNOWN: ${quote.free.eta.reason} 무료 실패 시 유료 자동 전환은 없습니다.`}));
   if(quote.transcription.complete&&!quote.summary.complete){const free=el('button',{className:'btn secondary small',text:'무료 범위 별도 검토·승인'});free.onclick=()=>{if(current()){empty(target);showGroqSummaryChoice(job,target,requestId);}};host.append(free);}
   host.append(el('h3',{text:'유료 전체 종합 요약'}),el('p',{text:`${quote.paid.executionEnabled?'별도 비용 승인 후에만 실행 가능':'현재 실행 비활성'} · ${quote.paid.reason} 모델 ${quote.paid.model??'미선정'} · 가격 버전 ${quote.paid.priceVersion??'미검증'} · 비용 승인은 모델 전체 입력/출력 한도 ${quote.paid.inputTokensUpper??'UNKNOWN'}/${quote.paid.outputTokensUpper??'UNKNOWN'}토큰 기준 · 요청 maxOutputTokens=8192의 thinking 과금 경계는 추가 검토 중 · 자동 재시도 ${quote.paid.maxRetries??'미승인'}회 · 승인 최대 ${quote.paid.maxMicroUsd??'미산정'} microUSD · ETA UNKNOWN.`}));
@@ -424,7 +466,10 @@ function showGroqCorrectionChoice(job,target,requestId){
   const reread=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});reread.onclick=refresh;host.append(reread);
   if(state.attemptState||postUncertain){
    const labels={CLAIMED:'새 교정 요청이 접수되어 처리 중입니다.',DONE:'새 교정 결과가 저장됐습니다. 다음 구간은 별도 승인 후 실행하세요.',FAILED_UNCERTAIN:'새 교정 호출의 결과가 불명확합니다. 기존 raw:8 실패와 별개의 실패입니다.',BLOCKED:'새 교정 요청은 전송 전에 차단됐습니다.'};
-   host.append(el('p',{attrs:{role:'status'},text:`${labels[state.attemptState]??'새 교정 요청의 결과를 확인할 수 없습니다.'} 상태 ${state.attemptState??'UNKNOWN'}${state.attemptErrorCode?' · '+state.attemptErrorCode:''} · 자동 재시도는 없습니다. 저장 상태를 확인하세요.`}));return;
+   host.append(el('p',{attrs:{role:'status'},text:`${labels[state.attemptState]??'새 교정 요청의 결과를 확인할 수 없습니다.'} 상태 ${state.attemptState??'UNKNOWN'}${state.attemptErrorCode?' · '+state.attemptErrorCode:''} · 자동 재시도는 없습니다. 저장 상태를 확인하세요.`}));
+   if(state.recoveryCandidate){const proof=state.recoveryCandidate,button=el('button',{className:'btn secondary small',text:'저장된 raw:8 응답 무호출 복구'});host.append(el('p',{text:`완전한 응답 SHA-256 ${proof.responseSha256} · 실제 사용량 ${proof.usageTotalTokens}토큰. 원 실패와 사용량은 남습니다.`}),button);button.onclick=async()=>{if(!confirm('보존된 응답과 사용량을 검토하고 제공자를 다시 호출하지 않고 복구할까요?'))return;button.disabled=true;await post({step:'recover',failedOperationId:proof.failedOperationId,responseSha256:proof.responseSha256,recordSha256:proof.recordSha256,usageTotalTokens:proof.usageTotalTokens,confirmNoProviderCall:true,confirmOriginalFailurePreserved:true});};}
+   if(state.recoveredWithoutProviderCall)host.append(el('p',{text:'보존된 응답을 재호출 없이 복구했습니다. 교정 실패 기록과 실제 사용량은 보존됩니다.'}));
+   return;
   }
   if(state.approvalState==='STOPPED'){host.append(el('p',{text:'이 승인은 취소 또는 중단됐습니다. 동일 범위의 새 호출을 자동으로 승인하지 않습니다.'}));return;}
   if(state.approvalState==='APPROVED'){
@@ -445,26 +490,31 @@ function showGroqCorrectionChoice(job,target,requestId){
  render().catch(error=>{if(current()){empty(host);host.append(el('p',{text:'교정 범위를 확인할 수 없습니다. '+safeError(error)}));}});
 }
 function showGroqCheckpointRecoveryChoice(job,target,requestId){
- const current=()=>detailCurrent(job.id,requestId,target),url='/api/jobs/'+job.id+'/groq-summary-checkpoint-recovery',host=el('div');target.append(host);
+ const current=()=>detailCurrent(job.id,requestId,target),baseUrl='/api/jobs/'+job.id+'/groq-summary-checkpoint-recovery',host=el('div');target.append(host);
+ let stageIndex=0;const url=()=>baseUrl+'?stage=raw:'+stageIndex;
  let postUncertain=false;
+ const selector=el('input',{attrs:{type:'number',min:'0',step:'1',value:'0'}});
+ const label=el('label',{text:'복구할 원시 구간 번호 (raw:0부터)'});label.append(selector);
+ const reviewHost=el('div');host.append(el('h2',{text:'Groq Free 저장 보고서 무호출 복구 · 전체 요약 아님'}),label,reviewHost);
+ selector.onchange=()=>{const next=Number(selector.value);if(!Number.isSafeInteger(next)||next<0){selector.value=String(stageIndex);return;}stageIndex=next;postUncertain=false;render().catch(error=>{if(current()){empty(reviewHost);reviewHost.append(el('p',{text:'선택한 원시 구간의 복구 근거를 확인할 수 없습니다.'}));toast(safeError(error));}});};
  const refresh=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});
- refresh.onclick=async()=>{refresh.disabled=true;try{await render();}catch(error){if(current()){host.append(el('p',{text:'복구 저장 상태를 확인할 수 없습니다. 재전송하지 마세요.'}));toast(safeError(error));}}finally{refresh.disabled=false;}};
+ refresh.onclick=async()=>{refresh.disabled=true;try{await render();}catch(error){if(current()){reviewHost.append(el('p',{text:'복구 저장 상태를 확인할 수 없습니다. 재전송하지 마세요.'}));toast(safeError(error));}}finally{refresh.disabled=false;}};
  const render=async()=>{
-  const review=await api(url);if(!current())return;empty(host);
-  host.append(el('h2',{text:'Groq Free 첫 구간 보고서 복구 · 전체 요약 아님'}),el('p',{text:`첫 보고서의 저장 응답 SHA-256 ${review.responseSha256} · 원본 계약 ${review.contractHash} · ${review.firstRange.firstId}–${review.firstRange.lastId}번 근거 · 요약 ${review.summaryCount}개, 장 ${review.chapterCount}개, 저장 JSON ${review.storedUtf16Length}자.`}),el('p',{text:`기존 실패 ${review.failedOperationId}와 실제 사용량 ${review.confirmedUsage.totalTokens}토큰은 그대로 보존합니다. 이 복구는 모델을 호출하지 않고 다음 요약 단계도 시작하지 않습니다.`}),refresh);
-  if(review.recovered){host.append(el('p',{text:'검증된 첫 보고서를 체크포인트로 연결했습니다. 다음 단계는 별도 Groq Free 범위 검토·승인·실행이 필요합니다.'}));return;}
-  if(postUncertain){host.append(el('p',{text:'복구 POST 응답이 확인되지 않았습니다. 저장 상태를 읽기로 재확인하세요. 같은 요청을 다시 보내지 않습니다.'}));return;}
+  const selectedIndex=stageIndex,review=await api(url());if(!current()||selectedIndex!==stageIndex)return;empty(reviewHost);
+  reviewHost.append(el('p',{text:`raw:${stageIndex} 저장 응답 SHA-256 ${review.responseSha256} · 원본 계약 ${review.contractHash} · ${review.firstRange.firstId}–${review.firstRange.lastId}번 근거 · 요약 ${review.summaryCount}개, 장 ${review.chapterCount}개, 저장 JSON ${review.storedUtf16Length}자.`}),el('p',{text:`기존 실패 ${review.failedOperationId}와 실제 사용량 ${review.confirmedUsage.totalTokens}토큰은 그대로 보존합니다. 이 복구는 모델을 호출하지 않고 다음 요약 단계도 시작하지 않습니다.`}),refresh);
+  if(review.recovered){reviewHost.append(el('p',{text:'검증된 저장 보고서를 체크포인트로 연결했습니다. 다음 단계는 별도 Groq Free 범위 검토·승인·실행이 필요합니다.'}));return;}
+  if(postUncertain){reviewHost.append(el('p',{text:'복구 POST 응답이 확인되지 않았습니다. 저장 상태를 읽기로 재확인하세요. 같은 요청을 다시 보내지 않습니다.'}));return;}
   const form=el('form',{className:'fields'}),labels=['저장 응답의 원본·계약·응답 해시와 근거 검증 범위를 확인했습니다.','기존 사용량을 보존하고 모델 호출 및 다음 단계 자동 실행이 없음을 확인했습니다.'];
   const checks=labels.map(label=>{const input=el('input',{attrs:{type:'checkbox',required:'true'}}),row=el('label',{text:label});row.prepend(input);form.append(row);return input;});
-  const submit=el('button',{className:'btn secondary small',text:'Groq Free 첫 구간 저장 보고서만 복구'});form.append(submit);
+  const submit=el('button',{className:'btn secondary small',text:`Groq Free raw:${stageIndex} 저장 보고서만 복구`});form.append(submit);
   form.onsubmit=async event=>{
    event.preventDefault();if(!current()||postUncertain||checks.some(input=>!input.checked))return;submit.disabled=true;
-   try{await api(url,{method:'POST',body:{step:'recover',evidenceHash:review.evidenceHash,failedOperationId:review.failedOperationId,contractHash:review.contractHash,responseSha256:review.responseSha256,acknowledgeOriginalUsage:review.confirmedUsage.totalTokens,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true}});if(current())await render();}
+   try{await api(url(),{method:'POST',body:{step:'recover',evidenceHash:review.evidenceHash,failedOperationId:review.failedOperationId,contractHash:review.contractHash,responseSha256:review.responseSha256,acknowledgeOriginalUsage:review.confirmedUsage.totalTokens,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true}});if(current())await render();}
    catch(error){if(current()){postUncertain=true;toast(safeError(error));await refresh.onclick();}}
   };
-  host.append(form);
+  reviewHost.append(form);
  };
- render().catch(error=>{if(current()){empty(host);host.append(el('p',{text:'저장된 첫 보고서의 복구 근거를 확인할 수 없습니다.'}));toast(safeError(error));}});
+ render().catch(error=>{if(current()){empty(reviewHost);reviewHost.append(el('p',{text:'선택한 원시 구간의 복구 근거를 확인할 수 없습니다.'}));toast(safeError(error));}});
 }
 function showGroqPilotChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),url='/api/jobs/'+job.id+'/groq-summary-pilot',host=el('div');target.append(host);
@@ -554,6 +604,65 @@ function showBoundaryReconcileChoice(job,target,requestId){
  };
  target.append(review);
 }
+async function showCompleteSynthesisReview(job,target,requestId){
+ const current=()=>detailCurrent(job.id,requestId,target),path='/api/jobs/'+encodeURIComponent(job.id)+'/groq-summary-complete';
+ try{
+  const scope=await api(path);if(!current())return;
+  empty(target);target.append(el('h2',{text:'전체 종합 요약 · 원문 대조'}));
+  const failureReviewPending=(scope.failedStages||[]).some(item=>!item.reviewed||!item.failureDispositionReviewed);
+  if(!scope.ready||!scope.finalizationReady||!scope.finalizationReview||failureReviewPending){
+   target.append(el('p',{text:scope.blocked?`종합 단계 ${scope.node} · ${scope.state} · ${scope.errorCode??'결과 검토 필요'} · 자동 재시도 없음`:`원시 단계 ${scope.completedRawStages??0}/${scope.rawStages??'미확인'} · 완료된 종합 노드 ${scope.completedSynthesisNodes??0}개` }));
+   if(scope.blocked&&scope.recoveryCandidate){const proof=scope.recoveryCandidate,button=el('button',{className:'btn secondary small',text:'저장된 종합 응답 무호출 복구'});button.disabled=!scope.featureEnabled;button.onclick=async()=>{if(!confirm('보존된 응답과 사용량을 검토하고, 원 실패를 남긴 채 모델 재호출 없이 별도 복구 기록을 저장할까요?'))return;button.disabled=true;try{await api(path,{method:'POST',body:{step:'recover-node',failedOperationId:proof.failedOperationId,responseSha256:proof.responseSha256,usageTotalTokens:proof.usageTotalTokens,confirmNoProviderCall:true,confirmOriginalFailurePreserved:true}});if(current())showCompleteSynthesisReview(job,target,requestId);}catch(error){toast(safeError(error));if(current())button.disabled=false;}};target.append(el('p',{text:`실패 ${proof.failedOperationId} · 응답 SHA-256 ${proof.responseSha256} · 보고 사용량 ${proof.usageTotalTokens} tokens. 원 실패·사용량은 보존됩니다.`}),button);}
+   if(failureReviewPending&&!scope.blocked)await showCompleteFailureReview(job,target,requestId,scope,path);
+   if(scope.ready&&!scope.blocked&&!scope.finalizationReady)await showCompleteExecution(job,target,requestId,scope,path);
+   return;
+  }
+  const review=scope.finalizationReview,checks=[];
+  const autoSave=el('button',{className:'btn secondary small',text:'자동 검증 결과로 최종 보고서 저장'});autoSave.disabled=!scope.featureEnabled;target.append(el('p',{text:'근거·범위·수치·직접 인용 자동 검증을 통과하면 저장할 수 있습니다. 전체 의미 보존은 사람이 검토하지 않은 상태로 표시됩니다. 경계·복구 구간은 아래에서 확인할 수 있습니다.'}),autoSave);autoSave.onclick=async()=>{autoSave.disabled=true;try{const saved=await api(path,{method:'POST',body:{step:'finalize',sourceHash:scope.sourceHash,manifestSha256:scope.manifestSha256,confirmNoProviderCall:true}});if(current())showReport(saved.job,target,true);}catch(error){if(!current())return;try{const reopened=await api('/api/jobs/'+encodeURIComponent(job.id));if(!current())return;if(reopened.job?.report?.compositionMode==='groq-complete-synthesis-v1'&&reopened.job.report.coverageManifest?.manifestSha256===scope.manifestSha256){showReport(reopened.job,target,true);return;}toast(safeError(error));autoSave.disabled=false;}catch{target.append(el('p',{text:'저장 응답과 재조회가 모두 불확실합니다. 이력에서 다시 열어 저장 여부를 확인하세요.'}));}}};
+  target.append(el('p',{text:`추가 검토 권장: 경계 원문 ID ${review.boundarySegmentIds.join(', ')||'없음'} · 실패 복구·원문 발췌 단계는 아래 부록에서 확인하세요.`}));
+  target.append(el('p',{text:`원본 ${scope.sourceSegmentCount}구간 · ${scope.rawStages}단계 · 경계 불확실성 ${review.boundarySegmentIds.length}개. 아래 원문과 각 구간 결과를 대조한 뒤 핵심 종합에 중요한 내용이 빠지지 않았는지 확인하세요. 의미가 같은 자연스러운 바꿔쓰기는 가능하지만 수치·날짜·고유명사·불확실성·부정·인과관계와 직접 인용은 원문과 정확히 맞아야 합니다.`}));
+  target.append(el('h3',{text:'핵심 종합'}),el('pre',{text:JSON.stringify(review.rootReport,null,2)}),el('h3',{text:'원문·구간별 상세 부록'}));
+  for(const stage of review.reviewedStages){
+   const details=el('details'),heading=el('summary',{text:`raw:${stage.index} · ${stage.provenance} · 원문 #${stage.sourceSegments[0]?.id}–#${stage.sourceSegments.at(-1)?.id}`}),check=el('input',{attrs:{type:'checkbox'}}),label=el('label',{text:'이 구간의 원문, 근거, 상세 결과와 핵심 종합 반영을 확인했습니다.'});label.prepend(check);
+   details.append(heading,el('pre',{text:stage.sourceSegments.map(item=>`#${item.id} ${item.startMs}–${item.endMs}ms ${item.text}`).join('\n')}),el('pre',{text:JSON.stringify(stage.rawReport??stage.reviewedExcerpt,null,2)}),label);target.append(details);checks.push(check);
+  }
+  const meaning=el('input',{attrs:{type:'checkbox'}}),meaningLabel=el('label',{text:'핵심 종합이 모든 중요한 발언·수치·날짜·고유명사·반론·불확실성·부정·인과관계·직접 인용을 보존하는지 원문과 대조했습니다.'});meaningLabel.prepend(meaning);
+  const save=el('button',{className:'btn secondary small',text:'검토 확인 후 최종 보고서 저장'});save.disabled=!scope.featureEnabled;
+  if(!scope.featureEnabled)target.append(el('p',{className:'tip',text:'전체 종합 요약 저장 기능은 현재 비활성입니다. 읽기 전용 검토만 가능합니다.'}));
+  save.onclick=async()=>{if(!current()||!scope.featureEnabled||!meaning.checked||checks.some(check=>!check.checked)){toast('전체 구간과 핵심 종합을 먼저 대조해 주세요.');return;}save.disabled=true;
+   try{const semanticReview={confirmMeaningAgainstSource:true,confirmRootIncludesAllMeaningfulPoints:true,reviewedStages:review.reviewedStages.map(({index,evidenceSha256})=>({index,evidenceSha256})),manifestSha256:scope.manifestSha256,rootSha256:scope.rootSha256,reviewedAt:new Date().toISOString()};const saved=await api(path,{method:'POST',body:{step:'finalize',sourceHash:scope.sourceHash,manifestSha256:scope.manifestSha256,confirmNoProviderCall:true,semanticReview}});if(current()){empty(target);showReport(saved.job,target,true);}}
+   catch(error){if(!current())return;try{const reopened=await api('/api/jobs/'+encodeURIComponent(job.id));if(!current())return;if(reopened.job?.report?.compositionMode==='groq-complete-synthesis-v1'&&reopened.job.report.coverageManifest?.manifestSha256===scope.manifestSha256){empty(target);showReport(reopened.job,target,true);return;}toast(safeError(error));save.disabled=false;}catch{target.append(el('p',{text:'저장 응답과 재조회가 모두 불확실합니다. 이력에서 다시 열어 저장 여부를 확인하세요.'}));}}
+  };
+  target.append(meaningLabel,save);
+ }catch(error){if(current()){empty(target);target.append(el('p',{text:'전체 종합 검토 자료를 읽을 수 없습니다: '+safeError(error)}));}}
+}
+async function showCompleteFailureReview(job,target,requestId,scope,path){
+ const current=()=>detailCurrent(job.id,requestId,target);
+ for(const failure of scope.failedStages||[]){
+  const section=el('details'),title=el('summary',{text:`${failure.stage} · 내용 ${failure.reviewed?'검토됨':'미검토'} · 사용량 ${failure.failureDispositionReviewed?'별도 검토됨':'별도 검토 필요'}`});section.append(title);target.append(section);
+  const open=el('button',{className:'btn secondary small',text:'원문·실패 증거 읽기'});section.append(open);
+  open.onclick=async()=>{open.disabled=true;try{const data=await api(path+'?stage='+encodeURIComponent(failure.stage));if(!current())return;
+   section.append(el('pre',{text:data.excerpts.map(item=>`#${item.id} ${item.startMs}–${item.endMs}ms ${item.text}`).join('\n')}),el('p',{text:`원본 ${data.sourceHash} · 감사 ${data.auditSha256} · 원 실패·사용량은 보존됩니다.`}));
+   if(!failure.reviewed){const choices=[['register-excerpt','원문 발췌를 별도 기록'],...(data.derivedCandidate?[['register-recovery','연도 표기 파생본을 별도 기록']]:[])];for(const [step,label] of choices){const button=el('button',{className:'btn secondary small',text:label});button.disabled=!scope.featureEnabled;button.onclick=async()=>{if(!confirm(label+'할까요? 실패 호출과 사용량 미확정 상태는 그대로 보존됩니다.'))return;button.disabled=true;try{await api(path,{method:'POST',body:step==='register-excerpt'?{step,stage:data.stage,sourceHash:data.sourceHash,auditSha256:data.auditSha256,recordSha256:data.recordSha256,selectedIds:data.selectedIds,confirmExactSourceExcerpt:true,confirmNotAiSummary:true,confirmPriorFailureAndUsagePreserved:true}:{step,stage:data.stage,sourceHash:data.sourceHash,auditSha256:data.auditSha256,recordSha256:data.derivedCandidate.recordSha256,confirmSourceSpelling:true,confirmNoCenturyInference:true,confirmOriginalUsagePreserved:true,confirmNoProviderCall:true}});if(current())showCompleteSynthesisReview(job,target,requestId);}catch(error){toast(safeError(error));if(current())button.disabled=false;}};section.append(button);}}
+   if(data.disposition&&!data.dispositionReviewed){const button=el('button',{className:'btn secondary small',text:'실패 사용량·미확정 결과 별도 검토'});button.disabled=!scope.featureEnabled;button.onclick=async()=>{if(!confirm('제공자 영수증과 실제 잔여량은 미확인입니다. 기존 예약을 보수적으로 유지하고 재시도하지 않는 상태를 기록할까요?'))return;button.disabled=true;try{await api(path,{method:'POST',body:{step:'review-failure-usage',stage:data.stage,sourceHash:data.sourceHash,auditSha256:data.disposition.auditSha256,recordSha256:data.disposition.recordSha256,confirmSeparateFromContent:true,acknowledgeReceiptNotVerified:true,acknowledgeAccountBalanceUnknown:true,acknowledgeConservativeReservation:true,noRetry:true}});if(current())showCompleteSynthesisReview(job,target,requestId);}catch(error){toast(safeError(error));if(current())button.disabled=false;}};section.append(button);}
+  }catch(error){if(current()){toast(safeError(error));open.disabled=false;}}};
+ }
+}
+async function showCompleteExecution(job,target,requestId,scope,path){
+ const current=()=>detailCurrent(job.id,requestId,target);
+ target.append(el('p',{text:`다음 노드 ${scope.nextSynthesisStage} · 저장 완료 ${scope.completedSynthesisNodes}/${scope.quoteEstimate.calls} · 실제 계정 잔여량 UNKNOWN · 자동 재시도 없음` }));
+ if(!scope.featureEnabled){target.append(el('p',{text:'종합 실행 기능은 비활성입니다.'}));return;}
+ if((scope.failedStages||[]).some(item=>!item.failureDispositionReviewed)){target.append(el('p',{text:'실패 사용량의 별도 검토를 먼저 완료하세요.'}));return;}
+ if(scope.activeSynthesisApproval){
+  const run=el('button',{className:'btn secondary small',text:'승인된 다음 종합 노드 1회 실행'}),cancel=el('button',{className:'btn secondary small',text:'종합 승인 취소'});target.append(run,cancel);
+  run.onclick=async()=>{if(!confirm(`${scope.nextSynthesisStage} 노드를 Groq Free에 1회 전송합니다. 앱 예약 상한 6600 토큰이며 실제 잔여량은 UNKNOWN입니다. 계속할까요?`))return;run.disabled=true;cancel.disabled=true;
+   try{await api(path,{method:'POST',body:{step:'execute',approvalId:scope.activeSynthesisApproval.approvalId,expectedNode:scope.nextSynthesisStage,requestSha256:scope.nextSynthesisRequestSha256,executeOnce:true}});if(current())showCompleteSynthesisReview(job,target,requestId);}
+   catch(error){if(!current())return;try{const status=await api(path);if(!current())return;showCompleteSynthesisReview(job,target,requestId);if(status.nextSynthesisStage===scope.nextSynthesisStage&&!status.blocked)toast(safeError(error));}catch{target.append(el('p',{text:'실행 응답과 상태 재조회가 불확실합니다. 이력에서 다시 열어 확인하세요. 자동 재시도는 없습니다.'}));}}};
+  cancel.onclick=async()=>{cancel.disabled=true;try{await api(path,{method:'POST',body:{step:'cancel',approvalId:scope.activeSynthesisApproval.approvalId,confirmCancel:true}});if(current())showCompleteSynthesisReview(job,target,requestId);}catch(error){toast(safeError(error));if(current())cancel.disabled=false;}};
+  return;
+ }
+ const quoteButton=el('button',{className:'btn secondary small',text:'별도 Groq Free 종합 견적 발급'});target.append(quoteButton);quoteButton.onclick=async()=>{quoteButton.disabled=true;try{const issued=await api(path,{method:'POST',body:{step:'quote',sourceHash:scope.sourceHash,manifestSha256:scope.manifestSha256,confirmFreeOnly:true,acknowledgeUnknownBalance:true}});if(!current())return;target.append(el('p',{text:`견적 ${issued.quoteId} · 이번 승인 창 최대 ${issued.quote.maxCalls}회 · 앱 예약 상한 ${issued.quote.reservedUnits} 토큰 · 만료 ${fmtDate(new Date(issued.quote.expiresAt).toISOString())}` }));const approve=el('button',{className:'btn secondary small',text:'견적·무료 조건을 별도 승인'});target.append(approve);approve.onclick=async()=>{if(!confirm('표시된 Groq Free 종합 상한을 승인할까요? 승인만으로 모델 호출은 시작하지 않습니다.'))return;approve.disabled=true;try{await api(path,{method:'POST',body:{step:'approve',quoteId:issued.quoteId,quoteSha256:issued.quoteSha256,reservedUnits:issued.quote.reservedUnits,maxCalls:issued.quote.maxCalls,confirmExactQuote:true,freeTierConfirmed:true,billingDisabled:true,noPaidFallback:true,noAutomaticRetry:true}});if(current())showCompleteSynthesisReview(job,target,requestId);}catch(error){toast(safeError(error));if(current())approve.disabled=false;}};}catch(error){toast(safeError(error));if(current())quoteButton.disabled=false;}};
+}
 function libraryCard(job){
   const card=el('article',{className:'library-item'}),top=el('div',{className:'library-top'}),info=el('div');
   info.append(el('div',{className:'library-title',text:job.title || job.video_id || '제목 없음'}),el('div',{className:'library-meta',text:`${fmtDate(job.created_at)} · ${Math.round(job.duration_seconds/60)}분 · ${job.source_type}`}));
@@ -595,6 +704,11 @@ function libraryCard(job){
       finally{b.disabled=false;}
     };
     actions.append(b);
+  }
+  if(job.source_type==='audio'&&!job.report){
+   const complete=el('button',{className:'btn secondary small',text:'전체 종합 원문·상세 검토'});
+   complete.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);target.append(el('p',{text:'전체 종합 검토 자료 확인 중…'}));showCompleteSynthesisReview(job,target,detailRequest);};
+   actions.append(complete);
   }
   if(job.source_type==='audio'&&!job.report){const free=el('button',{className:'btn secondary small',text:'Groq Free 요약 승인·실행'});free.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqSummaryChoice(job,target,detailRequest);};actions.append(free);const pilot=el('button',{className:'btn secondary small',text:'실패한 첫 요약 1회 복구 검토'});pilot.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqPilotChoice(job,target,detailRequest);};actions.append(pilot);const correction=el('button',{className:'btn secondary small',text:'raw:8 무료 1회 교정 검토'});correction.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCorrectionChoice(job,target,detailRequest);};actions.append(correction);const gap=el('button',{className:'btn secondary small',text:'raw:8 보류 · 독립 구간 무료 진행 검토'});gap.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqGapChoice(job,target,detailRequest);};actions.append(gap);const recovered=el('button',{className:'btn secondary small',text:'Groq Free 첫 구간 저장 보고서 무호출 복구 검토'});recovered.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCheckpointRecoveryChoice(job,target,detailRequest);};actions.append(recovered);const bundle=el('button',{className:'btn secondary small',text:'구간별 요약 묶음 보기'});bundle.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqBundleChoice(job,target,detailRequest);};actions.append(bundle);const choice=el('button',{className:'btn secondary small',text:'전체 요약 선택·유료 견적'});choice.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showSummaryChoice(job,target,detailRequest);};actions.append(choice);}actions.append(open,remove);card.append(actions);return card;
 }

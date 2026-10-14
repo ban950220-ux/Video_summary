@@ -1,0 +1,33 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {routeApi} from '../src/worker.mjs';
+import {partitionGroqTranscript,promptAudit} from '../src/groq-summary.mjs';
+const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+const statements=file=>readFileSync(new URL(file,import.meta.url),'utf8').split('\n').filter(line=>!line.trim().startsWith('--')).join('\n').split(';').map(sql=>sql.trim()).filter(Boolean);
+test('synthesis quote, separate approval and one mock provider call execute on Workerd D1',async()=>{
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'synthesis-test',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'synthesis-test-local'}}]})),oldFetch=globalThis.fetch;
+ try{
+  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  const env={DB,ENABLE_LIVE_FREE:'true',ENABLE_COMPLETE_SYNTHESIS:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
+  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600,title:'Offline synthesis'}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
+  const segments=Array.from({length:12},(_,i)=>({id:i+1,startMs:i*40000,endMs:(i+1)*40000,text:`발언 ${i+1} ${'가나다라마바사 '.repeat(38)}`})),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)},raw=segments.map(s=>s.text).join('\n');
+  await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(JSON.stringify(audit),id).run();await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString()).run();
+  const plan=await(await routeApi(request(path+'/groq-summary-plan'),env)).json(),groups=partitionGroqTranscript(segments,promptAudit({audit,duration_seconds:600}));assert.ok(groups.length>=2);
+  const stamp=new Date(Date.now()-2*86_400_000).toISOString();for(let i=0;i<groups.length;i++){const first=groups[i][0].id,report={summary:[{text:`발언 ${first}`,evidenceIds:[first]}],chapters:[{text:`발언 ${first}`,evidenceIds:[first]}],claims:[],numbers:[],critical:[],conclusion:'발언'};await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").bind(id+':groq-summary:'+plan.transcriptHash+':raw:'+i,id,stamp,JSON.stringify({hash:plan.transcriptHash,key:'raw:'+i,report})).run();}
+  const url=path+'/groq-summary-complete',scopeResponse=await routeApi(request(url),env);assert.equal(scopeResponse.status,200,await scopeResponse.clone().text());const scope=await scopeResponse.json();assert.equal(scope.ready,true);
+  const quoted=await routeApi(request(url,'POST',{step:'quote',sourceHash:scope.sourceHash,manifestSha256:scope.manifestSha256,confirmFreeOnly:true,acknowledgeUnknownBalance:true}),env);assert.equal(quoted.status,200,await quoted.clone().text());const quote=await quoted.json();
+  const approved=await routeApi(request(url,'POST',{step:'approve',quoteId:quote.quoteId,quoteSha256:quote.quoteSha256,reservedUnits:quote.quote.reservedUnits,maxCalls:quote.quote.maxCalls,confirmExactQuote:true,freeTierConfirmed:true,billingDisabled:true,noPaidFallback:true,noAutomaticRetry:true}),env);assert.equal(approved.status,200,await approved.clone().text());const approval=await approved.json();assert.equal((await(await routeApi(request(url),env)).json()).completedSynthesisNodes,0);
+  let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify({summary:[{text:'발언 1',evidenceIds:[1]}],chapters:[{text:'발언 1',evidenceIds:[1]},{text:`발언 ${groups[1][0].id}`,evidenceIds:[groups[1][0].id]}],claims:[],numbers:[],critical:[],conclusion:'발언'})}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390}});};
+  const executeBody={step:'execute',approvalId:approval.approvalId,expectedNode:scope.nextSynthesisStage,requestSha256:scope.nextSynthesisRequestSha256,executeOnce:true},executed=await routeApi(request(url,'POST',executeBody),env);assert.equal(executed.status,200,await executed.clone().text());assert.equal(calls,1);
+  const saved=await DB.prepare("SELECT state,result_json FROM yta_operations WHERE provider='groq-summary-synthesis'").first();assert.equal(saved.state,'DONE');assert.equal(JSON.parse(saved.result_json).usage.totalTokens,390);assert.notEqual((await routeApi(request(url,'POST',executeBody),env)).status,200);assert.equal(calls,1);
+  await DB.prepare("UPDATE yta_operations SET created_at=? WHERE provider='groq-summary-synthesis' AND state='DONE'").bind(new Date(Date.now()-120_000).toISOString()).run();
+  const next=await(await routeApi(request(url),env)).json();assert.ok(next.nextSynthesisStage);assert.notEqual(next.nextSynthesisStage,scope.nextSynthesisStage);
+  globalThis.fetch=async()=>{calls++;return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify({summary:[{text:'없는 999원',evidenceIds:[1]}],chapters:[{text:'발언',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'발언'})}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390}});};
+  const nextBody={step:'execute',approvalId:approval.approvalId,expectedNode:next.nextSynthesisStage,requestSha256:next.nextSynthesisRequestSha256,executeOnce:true},failed=await routeApi(request(url,'POST',nextBody),env);assert.notEqual(failed.status,200);assert.equal(calls,2);
+  const blocked=await(await routeApi(request(url),env)).json();assert.equal(blocked.blocked,true);assert.equal(blocked.state,'FAILED_UNCERTAIN');assert.equal((await(await routeApi(request(url,'POST',nextBody),env)).json()).blocked,true);assert.equal(calls,2);
+  const failure=await DB.prepare("SELECT result_json FROM yta_operations WHERE provider='groq-summary-synthesis' AND state='FAILED_UNCERTAIN'").first();assert.match(JSON.parse(failure.result_json).partialText,/999원/);
+  assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE capability='LIVE_FREE_SYNTHESIS'").first()).n,2);
+ }finally{globalThis.fetch=oldFetch;await mf.dispose();}
+});

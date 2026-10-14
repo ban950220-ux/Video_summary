@@ -6,6 +6,9 @@ const dimensions={gemini:['requestsMinute','tokensMinute','requestsDay'],groq:['
 const maxAgeMs=60_000;
 export async function capacityIdentity(env,provider){
  const credential=await env.DB.prepare('SELECT cipher_version,iv_b64,ciphertext_b64,updated_at FROM provider_credentials WHERE owner_id=? AND provider=?').bind('owner',provider).first();
+ return capacityIdentityForCredentialSnapshot(env,provider,credential);
+}
+export async function capacityIdentityForCredentialSnapshot(env,provider,credential){
  const material=credential?JSON.stringify(credential):env[provider.toUpperCase()+'_API_KEY'];
  if(typeof material!=='string'||!material.length)throw new ProviderError('KEY_MISSING','관측 용량에 연결할 제공자 키가 없습니다.');
  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(provider+':'+material)));

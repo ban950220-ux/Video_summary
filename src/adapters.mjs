@@ -56,7 +56,7 @@ function safeGroqSummaryHeaders(headers){
  const reset=headers.get('x-ratelimit-reset-tokens');
  return {retryAfterSeconds:integer('retry-after',3600),remainingRequests:integer('x-ratelimit-remaining-requests',1_000_000),remainingTokens:integer('x-ratelimit-remaining-tokens',1_000_000),tokenReset:typeof reset==='string'&&/^\d{1,5}(?:\.\d{1,2})?s$/.test(reset)?reset:null};
 }
-export async function summarizeTranscriptWithGroq({env,messages,maxCompletionTokens,fetchFn=fetch,beforeFetch}){
+export async function summarizeTranscriptWithGroq({env,messages,maxCompletionTokens,fetchFn=fetch,beforeFetch,reviewTextLimit=12000}){
  assertLive(env,'GROQ');
  if(!env.GROQ_API_KEY)throw new ProviderError('KEY_MISSING','Groq API 키 미설정');
  if(!Array.isArray(messages)||messages.length!==2||!Number.isSafeInteger(maxCompletionTokens)||maxCompletionTokens<1||maxCompletionTokens>1800)throw new InputError('Groq 요약 요청 범위 오류');
@@ -70,7 +70,7 @@ export async function summarizeTranscriptWithGroq({env,messages,maxCompletionTok
  const reasoningTokens=usage?.completion_tokens_details?.reasoning_tokens??usage?.reasoning_tokens??null;
  if(result?.model!=='openai/gpt-oss-120b'||choice?.finish_reason!=='stop'||typeof choice?.message?.content!=='string'||!choice.message.content.trim()||choice.message.tool_calls?.length||choice.message.function_call||!number(usage?.prompt_tokens)||!number(usage?.completion_tokens)||!number(usage?.total_tokens)||usage.total_tokens<usage.prompt_tokens+usage.completion_tokens||usage.completion_tokens>maxCompletionTokens||(reasoningTokens!==null&&(!number(reasoningTokens)||reasoningTokens>usage.completion_tokens))){
   const error=new ProviderError('SUMMARY_FINISH_UNVERIFIED','요약 종료 상태·모델·실제 사용량을 검토하세요.');
-  error.reviewResult={model:result?.model??null,finishReason:choice?.finish_reason??null,partialText:typeof choice?.message?.content==='string'?choice.message.content.slice(0,12000):null,usage:number(usage?.prompt_tokens)&&number(usage?.completion_tokens)&&number(usage?.total_tokens)?{inputTokens:usage.prompt_tokens,outputTokens:usage.completion_tokens,reasoningTokens:number(reasoningTokens)?reasoningTokens:null,totalTokens:usage.total_tokens}:null};
+  error.reviewResult={model:result?.model??null,finishReason:choice?.finish_reason??null,partialText:typeof choice?.message?.content==='string'?choice.message.content.slice(0,reviewTextLimit):null,usage:number(usage?.prompt_tokens)&&number(usage?.completion_tokens)&&number(usage?.total_tokens)?{inputTokens:usage.prompt_tokens,outputTokens:usage.completion_tokens,reasoningTokens:number(reasoningTokens)?reasoningTokens:null,totalTokens:usage.total_tokens}:null};
   error.safeRateLimit=safeRateLimit;
   throw error;
  }

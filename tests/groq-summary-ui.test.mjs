@@ -53,13 +53,14 @@ test('raw:8 correction UI replaces expired quotes and separates claimed, failed 
  const base={firstId:144,lastId:165,segmentCount:22,originalMismatchCount:4,originalUsageTotalTokens:2139,approvalState:null,attemptState:null,quote:null,quoteExpired:true};
  const mount=async preview=>{
   const target=node('div'),toast=node('div'),posts=[];target.dataset.jobId='job-a';let state={...base,...preview};
-  const fetcher=async(_path,options)=>{if(options.method==='POST'){const body=JSON.parse(options.body);posts.push(body);if(body.step==='quote')state={...state,quoteExpired:false,quote:{quoteId:'new-quote',contract:{quoteSha256:'a'.repeat(64),model:'openai/gpt-oss-120b',firstId:144,lastId:165,inputTokensUpper:4600,outputTokensUpper:1800,reservedUnits:6400,expiresAt:Date.now()+600000}}};}return {ok:true,headers:{get:()=> 'application/json'},json:async()=>state};};
-  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,detailRequestIsCurrent,fmtRetryDate:()=> 'soon'};
+  const fetcher=async(_path,options)=>{if(options.method==='POST'){const body=JSON.parse(options.body);posts.push(body);if(body.step==='quote')state={...state,quoteExpired:false,quote:{quoteId:'new-quote',contract:{quoteSha256:'a'.repeat(64),model:'openai/gpt-oss-120b',firstId:144,lastId:165,inputTokensUpper:4600,outputTokensUpper:1800,reservedUnits:6400,expiresAt:Date.now()+600000}}};if(body.step==='recover')state={...state,recoveryCandidate:null,recoveredWithoutProviderCall:true};}return {ok:true,headers:{get:()=> 'application/json'},json:async()=>state};};
+  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,detailRequestIsCurrent,fmtRetryDate:()=> 'soon',confirm:()=>true};
   runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCorrectionChoice({id:'job-a'},target,0);await new Promise(resolve=>setImmediate(resolve));
   return {host:target.children[0],posts};
  };
  const expired=await mount({});const requote=expired.host.children.find(item=>item.tag==='button'&&item.textContent.includes('새 견적'));assert.ok(requote);assert.equal(expired.host.children.some(item=>item.tag==='form'),false);await requote.onclick();assert.deepEqual(expired.posts.map(item=>item.step),['quote']);assert.ok(expired.host.children.some(item=>item.tag==='form'));
  const expiredApproval=await mount({approvalState:'APPROVED',quoteExpired:true});assert.equal(expiredApproval.host.children.some(item=>item.textContent?.includes('실행할 수 없습니다')),true);assert.equal(expiredApproval.host.children.some(item=>item.textContent?.includes('1회 실행')),false);
+ const recovery=await mount({attemptState:'FAILED_UNCERTAIN',recoveryCandidate:{failedOperationId:'correction-attempt',responseSha256:'a'.repeat(64),recordSha256:'b'.repeat(64),usageTotalTokens:390}}),recover=recovery.host.children.find(item=>item.tag==='button'&&item.textContent?.includes('무호출 복구'));assert.ok(recover);await recover.onclick();assert.deepEqual(recovery.posts.map(item=>item.step),['recover']);assert.equal(recovery.posts[0].confirmNoProviderCall,true);assert.ok(recovery.host.children.some(item=>item.textContent?.includes('재호출 없이 복구')));
  for(const [attemptState,label] of [['CLAIMED','처리 중'],['FAILED_UNCERTAIN','기존 raw:8 실패와 별개'],['DONE','저장됐습니다'],['BLOCKED','전송 전에 차단']]){
   const view=await mount({attemptState,attemptErrorCode:attemptState==='FAILED_UNCERTAIN'?'429':null});assert.ok(view.host.children.some(item=>item.textContent?.includes(label)),attemptState);assert.equal(view.host.children.some(item=>item.textContent?.includes('1회 실행')),false);assert.equal(view.posts.length,0);
  }
@@ -128,15 +129,25 @@ test('checkpoint recovery UI requires explicit review and never starts a provide
  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,clearInterval,detailRequestIsCurrent};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCheckpointRecoveryChoice({id:'job-a'},target,0);
  await new Promise(resolve=>setTimeout(resolve,0));
- const host=target.children[0],form=host.children.find(item=>item.tag==='form');assert.ok(form);assert.equal(calls.length,1);
- assert.match(host.children[0].textContent,/Groq Free 첫 구간 보고서 복구 · 전체 요약 아님/);
- assert.equal(form.children.at(-1).textContent,'Groq Free 첫 구간 저장 보고서만 복구');
+ const host=target.children[0],reviewHost=host.children[2],form=reviewHost.children.find(item=>item.tag==='form');assert.ok(form);assert.equal(calls.length,1);
+ assert.match(host.children[0].textContent,/Groq Free 저장 보고서 무호출 복구 · 전체 요약 아님/);
+ assert.equal(form.children.at(-1).textContent,'Groq Free raw:0 저장 보고서만 복구');
  await form.onsubmit({preventDefault(){}});assert.equal(calls.length,1);
  for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
  await form.onsubmit({preventDefault(){}});
  assert.deepEqual(calls.map(call=>call.method),['GET','POST','GET']);
  assert.equal(calls[1].body.confirmNoProviderCall,true);assert.equal(calls[1].body.confirmNoAutomaticContinuation,true);
- assert.equal(host.children.some(item=>item.tag==='form'),false);
+ assert.equal(reviewHost.children.some(item=>item.tag==='form'),false);
+});
+
+test('checkpoint recovery selector remains usable when raw:0 has no recovery evidence',async()=>{
+ const node=tag=>({tag,children:[],dataset:{},hidden:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div');target.dataset.jobId='job-a';
+ const paths=[],preview={responseSha256:'a'.repeat(64),contractHash:'b'.repeat(64),firstRange:{firstId:20,lastId:21},summaryCount:1,chapterCount:1,storedUtf16Length:900,failedOperationId:'raw10-failure',confirmedUsage:{totalTokens:390},evidenceHash:'c'.repeat(64),stage:'raw:10'};
+ const fetcher=async(path)=>{paths.push(path);return path.includes('raw:0')?{ok:false,status:409,headers:{get:()=> 'application/json'},json:async()=>({error:{code:'SUMMARY_RECOVERY_NOT_FOUND'}})}:{ok:true,headers:{get:()=> 'application/json'},json:async()=>preview};};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showGroqCheckpointRecoveryChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:()=>node('div')},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,clearInterval,detailRequestIsCurrent};runInNewContext(source,context);context.__state.view='library';context.__show({id:'job-a'},target,0);
+ await new Promise(resolve=>setImmediate(resolve));const host=target.children[0],selector=host.children[1].children[0];assert.equal(selector.tag,'input');selector.value='10';await selector.onchange();await new Promise(resolve=>setTimeout(resolve,10));
+ assert.deepEqual(paths.map(path=>path.slice(path.indexOf('?'))),['?stage=raw:0','?stage=raw:10']);assert.ok(host.children[2].children.some(item=>item.tag==='form'),JSON.stringify(host.children[2].children.map(item=>[item.tag,item.textContent])));
 });
 
 test('bundle UI labels the intermediate artifact and uses a separate export URL',async()=>{
@@ -148,6 +159,18 @@ test('bundle UI labels the intermediate artifact and uses a separate export URL'
  const host=target.children[0];assert.match(host.children[0].textContent,/전체 종합 요약 미완료/);
  const links=host.children.at(-1).children;assert.deepEqual(links.map(item=>item.textContent),['구간별 묶음 TXT 내보내기','구간별 묶음 MD 내보내기']);
  assert.ok(links.every(item=>item.href===undefined||item.tag==='a'));
+});
+test('gap bundle UI discloses reviewed raw:9 excluded from the intermediate AI bundle',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div');target.dataset.jobId='job-a';
+ const bundle={sourceCheckpointCount:8,bundleContractVersion:'gap-v1',bundleHash:'a'.repeat(64),completedRawStages:9,heldRawStages:1,pendingRawStages:69,missingRanges:[{stage:'raw:8',firstId:148,lastId:161,startMs:0,endMs:1,originalState:'FAILED_UNCERTAIN',correctionState:'FAILED_UNCERTAIN',failureCode:'SUMMARY_RESPONSE_INVALID'}],separatelyReviewedRanges:[{stage:'raw:9',firstId:162,lastId:177,provenance:'HUMAN_REVIEWED_SOURCE_EXCERPT',includedInRawCheckpointBundle:false}],report:{warning:'전체 영상 요약 아님',summary:[],chapters:[],claims:[],numbers:[],critical:[],conclusion:''}};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showGroqBundleChoice;globalThis.__state=state;');const context={document:{createElement:node,querySelector:()=>null},window:{},location:{hash:''},fetch:async()=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>bundle}),detailRequestIsCurrent};runInNewContext(source,context);context.__state.view='library';context.__show({id:'job-a'},target,0,{withGap:true});await new Promise(resolve=>setImmediate(resolve));
+ const text=target.children[0].children.map(item=>item.textContent??'').join('\n');assert.match(text,/raw:9 · 원문 #162–#177/);assert.match(text,/HUMAN_REVIEWED_SOURCE_EXCERPT/);assert.match(text,/현재 AI 구간 요약 묶음에는 포함되지 않음/);assert.match(text,/전체 요약 미완료/);
+});
+test('blocked synthesis UI offers a reviewed no-call recovery for a saved response',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div');target.dataset.jobId='job-a';
+ const proof={failedOperationId:'failed-node',responseSha256:'a'.repeat(64),usageTotalTokens:390},posts=[];let scope={blocked:true,featureEnabled:true,node:'note:0:2',state:'FAILED_UNCERTAIN',errorCode:'SYNTHESIS_SAVE_UNCERTAIN',recoveryCandidate:proof};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showCompleteSynthesisReview;globalThis.__state=state;');const context={document:{createElement:node,querySelector:()=>null},window:{},location:{hash:''},confirm:()=>true,fetch:async(_url,options={})=>{if(options.method==='POST'){posts.push(JSON.parse(options.body));scope={ready:false,featureEnabled:true,completedRawStages:79,rawStages:79};}return {ok:true,headers:{get:()=> 'application/json'},json:async()=>scope};},detailRequestIsCurrent};runInNewContext(source,context);context.__state.view='library';await context.__show({id:'job-a'},target,0);
+ const button=target.children.find(item=>item.tag==='button');assert.match(button.textContent,/무호출 복구/);await button.onclick();assert.equal(posts.length,1);assert.equal(posts[0].step,'recover-node');assert.equal(posts[0].failedOperationId,proof.failedOperationId);assert.equal(posts[0].confirmNoProviderCall,true);assert.equal(posts[0].confirmOriginalFailurePreserved,true);
 });
 test('remaining summary choice shows unknown ETA and no paid execution control',async()=>{
  const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
@@ -257,9 +280,9 @@ test('lost checkpoint recovery POST and failed status GET leave only read-only r
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGroqCheckpointRecoveryChoice=showGroqCheckpointRecoveryChoice;globalThis.__state=state;');
  const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,clearTimeout,setTimeout:()=>0,clearInterval,detailRequestIsCurrent};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGroqCheckpointRecoveryChoice({id:'job-a'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
- const host=target.children[0],form=host.children.find(item=>item.tag==='form');for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
+ const host=target.children[0],reviewHost=host.children[2],form=reviewHost.children.find(item=>item.tag==='form');for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
  await form.onsubmit({preventDefault(){}});assert.equal(posts,1);assert.equal(form.children.at(-1).disabled,true);
  await form.onsubmit({preventDefault(){}});assert.equal(posts,1);
- const refresh=host.children.find(item=>item.tag==='button'&&item.textContent==='저장 상태 다시 확인');assert.ok(refresh);await refresh.onclick();
- assert.equal(posts,1);assert.equal(gets,3);assert.equal(host.children.some(item=>item.tag==='form'),false);
+ const refresh=reviewHost.children.find(item=>item.tag==='button'&&item.textContent==='저장 상태 다시 확인');assert.ok(refresh);await refresh.onclick();
+ assert.equal(posts,1);assert.equal(gets,3);assert.equal(reviewHost.children.some(item=>item.tag==='form'),false);
 });

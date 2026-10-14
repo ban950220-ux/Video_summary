@@ -44,10 +44,15 @@ export async function runTranscriptSummary({env,text,fetchFn=fetch,beforeDispatc
   await beforeDispatch?.();
   return summarizeTranscriptWithGemini(text,prepared,fetchFn,beforeFetch);
 }
-export async function runOwnedGroqSummary({env,messages,maxCompletionTokens,fetchFn=fetch,beforeDispatch,beforeFetch}){
+export async function runOwnedGroqSummary({env,messages,maxCompletionTokens,fetchFn=fetch,beforeDispatch,beforeFetch,reviewTextLimit}){
  const prepared=await ephemeralEnv(env,'groq');
- await beforeDispatch?.();
- return summarizeTranscriptWithGroq({env:prepared,messages,maxCompletionTokens,fetchFn,beforeFetch});
+ const sharedClaim=async()=>{
+  if(!env.DB)return;
+  const rows=(await env.DB.prepare("SELECT id FROM yta_operations WHERE provider IN ('groq-summary','groq-summary-synthesis') AND state='CLAIMED' LIMIT 2").all()).results||[];
+  if(rows.length>1){const error=new ProviderError('GROQ_SHARED_DISPATCH_LOCK','다른 Groq 요약 실행이 진행 중입니다.');error.preDispatchBlocked=true;throw error;}
+ };
+ await beforeDispatch?.();await sharedClaim();
+ return summarizeTranscriptWithGroq({env:prepared,messages,maxCompletionTokens,fetchFn,reviewTextLimit,beforeFetch:async()=>{await sharedClaim();await beforeFetch?.();}});
 }
 /** Only lawful owner-uploaded audio, <=24MB per call. The live route chunks MP3 files before invoking this adapter. */
 export async function runOwnedAudioTranscription({env,bytes,name,mime,durationSeconds,fetchFn=fetch,beforeDispatch,beforeFetch}){

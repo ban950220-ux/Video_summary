@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {routeApi} from '../src/worker.mjs';
-import {promptAudit} from '../src/groq-summary.mjs';
+import {promptAudit,partitionGroqTranscript,groqInputUpperBound,groqSummaryMessages,groqRawPrompt} from '../src/groq-summary.mjs';
+import {capacityIdentity} from '../src/observed-capacity.mjs';
+import {groqLiveResolutionProofSql} from '../src/groq-synthesis-execution.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
@@ -15,6 +17,8 @@ test('first Groq summary admission executes every SQL binding against local Work
  try{
   const DB=await mf.getD1Database('DB');
   for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  assert.equal((await DB.prepare(`SELECT ${groqLiveResolutionProofSql} AS ok`).bind('[]').first()).ok,1);
+  await DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT json_extract(c.value,'$.failedId')||':live-resolved',j.id,'groq-summary-live-resolution',0,'DONE',?,c.value FROM jobs j CROSS JOIN json_each(?) c WHERE ${groqLiveResolutionProofSql}`).bind(new Date().toISOString(),'[]','[]').run();
   await assert.rejects(DB.prepare('SELECT ? AS value').bind().first(),/Wrong number of parameter bindings/);
   const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
   const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:5892.888,title:'Local D1 summary test'}),env)).json();
@@ -44,7 +48,7 @@ test('first Groq summary admission executes every SQL binding against local Work
    return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify(report)}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390}});
   };
   const pending=routeApi(request(path+'/groq-summary','POST',{}),env);
-  await providerStarted;
+  const early=await Promise.race([providerStarted.then(()=>null),pending.then(async reply=>({status:reply.status,body:await reply.clone().text()})),new Promise(resolve=>setTimeout(()=>resolve('provider did not start within five seconds'),5000))]);assert.equal(early,null,JSON.stringify(early));
   const claimed=await status();
   assert.equal(claimed.activeStage.state,'CLAIMED');assert.equal(claimed.activeStage.key,'raw:0');assert.equal(claimed.providerReceiptVerified,false);assert.equal(claimed.completedStages,0);
   release();
@@ -139,7 +143,7 @@ test('stored oversized strict checkpoint recovery is atomic on local Workerd D1 
   const plan=await(await routeApi(request(path+'/groq-summary-plan'),env)).json(),report={summary:[{text:'요약',evidenceIds:[1]}],chapters:[{text:'장면'.repeat(900),evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'결론'};
   const result=JSON.stringify({reviewResult:{partialText:JSON.stringify(report),usage:{inputTokens:1157,outputTokens:1012,reasoningTokens:59,totalTokens:2169}}}),failedId=id+':groq-summary:'+plan.transcriptHash+':raw:0';
   await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,?,?,'FAILED_UNCERTAIN',?,?,?)").bind(failedId,id,'groq-summary',6600,new Date().toISOString(),'SUMMARY_CHECKPOINT_TOO_LARGE',result).run();
-  await DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2169,0,null,'TEST',new Date().toISOString()).run();
+  await DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2169,0,null,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',new Date().toISOString()).run();
   let calls=0;globalThis.fetch=async()=>{calls++;throw Error('model dispatch forbidden');};
   const url=path+'/groq-summary-checkpoint-recovery',preview=await(await routeApi(request(url),env)).json();
   const body={step:'recover',evidenceHash:preview.evidenceHash,failedOperationId:failedId,contractHash:preview.contractHash,responseSha256:preview.responseSha256,acknowledgeOriginalUsage:2169,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true};
@@ -147,5 +151,39 @@ test('stored oversized strict checkpoint recovery is atomic on local Workerd D1 
   assert.equal((await DB.prepare('SELECT state FROM yta_operations WHERE id=?').bind(failedId).first()).state,'FAILED_UNCERTAIN');
   assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery' AND state='DONE'").bind(id).first()).n,1);
   assert.equal((await routeApi(request(url,'POST',body),env)).status,409);
+ }finally{globalThis.fetch=oldFetch;await mf.dispose();}
+});
+
+test('live recovered failure proof is checked within final Workerd D1 dispatch statement',async()=>{
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'summary-live-proof-test',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'summary-live-proof-local'}}]})),oldFetch=globalThis.fetch;
+ try{
+  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
+  const segments=Array.from({length:25},(_,i)=>({id:i+1,startMs:i*24000,endMs:(i+1)*24000,text:'가'.repeat(350)})),raw=segments.map(segment=>segment.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
+  const makeJob=async()=>{const id=(await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600,title:'Live proof test'}),env)).json()).job.id,path='/api/jobs/'+id;await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(JSON.stringify(audit),id).run();await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString()).run();return {id,path};};
+  const a=await makeJob(),aPlan=await(await routeApi(request(a.path+'/groq-summary-plan'),env)).json(),failedId=a.id+':groq-summary:'+aPlan.transcriptHash+':raw:0',stamp=new Date(Date.now()-2*86_400_000).toISOString();
+  await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_CHECKPOINT_TOO_LARGE',?)").bind(failedId,a.id,stamp,JSON.stringify({reviewResult:{partialText:JSON.stringify({summary:[{text:'가',evidenceIds:[1]}],chapters:[{text:'가',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'가'}),usage:{inputTokens:300,outputTokens:90,reasoningTokens:10,totalTokens:390}}})).run();
+  await DB.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(? ,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',390,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").bind(a.id+':usage',a.id,stamp).run();
+  const recoveryUrl=a.path+'/groq-summary-checkpoint-recovery',proof=await(await routeApi(request(recoveryUrl),env)).json();assert.equal(proof.failedOperationId,failedId);const restored=await routeApi(request(recoveryUrl,'POST',{step:'recover',evidenceHash:proof.evidenceHash,failedOperationId:failedId,contractHash:aPlan.transcriptHash,responseSha256:proof.responseSha256,acknowledgeOriginalUsage:390,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true}),env);assert.equal(restored.status,200,await restored.clone().text());
+  const b=await makeJob(),plan=await(await routeApi(request(b.path+'/groq-summary-plan'),env)).json(),reviewReply=await routeApi(request(b.path+'/groq-summary-approval'),env);assert.equal(reviewReply.status,200,await reviewReply.clone().text());const review=await reviewReply.json();
+  const approval={jobId:b.id,transcriptHash:plan.transcriptHash,model:plan.model,outputKind:plan.outputKind,windowStart:plan.windowStart,totalRequests:plan.totalRequests,maxRequests:plan.maxRequests,maxInputTokensPerRequest:plan.maxInputTokensPerRequest,maxCompletionTokensPerRequest:plan.maxCompletionTokensPerRequest,totalTokenUpperBound:plan.totalTokenUpperBound,credentialGeneration:review.credentialGeneration,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,summaryOnly:true};assert.equal((await routeApi(request(b.path+'/groq-summary-approval','POST',approval),env)).status,200);
+  let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify({summary:[{text:'가',evidenceIds:[1]}],chapters:[{text:'가',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'가'})}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390}});};
+  const sent=await routeApi(request(b.path+'/groq-summary','POST',{}),env);assert.equal(sent.status,202,await sent.clone().text());assert.equal(calls,1);
+ }finally{globalThis.fetch=oldFetch;await mf.dispose();}
+});
+
+test('raw:8 corrective admission, budget and final guard execute on Workerd D1',async()=>{
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'correction-d1-test',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'correction-d1-local'}}]})),oldFetch=globalThis.fetch;
+ try{
+  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')},id=(await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600,title:'Corrective D1'}),env)).json()).job.id,path='/api/jobs/'+id;
+  const segments=Array.from({length:25},(_,i)=>({id:i+1,startMs:i*24000,endMs:(i+1)*24000,text:'가'.repeat(350)})),raw=segments.map(part=>part.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
+  await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(JSON.stringify(audit),id).run();await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',new Date().toISOString()).run();
+  const plan=await(await routeApi(request(path+'/groq-summary-plan'),env)).json(),hash=plan.transcriptHash,groups=partitionGroqTranscript(segments,promptAudit({audit,duration_seconds:600})),group=groups[8],identity=await capacityIdentity(env,'groq'),stamp=new Date(Date.now()-120000).toISOString(),failedId=id+':groq-summary:'+hash+':raw:8',oldUnits=groqInputUpperBound(groqSummaryMessages(groqRawPrompt(group,promptAudit({audit,duration_seconds:600}))))+1800,oldResult=JSON.stringify({reviewResult:{partialText:JSON.stringify({summary:[{text:'근거 없는 999원',evidenceIds:[group[0].id]}],chapters:[{text:'원문',evidenceIds:[group[0].id]}],claims:[],numbers:[],critical:[],conclusion:'원문'}),usage:{inputTokens:1152,outputTokens:987,reasoningTokens:50,totalTokens:2139}}});
+  const review=await(await routeApi(request(path+'/groq-summary-approval'),env)).json(),scope={jobId:id,transcriptHash:hash,model:plan.model,outputKind:plan.outputKind,windowStart:plan.windowStart,totalRequests:plan.totalRequests,maxRequests:plan.maxRequests,maxInputTokensPerRequest:plan.maxInputTokensPerRequest,maxCompletionTokensPerRequest:plan.maxCompletionTokensPerRequest,totalTokenUpperBound:plan.totalTokenUpperBound,credentialGeneration:review.credentialGeneration,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,summaryOnly:true,sequence:0,keyIdentity:identity};
+  await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'STOPPED',?,?)").bind(id+':groq-summary:approval:0',id,stamp,JSON.stringify(scope)).run();await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',?,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").bind(failedId,id,oldUnits,stamp,oldResult).run();await DB.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(? ,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',2139,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").bind(crypto.randomUUID(),id,stamp).run();
+  const url=path+'/groq-summary-correction',quoteReply=await routeApi(request(url,'POST',{step:'quote'}),env);assert.equal(quoteReply.status,200,await quoteReply.clone().text());const quote=await quoteReply.json(),approved=await routeApi(request(url,'POST',{step:'approve',quoteId:quote.quoteId,quoteSha256:quote.contract.quoteSha256,reservedUnits:quote.contract.reservedUnits,maxCalls:1,confirmExactQuote:true,confirmPriorUsagePreserved:true,freeTierConfirmed:true,billingDisabled:true,unknownBalanceAcknowledged:true,noPaidFallback:true,noGeminiFallback:true,noAutomaticRetry:true}),env);assert.equal(approved.status,200,await approved.clone().text());const approval=await approved.json();
+  let calls=0;globalThis.fetch=async()=>{calls++;return Response.json({model:'openai/gpt-oss-120b',choices:[{finish_reason:'stop',message:{content:JSON.stringify({summary:[{text:'가',evidenceIds:[group[0].id]}],chapters:[{text:'가',evidenceIds:[group[0].id]}],claims:[],numbers:[],critical:[],conclusion:'가'})}}],usage:{prompt_tokens:300,completion_tokens:90,total_tokens:390}});};
+  const sent=await routeApi(request(url,'POST',{step:'execute',approvalId:approval.approvalId,confirmExecuteOnce:true}),env);assert.equal(sent.status,202,await sent.clone().text());assert.equal(calls,1);assert.equal((await DB.prepare('SELECT state FROM yta_operations WHERE id=?').bind(approval.attemptId).first()).state,'DONE');
  }finally{globalThis.fetch=oldFetch;await mf.dispose();}
 });
