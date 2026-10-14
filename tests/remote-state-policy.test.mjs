@@ -23,8 +23,8 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
 ]});
 
 test('guard baseline pins the verified active Worker version and source commit',()=>{
-  assert.equal(approvedRemoteBaseline.activeVersionId,'ed1be321-ec54-4040-b4c9-9863e3a45cce');
-  assert.equal(approvedRemoteBaseline.sourceCommit,'18e5131c086f5c3c5d6733e80625fd55df9d34c4');
+  assert.equal(approvedRemoteBaseline.activeVersionId,'02b69af3-2f39-4cb6-8ae3-9caf9fbbf456');
+  assert.equal(approvedRemoteBaseline.sourceCommit,'aedf2339b752a98182a2db43232ff4699a150e8e');
   assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,true);
   const observed=remote();observed.bindings.push({name:'ASSETS',type:'assets'});
   assert.equal(assertRemoteState(observed,approvedRemoteBaseline),true);
@@ -44,7 +44,7 @@ test('the one settings version accepts only the pinned annotated predecessor and
  assert.throws(()=>assertRemoteState(state,oldBaseline),/SOURCE_COMMIT_MISMATCH/);
  assert.equal(assertRemoteState(state,oldBaseline,{preDeployLineage:proof}),true);
  const current=remote();current.bindings.push({name:'ASSETS',type:'assets'});current.deploymentMessage='Dashboard settings update';
- assert.equal(assertRemoteState(current,baseline,{preDeployLineage:proof}),true);
+ assert.throws(()=>assertRemoteState(current,baseline,{preDeployLineage:proof}),/SOURCE_COMMIT_MISMATCH/);
  for(const [key,value] of [['activeVersionId','other'],['priorVersionId','other'],['activeDeploymentSourceAnnotation','MISSING'],['priorDeploymentSourceAnnotation','OTHER'],['activeScriptEtag','a'.repeat(64)],['priorScriptEtag','a'.repeat(64)],['scriptContentEqual',false],['codeLineageEvidence','UNVERIFIED'],['sourceAnnotationGuardMatch',true]]){
   assert.throws(()=>assertRemoteState(state,oldBaseline,{preDeployLineage:{...proof,[key]:value}}),/SOURCE_COMMIT_MISMATCH/,key);
  }

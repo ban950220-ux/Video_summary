@@ -63,13 +63,9 @@ test('guard fails closed when token, API read or observability fields are unavai
   assert.equal((await assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi().fetcher,baseline})).environment,'production');
 });
 
-test('current settings version requires the exact annotated predecessor and script hash',async()=>{
- const {fetcher,seen}=fakeApi({currentMessage:'Dashboard settings update'});
- const state=await assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher,ciMatchTag:'TEST_WORKER_TAG'});
- assert.equal(state.activeVersions[0].id,approvedRemoteBaseline.activeVersionId);
- assert.ok(seen.every(call=>call.method==='GET'&&call.tokenPresent));
- assert.equal(seen.filter(call=>call.url.endsWith('/versions/'+approvedRemoteBaseline.activeVersionId)).length,2);
- assert.equal(seen.filter(call=>call.url.endsWith('/versions/'+approvedPreDeployLineage.priorVersionId)).length,2);
+test('current annotated release rejects a settings version using old lineage evidence',async()=>{
+ const {fetcher}=fakeApi({currentMessage:'Dashboard settings update'});
+ await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher,ciMatchTag:'TEST_WORKER_TAG'}),/SOURCE_COMMIT_MISMATCH/);
 });
 
 test('missing current annotation fails closed even with old lineage evidence',async()=>{
