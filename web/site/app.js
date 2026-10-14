@@ -419,6 +419,7 @@ function showSummaryChoice(job,target,requestId){
  api('/api/jobs/'+job.id+'/summary-choice').then(quote=>{
   if(!current())return;
   host.append(el('h2',{text:'저장된 전사의 남은 요약 선택'}),el('p',{text:quote.transcription.complete?'전사 완료 · 남은 전사 0조각 · 완료된 전사는 다시 청구하지 않습니다.':'전사 완료 상태 미확인 · 요약 견적을 확정할 수 없습니다.'}),el('p',{text:`검증된 원시 요약 ${quote.summary.savedRawStages}/${quote.summary.rawStages}단계 · 남은 원시 단계 ${quote.summary.remainingRawStages}. 구간별 요약 묶음은 중간 산출물이며, 요청한 결과는 전체 영상의 단일 종합 요약입니다.`}));
+  if(quote.summary.recoveryReviewRequired)host.append(el('p',{className:'tip',text:'기존 Groq 복구 기록의 근거가 현재 자료와 일치하지 않아 그 구간을 완료로 계산하지 않았습니다. 기록은 보존됩니다. Groq 복구·진행은 별도로 검토하세요.'}));
   if(quote.transcription.complete&&!quote.summary.complete){const twoPass=el('button',{className:'btn secondary small',text:'Gemini 전체 전사 요약 + 원문 대조 2회 대안'});twoPass.onclick=()=>{if(current()){empty(target);showGeminiTwoPassChoice(job,target,requestId);}};host.append(twoPass);}
   host.append(el('h3',{text:'Groq Free · 전체 종합 요약 시도'}),el('p',{text:`모델 ${quote.free.model} · 요청당 입력 상한 ${quote.free.inputTokensUpperPerCall} / 출력 상한 ${quote.free.outputTokensUpperPerCall} 토큰. 소요 시간 UNKNOWN: ${quote.free.eta.reason} 무료 실패 시 유료 자동 전환은 없습니다.`}));
   if(quote.transcription.complete&&!quote.summary.complete){const free=el('button',{className:'btn secondary small',text:'무료 범위 별도 검토·승인'});free.onclick=()=>{if(current()){empty(target);showGroqSummaryChoice(job,target,requestId);}};host.append(free);}
