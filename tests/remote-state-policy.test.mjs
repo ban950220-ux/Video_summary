@@ -18,11 +18,13 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
   {name:'PAID_SUMMARY_EXECUTION_APPROVED',type:'plain_text',text:'true'},
   {name:'PAID_FIRST_GENERATION_TRIAL_ENABLED',type:'plain_text',text:'true'},
   {name:'PAID_FIRST_TRIAL_USD_COST_REVIEWED',type:'plain_text',text:'true'},
+  {name:'ENABLE_GEMINI_TWO_PASS',type:'secret_text'},
+  {name:'GEMINI_TWO_PASS_ALLOWED_JOB_ID',type:'secret_text'},
 ]});
 
 test('guard baseline pins the verified active Worker version and source commit',()=>{
-  assert.equal(approvedRemoteBaseline.activeVersionId,'f5c03a27-ed0f-4f3b-b7f9-026b19fa8029');
-  assert.equal(approvedRemoteBaseline.sourceCommit,'0187d897c3b190f673ceaf75628ff881da7bfa5b');
+  assert.equal(approvedRemoteBaseline.activeVersionId,'ed1be321-ec54-4040-b4c9-9863e3a45cce');
+  assert.equal(approvedRemoteBaseline.sourceCommit,'18e5131c086f5c3c5d6733e80625fd55df9d34c4');
   assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,true);
   const observed=remote();observed.bindings.push({name:'ASSETS',type:'assets'});
   assert.equal(assertRemoteState(observed,approvedRemoteBaseline),true);
@@ -42,7 +44,7 @@ test('the one settings version accepts only the pinned annotated predecessor and
  assert.throws(()=>assertRemoteState(state,oldBaseline),/SOURCE_COMMIT_MISMATCH/);
  assert.equal(assertRemoteState(state,oldBaseline,{preDeployLineage:proof}),true);
  const current=remote();current.bindings.push({name:'ASSETS',type:'assets'});current.deploymentMessage='Dashboard settings update';
- assert.throws(()=>assertRemoteState(current,baseline,{preDeployLineage:proof}),/SOURCE_COMMIT_MISMATCH/);
+ assert.equal(assertRemoteState(current,baseline,{preDeployLineage:proof}),true);
  for(const [key,value] of [['activeVersionId','other'],['priorVersionId','other'],['activeDeploymentSourceAnnotation','MISSING'],['priorDeploymentSourceAnnotation','OTHER'],['activeScriptEtag','a'.repeat(64)],['priorScriptEtag','a'.repeat(64)],['scriptContentEqual',false],['codeLineageEvidence','UNVERIFIED'],['sourceAnnotationGuardMatch',true]]){
   assert.throws(()=>assertRemoteState(state,oldBaseline,{preDeployLineage:{...proof,[key]:value}}),/SOURCE_COMMIT_MISMATCH/,key);
  }
