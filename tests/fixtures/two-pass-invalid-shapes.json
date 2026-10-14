@@ -1,0 +1,16 @@
+{
+  "note": "Synthetic shapes only. No video transcript or provider response text is included.",
+  "first": {
+    "summary": [{"text": "Synthetic summary supported by one segment.", "evidenceIds": [1]}],
+    "chapters": [{"text": "Synthetic first window.", "evidenceIds": [1]}],
+    "claims": [],
+    "numbers": [],
+    "critical": [],
+    "conclusion": "Synthetic conclusion."
+  },
+  "second": {
+    "report": {"summary": [], "chapters": []},
+    "repairs": [],
+    "uncertainties": []
+  }
+}
