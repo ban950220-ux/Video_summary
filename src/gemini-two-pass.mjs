@@ -92,6 +92,7 @@ function quoteGate(env,mode){
 async function reconcile(env,id,phase,scope,row,receipt){
  if(receipt.response_complete!==1||!receipt.response_json||await sha(receipt.response_json)!==receipt.response_sha256)fail('TWO_PASS_RECEIPT_INCOMPLETE');
  let envelope;try{envelope=JSON.parse(receipt.response_json);}catch{fail('TWO_PASS_RECEIPT_INVALID');}
+ if(!envelope||typeof envelope!=='object'||Array.isArray(envelope)||Object.keys(envelope).length===0)fail('TWO_PASS_RECEIPT_INVALID');
  const candidate=envelope.candidates?.[0],output=candidate?.content?.parts?.map(part=>part.text||'').join('')||'',usage=envelope.usageMetadata;
  if(usage)await env.DB.prepare("UPDATE yta_gemini_two_pass_calls SET usage_json=?,finish_reason=?,updated_at=? WHERE job_id=? AND phase=? AND state IN ('RECEIVED','VALIDATION_FAILED') AND response_sha256=?").bind(JSON.stringify(usage),candidate?.finishReason??null,now(),id,phase,receipt.response_sha256).run();
  if(receipt.http_status!==200||envelope.candidates?.length!==1||candidate?.finishReason!=='STOP'||!output)fail('TWO_PASS_OUTPUT_INCOMPLETE');
@@ -205,7 +206,8 @@ export async function handleGeminiTwoPassAction(request,env,{id,action,job,sourc
   }catch(error){
    let current;try{current=await call(env,id,phase);}catch{}
    if(current?.state==='RESERVED')throw error;
-   try{await env.DB.prepare("UPDATE yta_gemini_two_pass_calls SET state=CASE WHEN state='DISPATCHING' THEN 'UNCERTAIN' ELSE state END,error_code=?,updated_at=? WHERE job_id=? AND phase=? AND state<>'SETTLED'").bind(error.code??'TWO_PASS_UNCERTAIN',now(),id,phase).run();}catch{}
+   const invalidResponse=['TWO_PASS_WINDOW_INVALID','TWO_PASS_REVIEW_INVALID','TWO_PASS_OUTPUT_INCOMPLETE','TWO_PASS_USAGE_UNCERTAIN','TWO_PASS_RECEIPT_INVALID','TWO_PASS_RECEIPT_INCOMPLETE'].includes(error.code);
+   try{await env.DB.prepare("UPDATE yta_gemini_two_pass_calls SET state=CASE WHEN state='DISPATCHING' THEN 'UNCERTAIN' WHEN state='RECEIVED' AND ?=1 THEN 'VALIDATION_FAILED' ELSE state END,error_code=?,updated_at=? WHERE job_id=? AND phase=? AND state<>'SETTLED'").bind(invalidResponse?1:0,error.code??'TWO_PASS_UNCERTAIN',now(),id,phase).run();}catch{}
    try{await env.DB.prepare("UPDATE yta_gemini_two_pass_jobs SET state='BLOCKED',error_code=?,updated_at=? WHERE job_id=? AND owner_id='owner' AND state IN ('FIRST_PENDING','REVIEW_PENDING')").bind(error.code??'TWO_PASS_UNCERTAIN',now(),id).run();}catch{}throw error;
   }
  }
