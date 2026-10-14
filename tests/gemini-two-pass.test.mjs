@@ -20,7 +20,7 @@ async function fixture(){
  const root=Buffer.alloc(32,8),secret=await encryptProviderKey(root,'gemini','OFFLINE_TWO_PASS_KEY');db.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','gemini',?,?,?,?)").run(secret.version,secret.ivB64,secret.ciphertextB64,new Date().toISOString());
  let sends=0,review={verdict:'PASS',issues:[]},finishReason='STOP';
  const provider={countTokens:async()=>300,generate:async body=>{sends++;const output=sends===1?report:review,responseText=JSON.stringify({candidates:[{finishReason,content:{parts:[{text:JSON.stringify(output)}]}}],usageMetadata:{promptTokenCount:300,candidatesTokenCount:100,thoughtsTokenCount:20}});return {responseText,responseBytes:new TextEncoder().encode(responseText).length,httpStatus:200,complete:true};}};
- const env={DB,KEY_ENCRYPTION_KEY_B64:root.toString('base64'),ENABLE_GEMINI_TWO_PASS:'true',ENABLE_GEMINI_TWO_PASS_PAID:'true',GEMINI_TWO_PASS_PAID_EXECUTION_APPROVED:'true',ALLOW_PAID_API:'false',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true',GEMINI_TWO_PASS_TEST_PROVIDER:provider};
+ const env={DB,KEY_ENCRYPTION_KEY_B64:root.toString('base64'),ENABLE_GEMINI_TWO_PASS:'true',ENABLE_GEMINI_TWO_PASS_PAID:'true',GEMINI_TWO_PASS_PAID_EXECUTION_APPROVED:'true',GEMINI_TWO_PASS_ALLOWED_JOB_ID:id,ALLOW_PAID_API:'false',PAID_MODEL_ACCESS_VERIFIED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true',GEMINI_TWO_PASS_TEST_PROVIDER:provider};
  const call=(action,method='GET',body)=>routeApi(request(path+'/gemini-two-pass-'+action,method,body),env);
  return {db,DB,id,path,segments,env,call,get sends(){return sends;},setReview:value=>{review=value;},setFinish:value=>{finishReason=value;}};
 }
@@ -154,9 +154,9 @@ test('complete stored responses recover without generation after final ledger wr
   const recoveredSecond=await f.call('recover','POST',{phase:1,confirmNoProviderCall:true});assert.equal(recoveredSecond.status,200,await recoveredSecond.clone().text());assert.equal((await recoveredSecond.json()).providerCalled,false);assert.equal(f.sends,2);
  }finally{f.db.close();}
 });
-test('last awaited claim rechecks execution flags and expiry before generation',async()=>{
- for(const change of ['flag','expiry']){const f=await fixture(),clock=Date.now;try{const q=await quoteApprove(f),original=f.env.DB;
-  f.env.DB={prepare(sql){const statement=original.prepare(sql);if(sql.startsWith("UPDATE yta_gemini_two_pass_calls SET state='DISPATCHING'"))return {bind(...args){const bound=statement.bind(...args);return {async run(){const result=await bound.run();if(change==='flag')f.env.ENABLE_GEMINI_TWO_PASS_PAID='false';else Date.now=()=>q.expiresAt+1;return result;}};}};return statement;}};
+test('last awaited claim rechecks execution flags, expiry and job scope before generation',async()=>{
+ for(const change of ['flag','expiry','job']){const f=await fixture(),clock=Date.now;try{const q=await quoteApprove(f),original=f.env.DB;
+  f.env.DB={prepare(sql){const statement=original.prepare(sql);if(sql.startsWith("UPDATE yta_gemini_two_pass_calls SET state='DISPATCHING'"))return {bind(...args){const bound=statement.bind(...args);return {async run(){const result=await bound.run();if(change==='flag')f.env.ENABLE_GEMINI_TWO_PASS_PAID='false';else if(change==='expiry')Date.now=()=>q.expiresAt+1;else f.env.GEMINI_TWO_PASS_ALLOWED_JOB_ID='other-job';return result;}};}};return statement;}};
   const result=await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});assert.notEqual(result.status,200);assert.equal(f.sends,0);assert.equal((await(await f.call('status')).json()).calls[0].state,'UNCERTAIN');
  }finally{Date.now=clock;f.db.close();}}
 });
@@ -294,4 +294,22 @@ test('complete non-object and malformed response receipts block without losing t
    assert.equal(f.sends,1,raw);
   }finally{f.db.close();}
  }
+});
+
+test('paid flags cannot count or generate for an unlisted job, and the approved budget stays below USD 0.17',async()=>{
+ const f=await fixture();try{
+  let counts=0;const count=f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens;
+  f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async body=>{counts++;return count(body);};
+  f.env.GEMINI_TWO_PASS_ALLOWED_JOB_ID='other-job';
+  const denied=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
+  assert.equal((await denied.json()).error.code,'TWO_PASS_JOB_NOT_ALLOWED');assert.equal(counts,0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);
+  f.env.GEMINI_TWO_PASS_ALLOWED_JOB_ID=f.id;
+  const q=await quoteApprove(f);assert.ok(q.maxMicroUsd<=170000);assert.match(q.executionId,/^[0-9a-f-]{36}$/i);assert.equal(counts,1);
+  assert.equal((await(await f.call('status')).json()).quote.executionId,q.executionId);
+  f.env.GEMINI_TWO_PASS_ALLOWED_JOB_ID='other-job';
+  const run=await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});
+  assert.equal((await run.json()).error.code,'TWO_PASS_JOB_NOT_ALLOWED');assert.equal(counts,1);assert.equal(f.sends,0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM yta_gemini_two_pass_calls').get().n,0);
+ }finally{f.db.close();}
 });
