@@ -5,6 +5,9 @@ import {readFileSync} from 'node:fs';
 import {routeApi} from '../src/worker.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 import {sourceSnapshot,summaryRequest,reviewRequest,validateReview,costCeiling,countTokensRequest,TWO_PASS_MODEL,TWO_PASS_OUTPUT_CAP} from '../src/gemini-two-pass-contract.mjs';
+import {windowedSummarySchema} from '../src/two-pass-windows.mjs';
+
+const invalidShapes=JSON.parse(readFileSync(new URL('./fixtures/two-pass-invalid-shapes.json',import.meta.url),'utf8'));
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 const report={summary:[{text:'첫 발언과 둘째 발언을 종합했다',evidenceIds:[1,2]}],chapters:[{windowKey:'w000',kind:'CONTENT',text:'첫 발언'+' '+'둘째 발언',evidenceIds:[1,2]}],claims:[],numbers:[],critical:[],conclusion:'발언 두 개를 요약했다'};
@@ -203,4 +206,92 @@ test('expired and cancelled unused quotes receive a fresh revision, while any re
   await f.call('approve','POST',{quoteSha256:current.quoteSha256,maxMicroUsd:current.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true});await f.call('run','POST',{phase:0,quoteSha256:current.quoteSha256,confirmSeparatePaidApproval:true});await f.call('cancel','POST',{});
   const blocked=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal((await blocked.json()).error.code,'TWO_PASS_ALREADY_STARTED');assert.equal(f.sends,1);
  }finally{f.db.close();}}
+});
+
+test('historical first-response shape without windowKey and kind stops at stored receipt',async()=>{
+ const f=await fixture();try{
+  const q=await quoteApprove(f),original=f.env.GEMINI_TWO_PASS_TEST_PROVIDER.generate;
+  f.env.GEMINI_TWO_PASS_TEST_PROVIDER.generate=async body=>{
+   assert.deepEqual(body.generationConfig.responseJsonSchema,windowedSummarySchema({segments:f.segments}));
+   const chapter=body.generationConfig.responseJsonSchema.properties.chapters.items;
+   assert.deepEqual(chapter.required,['windowKey','kind','text','evidenceIds']);
+   assert.match(body.contents[0].parts[0].text,/Window manifest/);
+   const result=await original(body),envelope=JSON.parse(result.responseText);
+   envelope.candidates[0].content.parts[0].text=JSON.stringify(invalidShapes.first);
+   result.responseText=JSON.stringify(envelope);result.responseBytes=new TextEncoder().encode(result.responseText).length;
+   return result;
+  };
+  const first=await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});
+  assert.equal((await first.json()).error.code,'TWO_PASS_WINDOW_INVALID');
+  let state=(await(await f.call('status')).json());
+  assert.equal(state.state,'BLOCKED');assert.equal(state.next,'INSPECT_STORED_RECEIPT_NO_AUTO_RETRY');
+  assert.equal(state.calls.length,1);assert.equal(state.calls[0].state,'VALIDATION_FAILED');
+  assert.equal(state.calls[0].responseStored,true);assert.ok(state.calls[0].responseSha256);
+  assert.equal(state.calls[0].usage.promptTokenCount,300);assert.equal(f.sends,1);
+  const recover=await f.call('recover','POST',{phase:0,confirmNoProviderCall:true});
+  assert.equal((await recover.json()).error.code,'TWO_PASS_WINDOW_INVALID');
+  const next=await f.call('run','POST',{phase:1,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});
+  assert.equal((await next.json()).error.code,'TWO_PASS_DISPATCH_SCOPE_CHANGED');
+  state=(await(await f.call('status')).json());assert.equal(state.state,'BLOCKED');assert.equal(f.sends,1);
+ }finally{f.db.close();}
+});
+
+test('historical second-response repair wrapper fails strict review contract without a third call',async()=>{
+ const f=await fixture();try{
+  const q=await quoteApprove(f),original=f.env.GEMINI_TWO_PASS_TEST_PROVIDER.generate;
+  f.env.GEMINI_TWO_PASS_TEST_PROVIDER.generate=async body=>{
+   const result=await original(body);
+   if(f.sends===2){
+    assert.deepEqual(body.generationConfig.responseJsonSchema.required,['verdict','issues']);
+    assert.match(body.contents[0].parts[0].text,/Compare every chapter/);
+    const envelope=JSON.parse(result.responseText);
+    envelope.candidates[0].content.parts[0].text=JSON.stringify(invalidShapes.second);
+    result.responseText=JSON.stringify(envelope);result.responseBytes=new TextEncoder().encode(result.responseText).length;
+   }
+   return result;
+  };
+  assert.equal((await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true})).status,200);
+  const second=await f.call('run','POST',{phase:1,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});
+  assert.equal((await second.json()).error.code,'TWO_PASS_REVIEW_INVALID');
+  let state=(await(await f.call('status')).json());
+  assert.equal(state.state,'BLOCKED');assert.equal(state.next,'INSPECT_STORED_RECEIPT_NO_AUTO_RETRY');
+  assert.deepEqual(state.calls.map(c=>c.state),['SETTLED','VALIDATION_FAILED']);
+  assert.equal(state.calls[1].responseStored,true);assert.equal(state.calls[1].usage.promptTokenCount,300);
+  assert.equal(f.sends,2);
+  const recover=await f.call('recover','POST',{phase:1,confirmNoProviderCall:true});
+  assert.equal((await recover.json()).error.code,'TWO_PASS_REVIEW_INVALID');
+  const again=await f.call('run','POST',{phase:1,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});
+  assert.equal((await again.json()).error.code,'TWO_PASS_DISPATCH_SCOPE_CHANGED');
+  state=(await(await f.call('status')).json());assert.equal(state.state,'BLOCKED');assert.equal(f.sends,2);
+ }finally{f.db.close();}
+});
+
+test('complete non-object and malformed response receipts block without losing the original or opening a retry',async()=>{
+ for(const raw of ['null','[]','"unexpected"','123','{}','{"candidates":']){
+  const f=await fixture();try{
+   const q=await quoteApprove(f),original=f.env.GEMINI_TWO_PASS_TEST_PROVIDER.generate;
+   f.env.GEMINI_TWO_PASS_TEST_PROVIDER.generate=async body=>{
+    const result=await original(body);
+    result.responseText=raw;result.responseBytes=new TextEncoder().encode(raw).length;
+    return result;
+   };
+   const first=await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});
+   assert.equal((await first.json()).error.code,'TWO_PASS_RECEIPT_INVALID',raw);
+   const status=(await(await f.call('status')).json());
+   assert.equal(status.state,'BLOCKED',raw);assert.equal(status.errorCode,'TWO_PASS_RECEIPT_INVALID',raw);
+   assert.equal(status.next,'INSPECT_STORED_RECEIPT_NO_AUTO_RETRY',raw);
+   assert.equal(status.calls.length,1,raw);assert.equal(status.calls[0].state,'VALIDATION_FAILED',raw);
+   assert.equal(status.calls[0].responseStored,true,raw);assert.equal(status.calls[0].errorCode,'TWO_PASS_RECEIPT_INVALID',raw);
+   const receipt=f.db.prepare('SELECT response_json,response_complete,request_sha256 FROM yta_gemini_two_pass_calls WHERE job_id=? AND phase=0').get(f.id);
+   assert.equal(receipt.response_json,raw);assert.equal(receipt.response_complete,1);assert.ok(receipt.request_sha256);
+   const recovered=await f.call('recover','POST',{phase:0,confirmNoProviderCall:true});
+   assert.equal((await recovered.json()).error.code,'TWO_PASS_RECEIPT_INVALID',raw);
+   assert.equal(f.db.prepare('SELECT response_json FROM yta_gemini_two_pass_calls WHERE job_id=? AND phase=0').get(f.id).response_json,raw);
+   const duplicate=await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});
+   assert.equal((await duplicate.json()).error.code,'TWO_PASS_DISPATCH_SCOPE_CHANGED',raw);
+   const newQuote=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
+   assert.equal((await newQuote.json()).error.code,'TWO_PASS_ALREADY_STARTED',raw);
+   assert.equal(f.sends,1,raw);
+  }finally{f.db.close();}
+ }
 });
