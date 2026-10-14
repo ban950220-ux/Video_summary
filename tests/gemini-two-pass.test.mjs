@@ -5,7 +5,8 @@ import {readFileSync} from 'node:fs';
 import {routeApi} from '../src/worker.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 import {assertRemainingApprovalBudget} from '../src/gemini-two-pass.mjs';
-import {sourceSnapshot,summaryRequest,reviewRequest,validateReview,costCeiling,countTokensRequest,TWO_PASS_MODEL,TWO_PASS_OUTPUT_CAP} from '../src/gemini-two-pass-contract.mjs';
+import {paidExecutionEnabled} from '../src/paid-summary-contract.mjs';
+import {sourceSnapshot,summaryRequest,reviewRequest,validateReview,costCeiling,countTokensRequest,TWO_PASS_MODEL,TWO_PASS_OUTPUT_CAP,sha} from '../src/gemini-two-pass-contract.mjs';
 import {windowedSummarySchema} from '../src/two-pass-windows.mjs';
 
 const invalidShapes=JSON.parse(readFileSync(new URL('./fixtures/two-pass-invalid-shapes.json',import.meta.url),'utf8'));
@@ -20,8 +21,8 @@ async function fixture(){
  db.prepare("INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,'GROQ_OWNED_AUDIO',?)").run(id,segments.map(s=>s.text).join('\n'),JSON.stringify(segments),new Date().toISOString());
  const root=Buffer.alloc(32,8),secret=await encryptProviderKey(root,'gemini','OFFLINE_TWO_PASS_KEY');db.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','gemini',?,?,?,?)").run(secret.version,secret.ivB64,secret.ciphertextB64,new Date().toISOString());
  let sends=0,review={verdict:'PASS',issues:[]},finishReason='STOP';
- const provider={countTokens:async()=>300,generate:async body=>{sends++;const output=sends===1?report:review,responseText=JSON.stringify({candidates:[{finishReason,content:{parts:[{text:JSON.stringify(output)}]}}],usageMetadata:{promptTokenCount:300,candidatesTokenCount:100,thoughtsTokenCount:20}});return {responseText,responseBytes:new TextEncoder().encode(responseText).length,httpStatus:200,complete:true};}};
- const env={DB,KEY_ENCRYPTION_KEY_B64:root.toString('base64'),ENABLE_GEMINI_TWO_PASS:'true',ENABLE_GEMINI_TWO_PASS_PAID:'true',GEMINI_TWO_PASS_PAID_EXECUTION_APPROVED:'true',GEMINI_TWO_PASS_ALLOWED_JOB_ID:id,ALLOW_PAID_API:'false',PAID_MODEL_ACCESS_VERIFIED:'true',GEMINI_TWO_PASS_COST_BUFFER_APPROVED:'true',GEMINI_TWO_PASS_TEST_PROVIDER:provider};
+ const provider={getModel:async()=>({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['generateContent','countTokens'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),countTokens:async()=>300,generate:async body=>{sends++;const output=sends===1?report:review,responseText=JSON.stringify({candidates:[{finishReason,content:{parts:[{text:JSON.stringify(output)}]}}],usageMetadata:{promptTokenCount:300,candidatesTokenCount:100,thoughtsTokenCount:20}});return {responseText,responseBytes:new TextEncoder().encode(responseText).length,httpStatus:200,complete:true};}};
+ const env={DB,KEY_ENCRYPTION_KEY_B64:root.toString('base64'),ENABLE_GEMINI_TWO_PASS:'true',ENABLE_GEMINI_TWO_PASS_PAID:'true',GEMINI_TWO_PASS_PAID_EXECUTION_APPROVED:'true',GEMINI_TWO_PASS_ALLOWED_JOB_ID:id,ALLOW_PAID_API:'false',GEMINI_TWO_PASS_COST_BUFFER_APPROVED:'true',GEMINI_TWO_PASS_TEST_PROVIDER:provider};
  const call=(action,method='GET',body)=>routeApi(request(path+'/gemini-two-pass-'+action,method,body),env);
  return {db,DB,id,path,segments,env,call,get sends(){return sends;},setReview:value=>{review=value;},setFinish:value=>{finishReason=value;}};
 }
@@ -49,6 +50,36 @@ test('countTokens quote remains available while paid generation is disabled',asy
   const quoted=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal(quoted.status,200,await quoted.clone().text());const q=(await quoted.json()).quote;assert.equal(counts,1);assert.equal(f.sends,0);
   const approval=await f.call('approve','POST',{quoteSha256:q.quoteSha256,maxMicroUsd:q.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true});assert.equal((await approval.json()).error.code,'TWO_PASS_PAID_DISABLED');assert.equal(f.sends,0);
  }finally{f.db.close();}
+});
+test('quote checks exact model metadata before any transcript count and never treats it as generation success',async()=>{
+ assert.equal(paidExecutionEnabled({ENABLE_PAID_SUMMARY:'true',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true',ALLOW_PAID_API:'false'}),false);
+ const withoutConsent=await fixture();try{let metadataCalls=0;withoutConsent.env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel=async()=>{metadataCalls++;throw Error('should not run');};const denied=await withoutConsent.call('quote','POST',{projectMode:'PAID_APPROVED'});assert.equal((await denied.json()).error.code,'TWO_PASS_COUNT_CONSENT_REQUIRED');assert.equal(metadataCalls,0);}finally{withoutConsent.db.close();}
+ for(const bad of [()=>{throw Error('provider failure');},()=>({name:'models/other',supportedGenerationMethods:['generateContent','countTokens'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),()=>({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['countTokens'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),()=>({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['generateContent'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),()=>({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['generateContent','countTokens'],inputTokenLimit:1,outputTokenLimit:65_536})]){
+  const f=await fixture();try{let counts=0;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel=bad;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async()=>{counts++;return 300;};
+   const denied=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal((await denied.json()).error.code,'TWO_PASS_MODEL_UNAVAILABLE');assert.equal(counts,0);assert.equal(f.sends,0);assert.equal(f.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);
+  }finally{f.db.close();}
+ }
+ const f=await fixture();try{const quoted=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal(quoted.status,200);const q=(await quoted.json()).quote;assert.equal(q.model,TWO_PASS_MODEL);assert.equal(f.env.PAID_MODEL_ACCESS_VERIFIED,undefined);assert.equal(f.sends,0);
+  const stored=JSON.parse(f.db.prepare('SELECT quote_json FROM yta_gemini_two_pass_jobs').get().quote_json);assert.equal(stored.modelAccessEvidence.credentialGeneration,stored.credentialGeneration);assert.equal(stored.modelAccessEvidence.inputTokensCounted,stored.inputTokensCounted);assert.equal(stored.modelAccessEvidence.model,TWO_PASS_MODEL);assert.equal(stored.modelAccessEvidence.checkedAt+1800000,stored.expiresAt);
+ }finally{f.db.close();}
+ const failedCount=await fixture();try{failedCount.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async()=>0;const denied=await failedCount.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal((await denied.json()).error.code,'TWO_PASS_TOKEN_BOUND');assert.equal(failedCount.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);}finally{failedCount.db.close();}
+});
+test('a non-successful model metadata HTTP response stores no quote or call',async()=>{
+ const f=await fixture(),fetchBefore=globalThis.fetch;try{f.env.GEMINI_TWO_PASS_TEST_PROVIDER=undefined;let requests=0;globalThis.fetch=async()=>{requests++;return new Response('{"error":"denied"}',{status:403});};
+  const denied=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal((await denied.json()).error.code,'TWO_PASS_MODEL_UNAVAILABLE');assert.equal(requests,1);assert.equal(f.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);assert.equal(f.sends,0);
+ }finally{globalThis.fetch=fetchBefore;f.db.close();}
+});
+test('key changes and historical quotes without bound model proof cannot be approved',async()=>{
+ const f=await fixture();try{
+  const original=f.env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel=async(...args)=>{const metadata=await original(...args),secret=await encryptProviderKey(Buffer.alloc(32,8),'gemini','ROTATED_OFFLINE_KEY');f.db.prepare("UPDATE provider_credentials SET cipher_version=?,iv_b64=?,ciphertext_b64=?,updated_at=? WHERE provider='gemini'").run(secret.version,secret.ivB64,secret.ciphertextB64,new Date(Date.now()+1000).toISOString());return metadata;};
+  const denied=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal((await denied.json()).error.code,'TWO_PASS_KEY_CHANGED');assert.equal(f.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);
+ }finally{f.db.close();}
+ for(const mutation of ['key','old-proof','expiry']){const g=await fixture();try{const issued=await g.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true}),q=(await issued.json()).quote;
+  if(mutation==='key'){const secret=await encryptProviderKey(Buffer.alloc(32,8),'gemini','ROTATED_OFFLINE_KEY');g.db.prepare("UPDATE provider_credentials SET cipher_version=?,iv_b64=?,ciphertext_b64=?,updated_at=? WHERE provider='gemini'").run(secret.version,secret.ivB64,secret.ciphertextB64,new Date(Date.now()+1000).toISOString());}
+  if(mutation==='old-proof'){const old=JSON.parse(g.db.prepare('SELECT quote_json FROM yta_gemini_two_pass_jobs').get().quote_json);delete old.modelAccessEvidence;g.db.prepare('UPDATE yta_gemini_two_pass_jobs SET quote_json=?,quote_sha256=?').run(JSON.stringify(old),await sha(JSON.stringify(old)));}
+  if(mutation==='expiry')g.db.prepare('UPDATE yta_gemini_two_pass_jobs SET expires_at=?').run(Date.now()-1);
+  const blocked=await g.call('approve','POST',{quoteSha256:q.quoteSha256,maxMicroUsd:q.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true});assert.ok((await blocked.json()).error.code,mutation);assert.equal(g.sends,0,mutation);
+ }finally{g.db.close();}}
 });
 test('two-pass cost buffer approval is separate from actual tax verification',async()=>{
  const f=await fixture();try{

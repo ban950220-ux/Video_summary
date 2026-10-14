@@ -384,7 +384,7 @@ function showGeminiTwoPassChoice(job,target,requestId){
  let postUncertain=false;
  const render=async()=>{
   const status=await api(base+'-status');if(!current())return;empty(host);
-  host.append(el('h2',{text:'Gemini 전체 전사 요약 + 원문 대조'}),el('p',{text:'저장된 전사만 사용합니다. 생성은 최대 2회, 자동 재시도와 자동 3차 호출은 없습니다. 2차 예약 전에 남은 승인을 취소할 수 있으며, 예약이 먼저 확정되면 그 호출은 취소할 수 없습니다. 대조 PASS도 사람의 의미 검토·원음과 구간 시각의 정확성·외부 사실을 보증하지 않습니다.'}),el('p',{text:'현재 확인된 Gemini 프로젝트는 Tier 1 유료입니다. 별도 무료 프로젝트의 결제 비활성 증거가 없으므로 무료 실행으로 분류할 수 없습니다. 유료 실행은 표시한 최대액을 별도로 승인해야 합니다.'}));
+  host.append(el('h2',{text:'Gemini 전체 전사 요약 + 원문 대조'}),el('p',{text:'저장된 전사만 사용합니다. 생성은 최대 2회, 자동 재시도와 자동 3차 호출은 없습니다. 2차 예약 전에 남은 승인을 취소할 수 있으며, 예약이 먼저 확정되면 그 호출은 취소할 수 없습니다. 대조 PASS도 사람의 의미 검토·원음과 구간 시각의 정확성·외부 사실을 보증하지 않습니다.'}),el('p',{text:'현재 확인된 Gemini 프로젝트는 Tier 1 유료입니다. 별도 무료 프로젝트의 결제 비활성 증거가 없으므로 무료 실행으로 분류할 수 없습니다. 견적 요청은 저장 키로 정확한 모델의 메타데이터와 토큰 계수 접근을 확인합니다. 이는 생성 성공·잔액·결제 가능성을 보증하지 않으며, 유료 실행은 표시한 최대액을 별도로 승인해야 합니다.'}));
   if(status.state==='NOT_STARTED'){
    const confirm=el('input',{attrs:{type:'checkbox'}}),row=el('label',{text:'견적용 공식 토큰 계수를 위해 전체 전사 원문과 구간 ID를 Google에 전송하는 데 동의합니다. 이는 유료 생성 승인과 별개이며, 견적 단계에서 생성은 하지 않습니다.'});row.prepend(confirm);host.append(row);
    const paid=el('button',{className:'btn secondary small',text:'전체 전사 전송 동의 후 견적 요청 · 생성 없음'});
