@@ -18,6 +18,7 @@ const remote=()=>({
   {name:'SITE_DEPLOYED',type:'plain_text',text:'true'},
   {name:'ENABLE_PAID_SUMMARY',type:'plain_text',text:'true'},{name:'PAID_SUMMARY_EXECUTION_APPROVED',type:'plain_text',text:'true'},
   {name:'PAID_FIRST_GENERATION_TRIAL_ENABLED',type:'plain_text',text:'true'},{name:'PAID_FIRST_TRIAL_USD_COST_REVIEWED',type:'plain_text',text:'true'},
+  {name:'ENABLE_GEMINI_TWO_PASS',type:'secret_text'},{name:'GEMINI_TWO_PASS_ALLOWED_JOB_ID',type:'secret_text'},
   {name:'ASSETS',type:'assets'},
  ],
 });

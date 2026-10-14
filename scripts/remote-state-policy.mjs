@@ -21,6 +21,7 @@ const requiredBindingTypes=new Map([
   ['ENABLE_LIVE_FREE','plain_text'],['ALLOW_PAID_API','plain_text'],['SITE_DEPLOYED','plain_text'],
   ['ENABLE_PAID_SUMMARY','plain_text'],['PAID_SUMMARY_EXECUTION_APPROVED','plain_text'],
   ['PAID_FIRST_GENERATION_TRIAL_ENABLED','plain_text'],['PAID_FIRST_TRIAL_USD_COST_REVIEWED','plain_text'],
+  ['ENABLE_GEMINI_TWO_PASS','secret_text'],['GEMINI_TWO_PASS_ALLOWED_JOB_ID','secret_text'],
 ]);
 
 export function inspectBindingSet(bindings,{expectAssets=false}={}){
@@ -39,8 +40,8 @@ const baselineObservability={
 };
 
 export const approvedRemoteBaseline={
-  activeVersionId:'f5c03a27-ed0f-4f3b-b7f9-026b19fa8029',
-  sourceCommit:'0187d897c3b190f673ceaf75628ff881da7bfa5b',
+  activeVersionId:'ed1be321-ec54-4040-b4c9-9863e3a45cce',
+  sourceCommit:'18e5131c086f5c3c5d6733e80625fd55df9d34c4',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:true,
@@ -54,10 +55,10 @@ export const approvedRemoteBaseline={
   observability:baselineObservability,
 };
 export const approvedPreDeployLineage={
- activeVersionId:'37ffbd37-a256-41a9-816a-e1967c03d68c',
- priorVersionId:'bf955e63-0b85-4535-ad39-2858742f89e4',
- sourceCommit:'415825bef1f152376c6e49ed01fffb3793f940a2',
- scriptEtag:'eb6b6cbff792f3149a6f3795e54a9d717fd03b893a2ff57f906d3221f5c5262f',
+ activeVersionId:'ed1be321-ec54-4040-b4c9-9863e3a45cce',
+ priorVersionId:'a797acea-a636-4db6-9c40-81fce4d111a1',
+ sourceCommit:'18e5131c086f5c3c5d6733e80625fd55df9d34c4',
+ scriptEtag:'b80d88d40cb4b7652a92a20ddfd96c7a91765ffc3fbc27b2a7b69b57db9b72b5',
 };
 
 export function assertRemoteState(remote,baseline,{postDeploy=false,preDeployLineage=null}={}){

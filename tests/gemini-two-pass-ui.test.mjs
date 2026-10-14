@@ -4,6 +4,15 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+test('a Groq recovery warning leaves the Gemini choice reachable without a provider POST',async()=>{
+ const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
+ const choice={transcription:{complete:true},summary:{complete:false,savedRawStages:0,rawStages:79,remainingRawStages:79,recoveryReviewRequired:true},free:{model:'mock-free',inputTokensUpperPerCall:4800,outputTokensUpperPerCall:1800,eta:{reason:'UNKNOWN'}},paid:{executionEnabled:false,quoteIssueReady:false,reason:'별도 승인 필요',model:'gemini-3.1-flash-lite',priceVersion:'v1',maxRetries:0}};
+ const calls=[],fetcher=async(path,options)=>{calls.push({path,method:options.method});const result=path.endsWith('/summary-choice')?choice:path.endsWith('/paid-summary-status')?{approval:null,reservations:[]}:{state:'NOT_STARTED',calls:[]};return {ok:true,headers:{get:()=> 'application/json'},json:async()=>result};};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showSummaryChoice=showSummaryChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout};runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showSummaryChoice({id:'job-a'},target,0);await tick();
+ const host=target.children[0];assert.ok(host.children.some(item=>item.textContent?.includes('Groq 복구 기록의 근거')));const gemini=host.children.find(item=>item.tag==='button'&&item.textContent?.includes('Gemini 전체 전사 요약'));assert.ok(gemini);gemini.onclick();await tick();
+ assert.ok(target.children[0].children.some(item=>item.textContent?.includes('Tier 1 유료')));assert.deepEqual(calls.map(item=>item.method),['GET','GET','GET']);
+});
 test('two-pass option describes paid project, asks for quote and approval before offering either generation',async()=>{
  const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
  const calls=[],quote={model:'gemini-3.1-flash-lite',inputTokensCounted:50524,inputTokensPerCallCap:66908,outputTokensPerCallCap:8192,preTaxMicroUsd:58030,costBufferMicroUsd:58030,maxMicroUsd:116060,expiresAt:Date.now()+600000,quoteSha256:'a'.repeat(64)};

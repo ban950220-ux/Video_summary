@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {expectedPriorVersionId,runWorkerVersionLineageDiagnostic,safeWorkerLineageReport} from '../scripts/worker-version-lineage-diagnostic.mjs';
 import {approvedRemoteBaseline} from '../scripts/remote-state-policy.mjs';
 
-const priorVersionId='bf955e63-0b85-4535-ad39-2858742f89e4';
+const priorVersionId='a797acea-a636-4db6-9c40-81fce4d111a1';
 const secret='PRIVATE_SENTINEL_DO_NOT_PRINT';
 const sourceMessage=`source-commit:${approvedRemoteBaseline.sourceCommit}`;
 const deployments=()=>[
@@ -31,7 +31,7 @@ test('missing or differing script hashes and annotations never establish lineage
  report=safeWorkerLineageReport(deployments(),{...current,resources:{...current.resources,script:{etag:secret}}},prior);assert.equal(report.activeScriptEtag,'UNAVAILABLE');assert.equal(report.scriptContentEqual,null);assert.ok(!JSON.stringify(report).includes(secret));
  const missing=deployments();missing.splice(1,1);report=safeWorkerLineageReport(missing,current,prior);assert.equal(report.priorDeploymentSourceAnnotation,'DEPLOYMENT_NOT_IN_PAGE');assert.equal(report.codeLineageEvidence,'UNVERIFIED');
  const annotated=deployments();annotated[0].annotations['workers/message']=sourceMessage;report=safeWorkerLineageReport(annotated,current,prior);assert.equal(report.sourceAnnotationGuardMatch,true);
- assert.throws(()=>safeWorkerLineageReport(deployments(),current,{...prior,id:'bf955e63-1111-4111-8111-111111111111'}),/DIAGNOSTIC_SCOPE_INVALID/);
+ assert.throws(()=>safeWorkerLineageReport(deployments(),current,{...prior,id:'a797acea-1111-4111-8111-111111111111'}),/DIAGNOSTIC_SCOPE_INVALID/);
 });
 
 test('missing credentials, denied API and changed active deployment fail closed without leaking values',async()=>{

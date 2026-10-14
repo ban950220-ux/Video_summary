@@ -1211,6 +1211,13 @@ test('1,954-character stored strict report recovers without a provider call and 
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(newResult,newId);
   const recovered=await routeApi(request(url,'POST',body),f.env);assert.equal(recovered.status,200,await recovered.clone().text());assert.equal((await recovered.json()).automaticContinuation,false);
   const choice=await(await routeApi(request(f.path+'/summary-choice'),f.env)).json();assert.equal(choice.summary.savedRawStages,1);assert.equal(choice.summary.remainingRawStages,choice.summary.rawStages-1);
+  const recoveryId=f.id+':groq-summary-recovery:'+plan.transcriptHash+':raw:0',savedRecovery=f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(recoveryId).result_json;
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{}',recoveryId);
+  const isolated=await routeApi(request(f.path+'/summary-choice'),f.env);assert.equal(isolated.status,200,await isolated.clone().text());const isolatedChoice=await isolated.json();assert.equal(isolatedChoice.summary.recoveryReviewRequired,true);assert.equal(isolatedChoice.summary.savedRawStages,0);
+  const groqBlocked=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal((await groqBlocked.json()).error.code,'SUMMARY_RECOVERY_SCOPE_CHANGED');
+  f.db.exec(readFileSync(new URL('../migrations/0015_gemini_two_pass.sql',import.meta.url),'utf8'));
+  const geminiStatus=await routeApi(request(f.path+'/gemini-two-pass-status'),f.env);assert.equal(geminiStatus.status,200);assert.equal((await geminiStatus.json()).state,'NOT_STARTED');
+  assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(recoveryId).result_json,'{}');f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(savedRecovery,recoveryId);
   assert.equal(providerCalls,0);
   assert.deepEqual({...f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(oldId)},{state:'FAILED_UNCERTAIN',error_code:'SUMMARY_RESPONSE_INVALID',result_json:oldResult});
   assert.deepEqual({...f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(newId)},{state:'FAILED_UNCERTAIN',error_code:'SUMMARY_CHECKPOINT_TOO_LARGE',result_json:newResult});
