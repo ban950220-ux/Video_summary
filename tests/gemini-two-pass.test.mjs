@@ -13,10 +13,10 @@ const invalidShapes=JSON.parse(readFileSync(new URL('./fixtures/two-pass-invalid
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 const report={summary:[{text:'첫 발언과 둘째 발언을 종합했다',evidenceIds:[1,2]}],chapters:[{windowKey:'w000',kind:'CONTENT',text:'첫 발언'+' '+'둘째 발언',evidenceIds:[1,2]}],claims:[],numbers:[],critical:[],conclusion:'발언 두 개를 요약했다'};
-async function fixture(){
+async function fixture(id='33333333-3333-4333-8333-333333333333'){
  const db=new DatabaseSync(':memory:');for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0015_gemini_two_pass.sql'])db.exec(readFileSync(new URL(file,import.meta.url),'utf8'));
  const DB={prepare(sql){const make=args=>({bind(...next){return make(next);},async run(){return {meta:{changes:db.prepare(sql).run(...args).changes}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};
- const id='33333333-3333-4333-8333-333333333333',path='/api/jobs/'+id,segments=[{id:1,startMs:0,endMs:1000,text:'첫 발언'},{id:2,startMs:1000,endMs:2000,text:'둘째 발언'}],audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'b'.repeat(64)};
+ const path='/api/jobs/'+id,segments=[{id:1,startMs:0,endMs:1000,text:'첫 발언'},{id:2,startMs:1000,endMs:2000,text:'둘째 발언'}],audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'b'.repeat(64)};
  db.prepare("INSERT INTO jobs(id,owner_id,title,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json) VALUES(?,'owner','Two pass mock','audio','TRANSCRIBED',2,?,?,?,?)").run(id,new Date().toISOString(),new Date().toISOString(),'null',JSON.stringify(audit));
  db.prepare("INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,'GROQ_OWNED_AUDIO',?)").run(id,segments.map(s=>s.text).join('\n'),JSON.stringify(segments),new Date().toISOString());
  const root=Buffer.alloc(32,8),secret=await encryptProviderKey(root,'gemini','OFFLINE_TWO_PASS_KEY');db.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','gemini',?,?,?,?)").run(secret.version,secret.ivB64,secret.ciphertextB64,new Date().toISOString());
@@ -54,7 +54,7 @@ test('countTokens quote remains available while paid generation is disabled',asy
 test('quote checks exact model metadata before any transcript count and never treats it as generation success',async()=>{
  assert.equal(paidExecutionEnabled({ENABLE_PAID_SUMMARY:'true',PAID_SUMMARY_EXECUTION_APPROVED:'true',PAID_TAX_MAX_BPS_VERIFIED:'true',ALLOW_PAID_API:'false'}),false);
  const withoutConsent=await fixture();try{let metadataCalls=0;withoutConsent.env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel=async()=>{metadataCalls++;throw Error('should not run');};const denied=await withoutConsent.call('quote','POST',{projectMode:'PAID_APPROVED'});assert.equal((await denied.json()).error.code,'TWO_PASS_COUNT_CONSENT_REQUIRED');assert.equal(metadataCalls,0);}finally{withoutConsent.db.close();}
- for(const bad of [()=>{throw Error('provider failure');},()=>({name:'models/other',supportedGenerationMethods:['generateContent','countTokens'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),()=>({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['countTokens'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),()=>({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['generateContent'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),()=>({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['generateContent','countTokens'],inputTokenLimit:1,outputTokenLimit:65_536})]){
+ for(const bad of [()=>{throw Error('provider failure');},()=>({name:'models/other',supportedGenerationMethods:['generateContent','countTokens'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),()=>({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['countTokens'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),()=>({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['generateContent','countTokens'],inputTokenLimit:1,outputTokenLimit:65_536})]){
   const f=await fixture();try{let counts=0;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel=bad;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async()=>{counts++;return 300;};
    const denied=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal((await denied.json()).error.code,'TWO_PASS_MODEL_UNAVAILABLE');assert.equal(counts,0);assert.equal(f.sends,0);assert.equal(f.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);
   }finally{f.db.close();}
@@ -68,6 +68,105 @@ test('a non-successful model metadata HTTP response stores no quote or call',asy
  const f=await fixture(),fetchBefore=globalThis.fetch;try{f.env.GEMINI_TWO_PASS_TEST_PROVIDER=undefined;let requests=0;globalThis.fetch=async()=>{requests++;return new Response('{"error":"denied"}',{status:403});};
   const denied=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal((await denied.json()).error.code,'TWO_PASS_MODEL_UNAVAILABLE');assert.equal(requests,1);assert.equal(f.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);assert.equal(f.sends,0);
  }finally{globalThis.fetch=fetchBefore;f.db.close();}
+});
+test('provider timeouts stop quote before persistence without a generation or automatic retry',async()=>{
+ const originalFetch=globalThis.fetch,originalTimeout=AbortSignal.timeout;
+ try{
+  const deadlines=[];
+  AbortSignal.timeout=ms=>{deadlines.push(ms);return AbortSignal.abort();};
+  const metadata=await fixture();
+  try{
+   metadata.env.GEMINI_TWO_PASS_TEST_PROVIDER=undefined;
+   globalThis.fetch=async(_url,options)=>{assert.equal(options.signal.aborted,true);throw Error('simulated timeout');};
+   const response=await metadata.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
+   assert.equal((await response.json()).error.code,'TWO_PASS_MODEL_UNAVAILABLE');
+   assert.equal(metadata.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);
+   assert.equal(metadata.sends,0);
+  }finally{metadata.db.close();}
+  const count=await fixture();
+  try{
+   count.env.GEMINI_TWO_PASS_TEST_PROVIDER=undefined;
+   let requests=0;
+   globalThis.fetch=async(url,options)=>{requests++;assert.equal(options.signal.aborted,true);if(!url.includes(':countTokens'))return new Response(JSON.stringify({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['generateContent','countTokens'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),{headers:{'content-type':'application/json'}});throw Error('simulated timeout');};
+   const response=await count.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
+   assert.equal((await response.json()).error.code,'TWO_PASS_COUNT_UNAVAILABLE');
+   assert.equal(requests,2);assert.equal(count.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);assert.equal(count.sends,0);
+  }finally{count.db.close();}
+  assert.deepEqual(deadlines,[15000,15000,90000]);
+ }finally{globalThis.fetch=originalFetch;AbortSignal.timeout=originalTimeout;}
+});
+test('metadata needs generation support; the actual countTokens response proves counting support',async()=>{
+ const f=await fixture(),fetchBefore=globalThis.fetch,infoBefore=console.info,events=[];
+ try{
+  f.env.GEMINI_TWO_PASS_TEST_PROVIDER=undefined;console.info=line=>events.push(JSON.parse(line));
+  let requests=0;globalThis.fetch=async(url)=>{requests++;return url.includes(':countTokens')?new Response(JSON.stringify({totalTokens:300}),{headers:{'content-type':'application/json'}}):new Response(JSON.stringify({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['generateContent'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}),{headers:{'content-type':'application/json'}});};
+  const response=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
+  assert.equal(response.status,200,await response.clone().text());assert.equal(requests,2);assert.equal((await response.json()).quote.inputTokensCounted,300);assert.equal(f.sends,0);
+  assert.deepEqual(events.map(item=>[item.stage,item.outcome]),[['RECEIVED','STARTED'],['MODEL_LOOKUP','STARTED'],['MODEL_LOOKUP','SUCCEEDED'],['COUNT_TOKENS','STARTED'],['COUNT_TOKENS','SUCCEEDED'],['QUOTE_SAVE','STARTED'],['QUOTE_SAVE','SUCCEEDED']]);
+  assert.equal(new Set(events.map(item=>item.correlationId)).size,1);
+  for(const event of events){assert.deepEqual(Object.keys(event).sort(),['at','code','correlationId','event','outcome','stage']);assert.ok(!JSON.stringify(event).includes('OFFLINE_TWO_PASS_KEY'));}
+ }finally{globalThis.fetch=fetchBefore;console.info=infoBefore;f.db.close();}
+});
+test('abort after countTokens response headers but before the JSON body blocks the quote',async()=>{
+ const f=await fixture(),fetchBefore=globalThis.fetch,timeoutBefore=AbortSignal.timeout,infoBefore=console.info,deadlines=[],events=[];
+ try{
+  f.env.GEMINI_TWO_PASS_TEST_PROVIDER=undefined;console.info=line=>events.push(JSON.parse(line));
+  AbortSignal.timeout=ms=>{const controller=new AbortController();deadlines.push({ms,controller});return controller.signal;};
+  globalThis.fetch=async(url,options)=>{
+   if(!url.includes(':countTokens'))return new Response(JSON.stringify({name:`models/${TWO_PASS_MODEL}`,supportedGenerationMethods:['generateContent'],inputTokenLimit:1_048_576,outputTokenLimit:65_536}));
+   assert.equal(options.signal.aborted,false);
+   return {ok:true,json:()=>new Promise((_resolve,reject)=>{options.signal.addEventListener('abort',()=>reject(Error('body aborted')),{once:true});queueMicrotask(()=>deadlines.at(-1).controller.abort());})};
+  };
+  const response=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
+  assert.equal((await response.json()).error.code,'TWO_PASS_COUNT_UNAVAILABLE');assert.deepEqual(deadlines.map(item=>item.ms),[15000,90000]);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);assert.equal(f.sends,0);
+  assert.equal(events.at(-1).stage,'COUNT_TOKENS');assert.equal(events.at(-1).outcome,'FAILED');assert.equal(events.at(-1).code,'TWO_PASS_COUNT_UNAVAILABLE');
+ }finally{globalThis.fetch=fetchBefore;AbortSignal.timeout=timeoutBefore;console.info=infoBefore;f.db.close();}
+});
+test('a pending count is reserved once across concurrent POSTs and survives a new status read',async()=>{
+ const f=await fixture();try{
+  let release,entered;const started=new Promise(resolve=>{entered=resolve;});let counts=0;
+  f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async()=>{counts++;entered();return new Promise(resolve=>{release=resolve;});};
+  const body={projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true};
+  const first=f.call('quote','POST',body);await started;
+  const pending=await(await f.call('status')).json();assert.equal(pending.state,'QUOTE_PENDING');assert.equal(pending.quoteAttempt.state,'COUNT_SENT');
+  const second=await f.call('quote','POST',body);assert.equal((await second.json()).error.code,'TWO_PASS_QUOTE_ATTEMPT_EXISTS');assert.equal(counts,1);
+  release(300);assert.equal((await first).status,200);assert.equal((await(await f.call('status')).json()).state,'QUOTED');
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().n,1);
+  const proof=JSON.parse(f.db.prepare("SELECT result_json FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().result_json);
+  assert.equal(proof.ownerId,'owner');assert.equal(proof.jobId,f.id);assert.equal(proof.model,TWO_PASS_MODEL);assert.equal(proof.countedTokens,300);assert.ok(proof.sourceSha256&&proof.credentialGeneration&&proof.requestSha256);
+ }finally{f.db.close();}
+});
+test('quote reservation before-commit sends nothing; committed ack loss reads back the same reservation',async()=>{
+ for(const fault of ['before-commit','ack-loss']){
+  const f=await fixture();try{
+   const base=f.env.DB;let counts=0;const count=f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens;
+   f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async(...args)=>{counts++;return count(...args);};
+   f.env.DB={prepare(sql){const prepared=base.prepare(sql);if(!sql.startsWith('INSERT OR IGNORE INTO yta_operations'))return prepared;return {bind(...args){const bound=prepared.bind(...args);return {run:async()=>{if(fault==='before-commit')throw Error('before commit');await bound.run();throw Error('ack lost');}};}};}};
+   const response=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
+   assert.equal((await response.json()).state,fault==='ack-loss'?'QUOTED':undefined);
+   assert.equal(counts,fault==='ack-loss'?1:0);
+   assert.equal(f.db.prepare("SELECT count(*) AS n FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().n,fault==='ack-loss'?1:0);
+  }finally{f.db.close();}
+ }
+});
+test('uncertain count keeps its server reservation without a timed reset or another provider call',async()=>{
+ const f=await fixture();try{
+  let counts=0;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async()=>{counts++;throw Error('uncertain provider result');};
+  const body={projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true};
+  assert.equal((await(await f.call('quote','POST',body)).json()).error.code,'LIVE_INTERNAL_ERROR');
+  const pending=await(await f.call('status')).json();assert.equal(pending.state,'QUOTE_PENDING');assert.equal(pending.quoteAttempt.state,'COUNT_SENT');
+  const repeat=await f.call('quote','POST',body);assert.equal((await repeat.json()).error.code,'TWO_PASS_QUOTE_ATTEMPT_EXISTS');assert.equal(counts,1);
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM yta_gemini_two_pass_jobs').get().n,0);
+ }finally{f.db.close();}
+});
+test('the earlier unrecorded production attempt remains blocked rather than being treated as unsent',async()=>{
+ const f=await fixture('a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9');try{
+  assert.equal((await(await f.call('status')).json()).state,'QUOTE_UNCERTAIN_LEGACY');
+  const denied=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
+  assert.equal((await denied.json()).error.code,'TWO_PASS_LEGACY_QUOTE_UNCERTAIN');assert.equal(f.sends,0);
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().n,0);
+ }finally{f.db.close();}
 });
 test('key changes and historical quotes without bound model proof cannot be approved',async()=>{
  const f=await fixture();try{
