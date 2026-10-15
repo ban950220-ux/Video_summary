@@ -89,6 +89,11 @@ function view(row,calls){
 async function allCalls(env,id){return (await env.DB.prepare('SELECT * FROM yta_gemini_two_pass_calls WHERE job_id=? ORDER BY phase').bind(id).all()).results||[];}
 const quoteAttemptId=id=>id+':gemini-two-pass-quote';
 async function quoteAttempt(env,id){return env.DB.prepare('SELECT state,result_json,created_at,error_code FROM yta_operations WHERE id=? AND provider=?').bind(quoteAttemptId(id),'gemini-two-pass-quote').first();}
+export async function geminiQuoteAvailability(env,id){
+ if(id===LEGACY_UNCERTAIN_QUOTE_JOB_ID)return {blocked:true,state:'QUOTE_UNCERTAIN_LEGACY'};
+ const attempt=await quoteAttempt(env,id);
+ return attempt&&attempt.state!=='QUOTE_SAVED'?{blocked:true,state:'QUOTE_PENDING',stage:attempt.state}:{blocked:false,state:'AVAILABLE'};
+}
 async function reserveQuote(env,id,scope,requestHash,credential,mode,row,attemptId){
  const attempt={attemptId,ownerId:'owner',jobId:id,sourceSha256:scope.sourceHash,auditSha256:scope.auditHash,requestSha256:requestHash,model:TWO_PASS_MODEL,credentialGeneration:credential.generation,projectMode:mode};
  const encoded=JSON.stringify(attempt),idempotencyId=quoteAttemptId(id),stamp=now();

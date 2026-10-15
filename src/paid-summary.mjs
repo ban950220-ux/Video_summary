@@ -1,3 +1,4 @@
+import {geminiQuoteAvailability} from './gemini-two-pass.mjs';
 import {ProviderError} from './adapters.mjs';
 import {capacityIdentity} from './observed-capacity.mjs';
 import {completeSource,promptAudit,summaryInputAudit} from './groq-summary.mjs';
@@ -83,6 +84,7 @@ export async function handlePaidSummaryAction(request,env,{id,action,job,sourceO
   return json({job:await ownedJob(env,id),persisted:true,providerCalled:false,settlementUnchanged:true,costReconciliation:receipt.reservation_state==='SETTLED'?'SETTLED_PRIOR':'REVIEW_REQUIRED'});
  }
  if(action==='paid-summary-quote'&&request.method==='POST'){
+  if((await geminiQuoteAvailability(env,id)).blocked)fail('TWO_PASS_QUOTE_UNCERTAIN');
   if(job.report)fail('SUMMARY_ALREADY_EXISTS');const current=await scope(env,job,sourceOf);return json(await issuedQuote(env,id,job,current));
  }
  if(action==='paid-summary-approve'&&request.method==='POST'){

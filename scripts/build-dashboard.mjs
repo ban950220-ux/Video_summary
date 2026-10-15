@@ -1,7 +1,7 @@
 // Dependency-free bundler for this fixed, reviewed module graph.
 // Produces a single Cloudflare Dashboard ESM Worker including protected assets.
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
-const names=['core','vault','access','groq-summary-contract','adapters','provider-keys','audio','report','summary-plan','observed-capacity','groq-year-recovery','groq-complete-synthesis','groq-usage-reconciliation','groq-d1-budget','groq-synthesis-execution','groq-summary','paid-summary-contract','paid-summary-budget','paid-summary-trial','paid-summary-receipt','paid-summary-adapter','paid-summary','two-pass-windows','gemini-two-pass-contract','gemini-two-pass','live','worker','site-worker'];
+const names=['core','vault','access','groq-summary-contract','adapters','provider-keys','audio','report','summary-plan','observed-capacity','groq-year-recovery','groq-complete-synthesis','groq-usage-reconciliation','groq-d1-budget','groq-synthesis-execution','groq-summary','paid-summary-contract','paid-summary-budget','paid-summary-trial','paid-summary-receipt','paid-summary-adapter','two-pass-windows','gemini-two-pass-contract','gemini-two-pass','paid-summary','live','worker','site-worker'];
 let output='// Generated from v0.7 source. No secrets. Live calls require owner free-account grants.\n';
 for(const name of names){
   let source=readFileSync(new URL('../src/'+name+'.mjs',import.meta.url),'utf8');
