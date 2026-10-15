@@ -40,8 +40,8 @@ const baselineObservability={
 };
 
 export const approvedRemoteBaseline={
-  activeVersionId:'d76827c7-2db4-4935-89e6-a93245e8c56a',
-  sourceCommit:'be8b92647684f77ce25fd221c2f8c1ba4eb1f639',
+  activeVersionId:'3e61d4b6-99ed-4c95-a30a-35d2c654db94',
+  sourceCommit:'e7dc354c2a1e7c6ac72d670928c28f4341585146',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:true,
