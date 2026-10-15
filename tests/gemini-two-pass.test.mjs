@@ -5,11 +5,117 @@ import {readFileSync} from 'node:fs';
 import {routeApi} from '../src/worker.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 import {assertRemainingApprovalBudget} from '../src/gemini-two-pass.mjs';
+import {promptAudit} from '../src/groq-summary.mjs';
+import {capacityIdentity} from '../src/observed-capacity.mjs';
 import {paidExecutionEnabled} from '../src/paid-summary-contract.mjs';
 import {sourceSnapshot,summaryRequest,reviewRequest,validateReview,costCeiling,countTokensRequest,TWO_PASS_MODEL,TWO_PASS_OUTPUT_CAP,sha} from '../src/gemini-two-pass-contract.mjs';
 import {windowedSummarySchema} from '../src/two-pass-windows.mjs';
 
 const invalidShapes=JSON.parse(readFileSync(new URL('./fixtures/two-pass-invalid-shapes.json',import.meta.url),'utf8'));
+
+const legacyId='a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9';
+const quoteBody={projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true};
+async function recoveryGrant(f){
+ const stored=f.db.prepare('SELECT * FROM yta_sources WHERE job_id=?').get(f.id),job=f.db.prepare('SELECT * FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(job.audit_json),source={...stored,segments:JSON.parse(stored.segments_json)},prompt=promptAudit({...job,audit});
+ const legacyEvidence={route:'paid-summary-quote',status:409,at:'2026-10-14T15:36:48.469Z',workerVersion:'02b69af3-2f39-4cb6-8ae3-9caf9fbbf456',sourceCommit:'aedf2339b752a98182a2db43232ff4699a150e8e',residualUncertainty:'SAMPLED_LOGS_CANNOT_EXCLUDE_OTHER_REQUESTS',observedQuoteOperations:0,observedTwoPassJobs:0};
+ const grant={kind:'LEGACY_UNCERTAIN_NEW_QUOTE_ONCE_V1',approvalId:'Sentinel_48e6e35a627081918873a47c108571dd',ownerId:'owner',jobId:f.id,model:TWO_PASS_MODEL,projectMode:'PAID_APPROVED',maxMetadataCalls:1,maxCountCalls:1,maxGenerationCalls:0,maxRetries:0,countTokensNoChargeVerified:true,countTokensMaxMicroUsd:0,countTokensBillingEvidence:'OFFLINE_MOCK_ONLY_NOT_PRODUCTION_BILLING_EVIDENCE',residualUncertaintyAccepted:true,confirmFullTranscriptSentToGoogleForTokenCount:true,approvedAt:Date.now()-1,expiresAt:Date.now()+600000,sourceSha256:await sha(JSON.stringify([sourceSnapshot(source),source.provenance,audit.audioFileSha256])),auditSha256:await sha(JSON.stringify(prompt)),firstRequestSha256:await sha(JSON.stringify(summaryRequest(source,prompt))),credentialGeneration:await capacityIdentity(f.env,'gemini'),legacyEvidence,legacyEvidenceSha256:await sha(JSON.stringify(legacyEvidence))};
+ f.env.GEMINI_LEGACY_QUOTE_RECOVERY_JSON=JSON.stringify(grant);return grant;
+}
+
+test('legacy recovery preserves evidence, permits one new quote, and grants no generation',async()=>{
+ const f=await fixture(legacyId);try{
+  const grant=await recoveryGrant(f);let metadata=0,counts=0;const p=f.env.GEMINI_TWO_PASS_TEST_PROVIDER,model=p.getModel;p.getModel=async(...args)=>{metadata++;return model(...args);};p.countTokens=async()=>{counts++;return 300;};
+  f.db.exec(readFileSync(new URL('../migrations/0008_paid_summary_budget.sql',import.meta.url),'utf8'));
+  f.db.prepare("INSERT INTO yta_paid_summary_approvals VALUES(?,?,'owner',?,?,?,?,'historical',?,100000,50000,2,?,'APPROVED',?)").run('old-paid',f.id,grant.sourceSha256,'a'.repeat(64),'{}',TWO_PASS_MODEL,grant.credentialGeneration,Date.now()+600000,new Date().toISOString());
+  assert.equal((await(await f.call('status')).json()).state,'LEGACY_NEW_QUOTE_ONCE_READY');
+  const response=await f.call('quote','POST',quoteBody);assert.equal(response.status,200,await response.clone().text());const quote=(await response.json()).quote;
+  const attempt=f.db.prepare("SELECT * FROM yta_operations WHERE provider='gemini-two-pass-quote'").get();assert.equal(attempt.state,'QUOTE_SAVED');assert.deepEqual(JSON.parse(attempt.result_json).recoveryApproval,grant);
+  assert.equal((await f.call('run','POST',{phase:0,quoteSha256:quote.quoteSha256,confirmSeparatePaidApproval:true})).status,409);assert.equal(counts,1);assert.equal(f.db.prepare('SELECT state FROM yta_gemini_two_pass_jobs').get().state,'QUOTED');assert.equal(f.db.prepare('SELECT state FROM yta_paid_summary_approvals').get().state,'APPROVED');
+  assert.equal((await f.call('quote','POST',quoteBody)).status,409);
+  await f.call('cancel','POST',{});assert.equal((await f.call('quote','POST',quoteBody)).status,409);
+  assert.equal(metadata,1);assert.equal(counts,1);assert.equal(f.sends,0);
+ }finally{f.db.close();}
+});
+
+test('legacy grant rejects mismatched bindings or evidence before any provider call',async()=>{
+ for(const field of ['countTokensNoChargeVerified','countTokensMaxMicroUsd','countTokensBillingEvidence','jobId','ownerId','approvalId','sourceSha256','auditSha256','firstRequestSha256','credentialGeneration','legacyEvidenceSha256','expiresAt']){
+  const f=await fixture(legacyId);try{const grant=await recoveryGrant(f);grant[field]=field==='expiresAt'?Date.now()-1:field==='countTokensBillingEvidence'?'':'x';f.env.GEMINI_LEGACY_QUOTE_RECOVERY_JSON=JSON.stringify(grant);let calls=0;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel=async()=>{calls++;throw Error('forbidden');};assert.equal((await f.call('quote','POST',quoteBody)).status,409,field);assert.equal(calls,0,field);assert.equal(f.sends,0);}finally{f.db.close();}
+ }
+});
+
+test('legacy concurrent requests and failed count cannot reserve or dispatch twice',async()=>{
+ const f=await fixture(legacyId);try{
+  await recoveryGrant(f);let models=0,counts=0;const p=f.env.GEMINI_TWO_PASS_TEST_PROVIDER,model=p.getModel;p.getModel=async(...args)=>{models++;return model(...args);};p.countTokens=async()=>{counts++;throw Error('simulated timeout');};
+  const responses=await Promise.all([f.call('quote','POST',quoteBody),f.call('quote','POST',quoteBody)]);assert.deepEqual(responses.map(r=>r.status),[500,409]);
+  assert.equal((await f.call('quote','POST',quoteBody)).status,409);assert.equal(models,1);assert.equal(counts,1);assert.equal(f.sends,0);
+  assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().state,'COUNT_SENT');
+ }finally{f.db.close();}
+});
+
+test('legacy dispatch checks source, audit, key, cancellation and expiry at the SQL boundary',async()=>{
+ for(const mutation of ['source','audit','key','cancel','expiry','flags']){
+  const f=await fixture(legacyId);const clock=Date.now;try{
+   const grant=await recoveryGrant(f);let models=0;const prepare=f.DB.prepare.bind(f.DB);let injected=false;
+   f.DB.prepare=sql=>{if(!injected&&sql.startsWith('UPDATE yta_operations SET state=? WHERE id=?')){injected=true;if(mutation==='source')f.db.prepare("UPDATE yta_sources SET raw='changed'").run();if(mutation==='audit')f.db.prepare("UPDATE jobs SET audit_json='{}'").run();if(mutation==='key')f.db.prepare("UPDATE provider_credentials SET ciphertext_b64='changed'").run();if(mutation==='cancel')delete f.env.GEMINI_LEGACY_QUOTE_RECOVERY_JSON;if(mutation==='expiry')Date.now=()=>grant.expiresAt+1;if(mutation==='flags')f.env.ENABLE_GEMINI_TWO_PASS='false';}return prepare(sql);};
+   f.env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel=async()=>{models++;throw Error('forbidden');};
+   assert.equal((await f.call('quote','POST',quoteBody)).status,409,mutation);assert.equal(models,0,mutation);assert.equal(f.sends,0);
+  }finally{Date.now=clock;f.db.close();}
+ }
+});
+
+test('legacy faults preserve one approval and cannot repeat external work',async()=>{
+ for(const fault of ['reserve-before','reserve-ack','model-ack','count-ack','save-before','saved-ack']){
+  const f=await fixture(legacyId);try{
+   await recoveryGrant(f);let models=0,counts=0;const provider=f.env.GEMINI_TWO_PASS_TEST_PROVIDER,model=provider.getModel;provider.getModel=async(...args)=>{models++;return model(...args);};provider.countTokens=async()=>{counts++;return 300;};
+   const prepare=f.DB.prepare.bind(f.DB);let fired=false;
+   f.DB.prepare=sql=>{const wrap=(statement,args=[])=>new Proxy(statement,{get(target,key){if(key==='bind')return(...next)=>wrap(target.bind(...next),next);if(key==='run')return async()=>{
+    const match=!fired&&(fault.startsWith('reserve-')&&sql.startsWith('INSERT OR IGNORE INTO yta_operations')||fault==='model-ack'&&sql.startsWith('UPDATE yta_operations SET state=? WHERE id=?')&&args[0]==='MODEL_LOOKUP'||fault==='count-ack'&&sql.startsWith('UPDATE yta_operations SET state=? WHERE id=?')&&args[0]==='COUNT_SENT'||fault==='save-before'&&sql.startsWith('INSERT OR IGNORE INTO yta_gemini_two_pass_jobs')||fault==='saved-ack'&&sql.startsWith('UPDATE yta_operations SET state=?,result_json=?')&&args[0]==='QUOTE_SAVED');
+    if(match){fired=true;if(fault.endsWith('before'))throw Error('before commit');const result=await target.run();throw Error('ack loss');}return target.run();};const value=target[key];return typeof value==='function'?value.bind(target):value;}});return wrap(prepare(sql));};
+   const first=await f.call('quote','POST',quoteBody);assert.equal(fired,true,fault);
+   if(fault==='reserve-before'){assert.equal(models,0);assert.equal(counts,0);assert.equal(f.db.prepare("SELECT count(*) n FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().n,0);}
+   else{const again=await f.call('quote','POST',quoteBody);assert.equal(again.status,409,fault);assert.equal(models,fault==='model-ack'?0:1,fault);assert.equal(counts,['model-ack','count-ack'].includes(fault)?0:1,fault);assert.ok(JSON.parse(f.db.prepare("SELECT result_json FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().result_json).recoveryApproval);}
+   if(['reserve-ack','saved-ack'].includes(fault))assert.equal(first.status,200,await first.clone().text());assert.equal(f.sends,0);
+  }finally{f.db.close();}
+ }
+});
+
+test('legacy metadata wait rechecks authorization and scope before sending the transcript',async()=>{
+ for(const mutation of ['source','audit','key','cancel','expiry','flags']){
+  const f=await fixture(legacyId);const clock=Date.now;try{
+   const grant=await recoveryGrant(f);let counts=0;const provider=f.env.GEMINI_TWO_PASS_TEST_PROVIDER,model=provider.getModel;
+   provider.getModel=async(...args)=>{if(mutation==='source')f.db.prepare("UPDATE yta_sources SET raw='changed'").run();if(mutation==='audit')f.db.prepare("UPDATE jobs SET audit_json='{}'").run();if(mutation==='key')f.db.prepare("UPDATE provider_credentials SET ciphertext_b64='changed'").run();if(mutation==='cancel')delete f.env.GEMINI_LEGACY_QUOTE_RECOVERY_JSON;if(mutation==='expiry')Date.now=()=>grant.expiresAt+1;if(mutation==='flags')f.env.ENABLE_GEMINI_TWO_PASS='false';return model(...args);};provider.countTokens=async()=>{counts++;return 300;};
+   assert.equal((await f.call('quote','POST',quoteBody)).status,409,mutation);assert.equal(counts,0,mutation);assert.equal(f.sends,0);
+  }finally{Date.now=clock;f.db.close();}
+ }
+});
+
+test('legacy persisted cancellation during metadata stops count and preserves approval evidence',async()=>{
+ const f=await fixture(legacyId);try{
+  const grant=await recoveryGrant(f);let counts=0;const provider=f.env.GEMINI_TWO_PASS_TEST_PROVIDER,model=provider.getModel;
+  provider.getModel=async(...args)=>{const cancelled=await f.call('cancel','POST',{});assert.equal(cancelled.status,200,await cancelled.clone().text());return model(...args);};provider.countTokens=async()=>{counts++;return 300;};
+  assert.equal((await f.call('quote','POST',quoteBody)).status,409);assert.equal(counts,0);assert.equal(f.sends,0);
+  const attempt=f.db.prepare("SELECT state,result_json FROM yta_operations WHERE provider='gemini-two-pass-quote'").get();assert.equal(attempt.state,'RECOVERY_CANCELLED');assert.deepEqual(JSON.parse(attempt.result_json).recoveryApproval,grant);
+  assert.equal((await f.call('quote','POST',quoteBody)).status,409);
+ }finally{f.db.close();}
+});
+
+test('legacy metadata failure consumes the single attempt without sending the transcript',async()=>{
+ const f=await fixture(legacyId);try{
+  await recoveryGrant(f);let models=0,counts=0;f.env.GEMINI_TWO_PASS_TEST_PROVIDER.getModel=async()=>{models++;throw Error('metadata timeout');};f.env.GEMINI_TWO_PASS_TEST_PROVIDER.countTokens=async()=>{counts++;return 300;};
+  assert.equal((await f.call('quote','POST',quoteBody)).status,409);assert.equal((await f.call('quote','POST',quoteBody)).status,409);assert.equal(models,1);assert.equal(counts,0);assert.equal(f.sends,0);
+  assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().state,'MODEL_LOOKUP');
+ }finally{f.db.close();}
+});
+
+test('legacy cancel with a stale missing quote cannot report success after quote persistence wins',async()=>{
+ const f=await fixture(legacyId);try{
+  await recoveryGrant(f);const prepare=f.DB.prepare.bind(f.DB);let pauseCancel=true,releaseCancel,releaseSave,sawCancel,sawSave;
+  const cancelRead=new Promise(resolve=>{sawCancel=resolve;}),savedWrite=new Promise(resolve=>{sawSave=resolve;}),cancelWait=new Promise(resolve=>{releaseCancel=resolve;}),saveWait=new Promise(resolve=>{releaseSave=resolve;});
+  f.DB.prepare=sql=>{const wrap=statement=>new Proxy(statement,{get(target,key){if(key==='bind')return(...args)=>wrap(target.bind(...args));if(key==='first'&&sql.startsWith('SELECT * FROM yta_gemini_two_pass_jobs'))return async()=>{const result=await target.first();if(pauseCancel){pauseCancel=false;sawCancel();await cancelWait;}return result;};if(key==='run'&&sql.startsWith('INSERT OR IGNORE INTO yta_gemini_two_pass_jobs'))return async()=>{const result=await target.run();sawSave();await saveWait;return result;};const value=target[key];return typeof value==='function'?value.bind(target):value;}});return wrap(prepare(sql));};
+  const cancelling=f.call('cancel','POST',{});await cancelRead;const quoting=f.call('quote','POST',quoteBody);await savedWrite;releaseCancel();const cancelled=await cancelling;assert.equal(cancelled.status,409,await cancelled.clone().text());releaseSave();const quoted=await quoting;assert.equal(quoted.status,200,await quoted.clone().text());
+  assert.equal(f.db.prepare('SELECT state FROM yta_gemini_two_pass_jobs').get().state,'QUOTED');assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().state,'QUOTE_SAVED');assert.equal(f.sends,0);
+ }finally{f.db.close();}
+});
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
 const report={summary:[{text:'첫 발언과 둘째 발언을 종합했다',evidenceIds:[1,2]}],chapters:[{windowKey:'w000',kind:'CONTENT',text:'첫 발언'+' '+'둘째 발언',evidenceIds:[1,2]}],claims:[],numbers:[],critical:[],conclusion:'발언 두 개를 요약했다'};

@@ -406,7 +406,8 @@ function showGeminiTwoPassChoice(job,target,requestId){
    host.append(el('p',{text:status.state==='QUOTE_PENDING'?'견적 계수 요청 기록이 남아 있습니다. 마지막 확인 단계: '+(status.quoteAttempt?.state??'UNKNOWN')+'. 결과가 불확실하므로 새 요청을 보내지 마세요.':'이 작업의 이전 견적 요청 결과가 불확실합니다. 저장 기록이 없어도 미전송으로 간주하지 않으며 새 요청은 차단됩니다.'}));
    const refresh=el('button',{className:'btn secondary small',text:'견적 상태 다시 조회'});refresh.onclick=()=>render().catch(showQuoteStatusFailure);host.append(refresh);return;
   }
-  if(status.state==='NOT_STARTED'){
+   if(status.state==='NOT_STARTED'||status.state==='LEGACY_NEW_QUOTE_ONCE_READY'){
+    if(status.state==='LEGACY_NEW_QUOTE_ONCE_READY')host.append(el('p',{className:'tip',text:'이전 요청의 불확실성과 감사 기록은 보존됩니다. 이 영상에 승인된 새 견적은 1회만 가능하며, 실패·시간 초과 후 자동 재시도하지 않습니다. 실제 생성은 새 견적 금액에 대한 별도 승인이 필요합니다.'}));
    if(quoteUncertain){
     host.append(el('p',{text:'견적 요청 결과가 불확실합니다. 전사가 Google에 전송되었을 수 있습니다. 이 화면에서 다시 요청하지 말고 상태만 조회하세요. '+quoteError}));
     const refresh=el('button',{className:'btn secondary small',text:'견적 상태 다시 조회'});refresh.onclick=()=>render().catch(showQuoteStatusFailure);host.append(refresh);return;
