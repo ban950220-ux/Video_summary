@@ -163,6 +163,11 @@ test('uncertain count keeps its server reservation without a timed reset or anot
 test('the earlier unrecorded production attempt remains blocked rather than being treated as unsent',async()=>{
  const f=await fixture('a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9');try{
   assert.equal((await(await f.call('status')).json()).state,'QUOTE_UNCERTAIN_LEGACY');
+  for(const file of ['../migrations/0008_paid_summary_budget.sql','../migrations/0009_paid_first_trial.sql','../migrations/0010_paid_summary_receipts.sql'])f.db.exec(readFileSync(new URL(file,import.meta.url),'utf8'));
+  const choice=await(await routeApi(request(f.path+'/summary-choice'),f.env)).json();
+  assert.equal(choice.geminiQuote.state,'QUOTE_UNCERTAIN_LEGACY');assert.equal(choice.geminiQuote.blocked,true);assert.equal(choice.paid.quoteIssueReady,false);
+  const oldQuote=await routeApi(request(f.path+'/paid-summary-quote','POST',{}),f.env);assert.equal((await oldQuote.json()).error.code,'TWO_PASS_QUOTE_UNCERTAIN');
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM yta_paid_summary_quotes').get().n,0);
   const denied=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
   assert.equal((await denied.json()).error.code,'TWO_PASS_LEGACY_QUOTE_UNCERTAIN');assert.equal(f.sends,0);
   assert.equal(f.db.prepare("SELECT count(*) AS n FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().n,0);

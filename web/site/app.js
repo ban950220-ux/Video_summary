@@ -440,10 +440,15 @@ function showGeminiTwoPassChoice(job,target,requestId){
  };
  render().catch(error=>{if(current())host.append(el('p',{text:'2회 경로 상태를 읽을 수 없습니다. 새 요청을 보내지 마세요. '+safeError(error)}));});
 }
+function showBlockedQuote(host,guard){
+ host.append(el('p',{className:'tip',text:'Gemini 견적 차단 상태: '+guard.state+'. 이전 요청의 결과가 불확실해 새 견적 요청을 차단했습니다. 저장 기록이 없다는 이유로 미전송으로 간주하지 않습니다.'}));
+ const blocked=el('button',{className:'btn secondary small',text:'견적 발급 차단 · 이전 요청 결과 불확실'});blocked.disabled=true;host.append(blocked);
+}
 function showSummaryChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),host=el('div');target.append(host);
  api('/api/jobs/'+job.id+'/summary-choice').then(quote=>{
   if(!current())return;
+  if(quote.geminiQuote?.blocked)showBlockedQuote(host,quote.geminiQuote);
   host.append(el('h2',{text:'저장된 전사의 남은 요약 선택'}),el('p',{text:quote.transcription.complete?'전사 완료 · 남은 전사 0조각 · 완료된 전사는 다시 청구하지 않습니다.':'전사 완료 상태 미확인 · 요약 견적을 확정할 수 없습니다.'}),el('p',{text:`검증된 원시 요약 ${quote.summary.savedRawStages}/${quote.summary.rawStages}단계 · 남은 원시 단계 ${quote.summary.remainingRawStages}. 구간별 요약 묶음은 중간 산출물이며, 요청한 결과는 전체 영상의 단일 종합 요약입니다.`}));
   if(quote.summary.recoveryReviewRequired)host.append(el('p',{className:'tip',text:'기존 Groq 복구 기록의 근거가 현재 자료와 일치하지 않아 그 구간을 완료로 계산하지 않았습니다. 기록은 보존됩니다. Groq 복구·진행은 별도로 검토하세요.'}));
   if(quote.transcription.complete&&!quote.summary.complete){const twoPass=el('button',{className:'btn secondary small',text:'Gemini 전체 전사 요약 + 원문 대조 2회 대안'});twoPass.onclick=()=>{if(current()){empty(target);showGeminiTwoPassChoice(job,target,requestId);}};host.append(twoPass);}
@@ -451,7 +456,7 @@ function showSummaryChoice(job,target,requestId){
   if(quote.transcription.complete&&!quote.summary.complete){const free=el('button',{className:'btn secondary small',text:'무료 범위 별도 검토·승인'});free.onclick=()=>{if(current()){empty(target);showGroqSummaryChoice(job,target,requestId);}};host.append(free);}
   host.append(el('h3',{text:'유료 전체 종합 요약'}),el('p',{text:`${quote.paid.executionEnabled?'별도 비용 승인 후에만 실행 가능':'현재 실행 비활성'} · ${quote.paid.reason} 모델 ${quote.paid.model??'미선정'} · 가격 버전 ${quote.paid.priceVersion??'미검증'} · 비용 승인은 모델 전체 입력/출력 한도 ${quote.paid.inputTokensUpper??'UNKNOWN'}/${quote.paid.outputTokensUpper??'UNKNOWN'}토큰 기준 · 요청 maxOutputTokens=8192의 thinking 과금 경계는 추가 검토 중 · 자동 재시도 ${quote.paid.maxRetries??'미승인'}회 · 승인 최대 ${quote.paid.maxMicroUsd??'미산정'} microUSD · ETA UNKNOWN.`}));
   if(quote.paid.costEstimate){const e=quote.paid.costEstimate;host.append(el('p',{text:`이 영상 요청 본문 ${e.requestBytes} UTF-8바이트(전사·지시문·스키마 포함). 토크나이저 미호출 가정 시 입력 ${e.inputEstimateLowTokens}–${e.inputEstimateHighTokens}, 출력·thinking ${e.outputEstimateLowTokens}–${e.outputEstimateHighTokens}토큰의 세전 비용 시나리오 $${(e.estimatedPreTaxLowMicroUsd/1_000_000).toFixed(6)}–$${(e.estimatedPreTaxHighMicroUsd/1_000_000).toFixed(6)}. 실제 비용은 UNKNOWN이며 시나리오 밖일 수 있습니다. 입력 바이트×${e.inputByteMultiplier}+${e.inputOverheadBytes}는 요청 크기 검사에만 쓰고, 금액 승인에는 더 높은 공식 모델 전체 한도를 적용합니다. 100% 예산 완충은 실제 세율이 아닙니다.`}));}
-  if(quote.transcription.complete&&!quote.summary.complete&&quote.paid.quoteIssueReady){const issue=el('button',{className:'btn secondary small',text:'서버 유료 견적 발급 · 제공자 호출 없음'});issue.onclick=async()=>{issue.disabled=true;try{const issued=await api('/api/jobs/'+job.id+'/paid-summary-quote',{method:'POST',body:{}});if(current()){empty(target);showPaidSummaryQuote(job,target,requestId,issued,quote.paid.executionEnabled);}}catch(error){if(current()){toast(safeError(error));try{const status=await api('/api/jobs/'+job.id+'/paid-summary-status');if(current()&&status.issuedQuote){empty(target);showPaidSummaryQuote(job,target,requestId,status.issuedQuote,quote.paid.executionEnabled);}}catch{host.append(el('p',{text:'견적 발급 상태를 읽기로 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다.'}));}}}};host.append(issue);}
+  if(quote.transcription.complete&&!quote.summary.complete&&!quote.geminiQuote?.blocked&&quote.paid.quoteIssueReady){const issue=el('button',{className:'btn secondary small',text:'서버 유료 견적 발급 · 제공자 호출 없음'});issue.onclick=async()=>{issue.disabled=true;try{const issued=await api('/api/jobs/'+job.id+'/paid-summary-quote',{method:'POST',body:{}});if(current()){empty(target);showPaidSummaryQuote(job,target,requestId,issued,quote.paid.executionEnabled);}}catch(error){if(current()){toast(safeError(error));try{const status=await api('/api/jobs/'+job.id+'/paid-summary-status');if(current()&&status.issuedQuote){empty(target);showPaidSummaryQuote(job,target,requestId,status.issuedQuote,quote.paid.executionEnabled);}}catch{host.append(el('p',{text:'견적 발급 상태를 읽기로 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다.'}));}}}};host.append(issue);}
   api('/api/jobs/'+job.id+'/paid-summary-status').then(status=>{if(!current())return;if(status.approval){host.append(el('p',{text:`저장된 유료 승인 ${status.approval.state} · 예약 ${status.reservations.map(item=>item.state).join(', ')||'없음'} · 자동 재시도 없음 · 제공자 청구액 UNKNOWN.`}));offerPaidExecution(job,target,requestId,host,status);offerPaidRevalidation(job,target,requestId,host,status);if(status.approval.state==='APPROVED'){const cancel=el('button',{className:'btn secondary small',text:'유료 승인 취소 · 이미 보낸 호출은 환불 아님'});cancel.onclick=async()=>{cancel.disabled=true;try{await api('/api/jobs/'+job.id+'/paid-summary-cancel',{method:'POST',body:{}});}catch(error){toast(safeError(error));}const after=await api('/api/jobs/'+job.id+'/paid-summary-status').catch(()=>null);if(current()){if(after)offerPaidExecution(job,target,requestId,host,after);host.append(el('p',{text:after?`승인 상태 ${after.approval?.state??'미확인'} · 예약 상태 ${after.reservations.map(item=>item.state).join(', ')||'없음'}`:'승인 취소 결과를 읽기로 확인할 수 없습니다.'}));}};host.append(cancel);}}}).catch(()=>{if(current())host.append(el('p',{text:'저장된 유료 승인·복구 상태를 읽을 수 없습니다. 상태를 다시 확인하세요.'}));});
   const gap=el('button',{className:'btn secondary small',text:'raw:8 보류 · 독립 구간 무료 진행 검토'});gap.onclick=()=>{if(current()){empty(target);showGroqGapChoice(job,target,requestId);}};host.append(gap);
   const bundle=el('button',{className:'btn secondary small',text:'구간별 묶음 별도 보기'});bundle.onclick=()=>{if(current()){empty(target);showGroqBundleChoice(job,target,requestId);}};host.append(bundle);
@@ -631,6 +636,15 @@ function showBoundaryReconcileChoice(job,target,requestId){
  };
  target.append(review);
 }
+async function showStoredTranscriptReview(job,target,requestId,error){
+ const current=()=>detailCurrent(job.id,requestId,target);if(!current())return;
+ empty(target);target.append(el('h2',{text:'저장 전사 원문 검토'}),el('p',{className:'tip',text:'기존 Groq 복구 기록과 현재 근거가 일치하지 않습니다. '+error.code+' · 전체 종합과 의미 검증은 완료되지 않았습니다. 아래 저장 전사는 별도로 읽을 수 있으며 복구 기록은 보존됩니다.'}));
+ try{
+  const data=await api('/api/jobs/'+encodeURIComponent(job.id)+'/source');if(!current())return;
+  const source=data.source;if(!Array.isArray(source?.segments))throw Error('저장 전사 구간을 읽을 수 없습니다.');
+  target.append(el('p',{text:'저장 전사 '+source.segments.length+'개 구간 · 원본 음성 정확성과 전체 의미 일치는 미검토 상태입니다.'}),el('pre',{text:source.segments.map(item=>`#${item.id} ${item.startMs}–${item.endMs}ms ${item.text}`).join('\n')}));
+ }catch(failure){if(current())target.append(el('p',{text:'저장 전사 조회 실패: '+safeError(failure)}));}
+}
 async function showCompleteSynthesisReview(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),path='/api/jobs/'+encodeURIComponent(job.id)+'/groq-summary-complete';
  try{
@@ -661,7 +675,7 @@ async function showCompleteSynthesisReview(job,target,requestId){
    catch(error){if(!current())return;try{const reopened=await api('/api/jobs/'+encodeURIComponent(job.id));if(!current())return;if(reopened.job?.report?.compositionMode==='groq-complete-synthesis-v1'&&reopened.job.report.coverageManifest?.manifestSha256===scope.manifestSha256){empty(target);showReport(reopened.job,target,true);return;}toast(safeError(error));save.disabled=false;}catch{target.append(el('p',{text:'저장 응답과 재조회가 모두 불확실합니다. 이력에서 다시 열어 저장 여부를 확인하세요.'}));}}
   };
   target.append(meaningLabel,save);
- }catch(error){if(current()){empty(target);target.append(el('p',{text:'전체 종합 검토 자료를 읽을 수 없습니다: '+safeError(error)}));}}
+ }catch(error){if(current()){if(['SUMMARY_RECOVERY_SCOPE_CHANGED','SUMMARY_RECOVERY_EVIDENCE_INVALID','SUMMARY_RECOVERY_NOT_FOUND'].includes(error.code)){await showStoredTranscriptReview(job,target,requestId,error);return;}empty(target);target.append(el('p',{text:'전체 종합 검토 자료를 읽을 수 없습니다: '+safeError(error)}));}}
 }
 async function showCompleteFailureReview(job,target,requestId,scope,path){
  const current=()=>detailCurrent(job.id,requestId,target);
