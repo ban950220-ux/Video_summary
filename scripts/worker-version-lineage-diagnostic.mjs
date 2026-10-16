@@ -1,7 +1,7 @@
 // Workers Builds diagnostic only. All requests are fixed Cloudflare GETs.
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {approvedRemoteBaseline,approvedPreDeployLineage} from './remote-state-policy.mjs';
+import {approvedRemoteBaseline,approvedPreDeployLineage,legacyQuoteRecoveryBinding,sameCanonical} from './remote-state-policy.mjs';
 
 const accountId='fe9d7e2a164274b1ff6cef150a75cb0b';
 const workerName='holy-rice-b914';
@@ -13,6 +13,15 @@ const message=`source-commit:${approvedRemoteBaseline.sourceCommit}`;
 const annotationKind=value=>value===message?'EXPECTED':value===undefined||value===null?'MISSING':'OTHER';
 const safeEtag=value=>typeof value==='string'&&etag.test(value)?value.toLowerCase():null;
 const assetBindingCount=value=>Array.isArray(value)?value.filter(item=>item?.name==='ASSETS'&&item?.type==='assets').length:null;
+const sourceKind=value=>value==='dash'?'DASHBOARD':value==='wrangler'?'WRANGLER':'OTHER';
+function knownBindingAddition(current,prior){
+ const present=current.resources?.bindings,original=prior.resources?.bindings;
+ if(!Array.isArray(present)||!Array.isArray(original)||present.length!==original.length+1)return false;
+ const names=present.map(item=>item?.name),oldNames=original.map(item=>item?.name);
+ if(new Set(names).size!==names.length||new Set(oldNames).size!==oldNames.length)return false;
+ const added=present.filter(item=>!oldNames.includes(item.name));
+ return added.length===1&&added[0].name===legacyQuoteRecoveryBinding&&added[0].type==='plain_text'&&typeof added[0].text==='string'&&added[0].text.length>0&&sameCanonical(present.filter(item=>item.name!==legacyQuoteRecoveryBinding).sort((a,b)=>a.name.localeCompare(b.name)),[...original].sort((a,b)=>a.name.localeCompare(b.name)));
+}
 
 export function safeWorkerLineageReport(deployments,current,prior){
  const latest=deployments?.[0];
@@ -21,16 +30,21 @@ export function safeWorkerLineageReport(deployments,current,prior){
  const currentEtag=safeEtag(current.resources?.script?.etag),priorEtag=safeEtag(prior.resources?.script?.etag);
  const currentAssets=assetBindingCount(current.resources?.bindings),priorAssets=assetBindingCount(prior.resources?.bindings);
  const priorAnnotation=oldDeployment?annotationKind(oldDeployment.annotations?.['workers/message']):'DEPLOYMENT_NOT_IN_PAGE';
+ const runtimeMetadataEqual=Boolean(current.resources?.script_runtime&&prior.resources?.script_runtime&&sameCanonical(current.resources.script_runtime,prior.resources.script_runtime));
+ const bindingAddition=knownBindingAddition(current,prior),pinnedEtag=Boolean(currentEtag&&priorEtag&&currentEtag===approvedPreDeployLineage.scriptEtag&&priorEtag===approvedPreDeployLineage.scriptEtag);
+ const provenance=sourceKind(latest.source)==='DASHBOARD'&&sourceKind(oldDeployment?.source)==='WRANGLER';
+ const sameKnownLineage=Boolean(pinnedEtag&&priorAnnotation==='EXPECTED'&&annotationKind(latest.annotations?.['workers/message'])==='OTHER'&&provenance&&runtimeMetadataEqual&&bindingAddition&&currentAssets===1&&priorAssets===1);
  return {
   kind:'WORKER_VERSION_LINEAGE_DIAGNOSTIC',readOnly:true,
   activeVersionId:approvedRemoteBaseline.activeVersionId,priorVersionId:expectedPriorVersionId,
   activeDeploymentSourceAnnotation:annotationKind(latest.annotations?.['workers/message']),
-  priorDeploymentSourceAnnotation:priorAnnotation,
-  activeScriptEtag:currentEtag??'UNAVAILABLE',priorScriptEtag:priorEtag??'UNAVAILABLE',
+  priorDeploymentSourceAnnotation:priorAnnotation,activeDeploymentSource:sourceKind(latest.source),priorDeploymentSource:sourceKind(oldDeployment?.source),
+  scriptEtagMatchesPinned:pinnedEtag,
   scriptContentEqual:currentEtag&&priorEtag?currentEtag===priorEtag:null,
+  runtimeMetadataEqual,knownBindingAddition:bindingAddition,
   activeAssetsBindingCount:currentAssets,priorAssetsBindingCount:priorAssets,
   assetSetIdentifier:'NOT_EXPOSED_BY_VERSION_GET',
-  codeLineageEvidence:currentEtag&&priorEtag&&currentEtag===priorEtag&&priorAnnotation==='EXPECTED'?'SAME_SCRIPT_AS_ANNOTATED_PRIOR':'UNVERIFIED',
+  codeLineageEvidence:sameKnownLineage?'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR':'UNVERIFIED',
   sourceAnnotationGuardMatch:annotationKind(latest.annotations?.['workers/message'])==='EXPECTED',
  };
 }

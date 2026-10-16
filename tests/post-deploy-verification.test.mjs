@@ -19,11 +19,12 @@ const remote=()=>({
   {name:'ENABLE_PAID_SUMMARY',type:'plain_text',text:'true'},{name:'PAID_SUMMARY_EXECUTION_APPROVED',type:'plain_text',text:'true'},
   {name:'PAID_FIRST_GENERATION_TRIAL_ENABLED',type:'plain_text',text:'true'},{name:'PAID_FIRST_TRIAL_USD_COST_REVIEWED',type:'plain_text',text:'true'},
   {name:'ENABLE_GEMINI_TWO_PASS',type:'secret_text'},{name:'GEMINI_TWO_PASS_ALLOWED_JOB_ID',type:'secret_text'},
+  {name:'GEMINI_LEGACY_QUOTE_RECOVERY_JSON',type:'plain_text',text:'PRIVATE_PRESERVED_SETTING'},
   {name:'ASSETS',type:'assets'},
  ],
 });
 const transport=()=>Object.assign(Error('PRIVATE_TRANSPORT_DETAIL'),{retryableReadTransport:true});
-const verify=(read,wait=async()=>{})=>verifyPostDeploy({token:'TEST_ONLY_TOKEN',ciMatchTag:'EXPECTED_TAG',deployed,read,wait});
+const verify=(read,wait=async()=>{})=>verifyPostDeploy({token:'TEST_ONLY_TOKEN',ciMatchTag:'EXPECTED_TAG',deployed,before:remote(),read,wait});
 
 test('post-deploy transport errors retry bounded GET reads without another upload',async()=>{
  let reads=0;const delays=[];
@@ -59,6 +60,11 @@ test('HTTP, invalid response, version drift and guard drift never retry',async()
   await assert.rejects(verify(async()=>{reads++;return read();},async()=>{waits++;}),error=>error.message.includes(code)&&!error.message.includes('PRIVATE_'),name);
   assert.equal(reads,1,name);assert.equal(waits,0,name);
  }
+});
+test('postcheck preserves the exact recovery variable without exposing its value',async()=>{
+ const changed=remote();changed.bindings.find(item=>item.name==='GEMINI_LEGACY_QUOTE_RECOVERY_JSON').text='PRIVATE_CHANGED_SETTING';
+ await assert.rejects(verify(async()=>changed),error=>error.message.includes('RECOVERY_SETTING_CHANGED')&&!error.message.includes('PRIVATE_'));
+ await assert.rejects(verifyPostDeploy({token:'TEST_ONLY_TOKEN',deployed,read:async()=>remote()}),/PRE_DEPLOY_RECOVERY_SETTING_UNAVAILABLE/);
 });
 
 test('only fetch transport exceptions receive the retry marker',async()=>{

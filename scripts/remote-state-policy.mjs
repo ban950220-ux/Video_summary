@@ -15,6 +15,7 @@ const valueAt=(obj,path)=>path.split('.').reduce((value,key)=>value?.[key],obj);
 const canonical=value=>JSON.stringify(value,(_,entry)=>entry&&typeof entry==='object'&&!Array.isArray(entry)?Object.fromEntries(Object.entries(entry).sort(([a],[b])=>a.localeCompare(b))):entry);
 export const sameCanonical=(left,right)=>canonical(left)===canonical(right);
 const fail=code=>{throw Error(`Remote deployment guard: ${code}`);};
+export const legacyQuoteRecoveryBinding='GEMINI_LEGACY_QUOTE_RECOVERY_JSON';
 const requiredBindingTypes=new Map([
   ['DB','d1'],['ACCESS_AUD','plain_text'],['ACCESS_TEAM_DOMAIN','plain_text'],
   ['ACCESS_OWNER_EMAIL','secret_text'],['KEY_ENCRYPTION_KEY_B64','secret_text'],
@@ -22,6 +23,7 @@ const requiredBindingTypes=new Map([
   ['ENABLE_PAID_SUMMARY','plain_text'],['PAID_SUMMARY_EXECUTION_APPROVED','plain_text'],
   ['PAID_FIRST_GENERATION_TRIAL_ENABLED','plain_text'],['PAID_FIRST_TRIAL_USD_COST_REVIEWED','plain_text'],
   ['ENABLE_GEMINI_TWO_PASS','secret_text'],['GEMINI_TWO_PASS_ALLOWED_JOB_ID','secret_text'],
+  [legacyQuoteRecoveryBinding,'plain_text'],
 ]);
 
 export function inspectBindingSet(bindings,{expectAssets=false}={}){
@@ -40,12 +42,13 @@ const baselineObservability={
 };
 
 export const approvedRemoteBaseline={
-  activeVersionId:'3e61d4b6-99ed-4c95-a30a-35d2c654db94',
-  sourceCommit:'e7dc354c2a1e7c6ac72d670928c28f4341585146',
+  activeVersionId:'6b2f1c56-7880-4515-aea0-786b51b4c625',
+  sourceCommit:'950cce886988803765616212ef657254b415bb9a',
   databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:true,
-  // Pin the owner-supplied current active version and source annotation.
+  // The dashboard settings version has no source annotation. The fixed
+  // predecessor and identical script ETag are verified before upload.
   // A fresh remote preflight still checks all settings before another upload;
   // omitted optional fields, null and [] remain distinct.
   remoteSettingsReviewed:true,
@@ -55,10 +58,10 @@ export const approvedRemoteBaseline={
   observability:baselineObservability,
 };
 export const approvedPreDeployLineage={
- activeVersionId:'ed1be321-ec54-4040-b4c9-9863e3a45cce',
- priorVersionId:'a797acea-a636-4db6-9c40-81fce4d111a1',
- sourceCommit:'18e5131c086f5c3c5d6733e80625fd55df9d34c4',
- scriptEtag:'b80d88d40cb4b7652a92a20ddfd96c7a91765ffc3fbc27b2a7b69b57db9b72b5',
+ activeVersionId:'6b2f1c56-7880-4515-aea0-786b51b4c625',
+ priorVersionId:'6a3fcf05-03fe-4d2b-911f-b43631a17a85',
+ sourceCommit:'950cce886988803765616212ef657254b415bb9a',
+ scriptEtag:'2efe59af35cb9398abc0f1d649cb94d354243f7e782c8e9eadd2d891e3bfa15d',
 };
 
 export function assertRemoteState(remote,baseline,{postDeploy=false,preDeployLineage=null}={}){
@@ -82,6 +85,7 @@ export function assertRemoteState(remote,baseline,{postDeploy=false,preDeployLin
   if(!shape.available)fail('BINDINGS_UNAVAILABLE');
   if(!shape.unique||!shape.complete)fail('BINDINGS_UNEXPECTED');
   const bindings=new Map(remote.bindings.map(binding=>[binding.name,binding]));
+  if(typeof bindings.get(legacyQuoteRecoveryBinding)?.text!=='string'||!bindings.get(legacyQuoteRecoveryBinding).text)fail('RECOVERY_SETTING_UNAVAILABLE');
   if(bindings.get('DB')?.id!==baseline.databaseId)fail('D1_MISMATCH');
   const expectedFlags={...baseline.runtimeFlags,...(postDeploy?{ENABLE_LIVE_FREE:'true'}:{})};
   if(!baseline.runtimeFlags||baseline.runtimeFlags.ALLOW_PAID_API!=='false'||baseline.runtimeFlags.SITE_DEPLOYED!=='true'||!['false','true'].includes(baseline.runtimeFlags.ENABLE_LIVE_FREE)||['ENABLE_PAID_SUMMARY','PAID_SUMMARY_EXECUTION_APPROVED','PAID_FIRST_GENERATION_TRIAL_ENABLED','PAID_FIRST_TRIAL_USD_COST_REVIEWED'].some(name=>baseline.runtimeFlags[name]!=='true'))fail('RUNTIME_FLAGS_BASELINE_INVALID');
@@ -93,7 +97,7 @@ export function assertRemoteState(remote,baseline,{postDeploy=false,preDeployLin
    const expected=approvedPreDeployLineage,evidence=preDeployLineage;
    // Script ETag proves only script content. Current assets and settings are
    // checked separately above; this exception never applies after upload.
-   if(baseline.activeVersionId!==expected.activeVersionId||baseline.sourceCommit!==expected.sourceCommit||remote.activeVersions[0].id!==expected.activeVersionId||typeof remote.deploymentMessage!=='string'||!evidence||evidence.activeVersionId!==expected.activeVersionId||evidence.priorVersionId!==expected.priorVersionId||evidence.activeDeploymentSourceAnnotation!=='OTHER'||evidence.priorDeploymentSourceAnnotation!=='EXPECTED'||evidence.activeScriptEtag!==expected.scriptEtag||evidence.priorScriptEtag!==expected.scriptEtag||evidence.scriptContentEqual!==true||evidence.codeLineageEvidence!=='SAME_SCRIPT_AS_ANNOTATED_PRIOR'||evidence.sourceAnnotationGuardMatch!==false)fail('SOURCE_COMMIT_MISMATCH');
+   if(baseline.activeVersionId!==expected.activeVersionId||baseline.sourceCommit!==expected.sourceCommit||remote.activeVersions[0].id!==expected.activeVersionId||typeof remote.deploymentMessage!=='string'||!evidence||evidence.activeVersionId!==expected.activeVersionId||evidence.priorVersionId!==expected.priorVersionId||evidence.activeDeploymentSourceAnnotation!=='OTHER'||evidence.priorDeploymentSourceAnnotation!=='EXPECTED'||evidence.activeDeploymentSource!=='DASHBOARD'||evidence.priorDeploymentSource!=='WRANGLER'||evidence.scriptEtagMatchesPinned!==true||evidence.scriptContentEqual!==true||evidence.runtimeMetadataEqual!==true||evidence.knownBindingAddition!==true||evidence.activeAssetsBindingCount!==1||evidence.priorAssetsBindingCount!==1||evidence.codeLineageEvidence!=='SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR'||evidence.sourceAnnotationGuardMatch!==false)fail('SOURCE_COMMIT_MISMATCH');
   }
   return true;
 }
