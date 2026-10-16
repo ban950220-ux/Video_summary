@@ -19,4 +19,4 @@ catch{throw Error('Production deploy: PRE_DEPLOY_BLOCKED: REMOTE_READ_OR_GUARD_F
 const childEnvironment=deploymentEnvironment(process.env,before.workerTag);
 const wrangler=resolve(root,'node_modules/wrangler/bin/wrangler.js');
 const deployed=runWranglerSafely(process.execPath,wrangler,root,childEnvironment,head);
-console.log(await verifyPostDeploy({token:process.env.CLOUDFLARE_API_TOKEN,ciMatchTag:process.env.WRANGLER_CI_MATCH_TAG,deployed}));
+console.log(await verifyPostDeploy({token:process.env.CLOUDFLARE_API_TOKEN,ciMatchTag:process.env.WRANGLER_CI_MATCH_TAG,deployed,before}));

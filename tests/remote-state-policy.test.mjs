@@ -20,11 +20,12 @@ const remote=()=>({workerName:'holy-rice-b914',environment:'production',activeVe
   {name:'PAID_FIRST_TRIAL_USD_COST_REVIEWED',type:'plain_text',text:'true'},
   {name:'ENABLE_GEMINI_TWO_PASS',type:'secret_text'},
   {name:'GEMINI_TWO_PASS_ALLOWED_JOB_ID',type:'secret_text'},
+  {name:'GEMINI_LEGACY_QUOTE_RECOVERY_JSON',type:'plain_text',text:'PRIVATE_PRESERVED_SETTING'},
 ]});
 
 test('guard baseline pins the verified active Worker version and source commit',()=>{
-  assert.equal(approvedRemoteBaseline.activeVersionId,'3e61d4b6-99ed-4c95-a30a-35d2c654db94');
-  assert.equal(approvedRemoteBaseline.sourceCommit,'e7dc354c2a1e7c6ac72d670928c28f4341585146');
+  assert.equal(approvedRemoteBaseline.activeVersionId,'6b2f1c56-7880-4515-aea0-786b51b4c625');
+  assert.equal(approvedRemoteBaseline.sourceCommit,'950cce886988803765616212ef657254b415bb9a');
   assert.equal(approvedRemoteBaseline.remoteSettingsReviewed,true);
   const observed=remote();observed.bindings.push({name:'ASSETS',type:'assets'});
   assert.equal(assertRemoteState(observed,approvedRemoteBaseline),true);
@@ -37,21 +38,21 @@ test('guard baseline pins the verified active Worker version and source commit',
   assert.throws(()=>assertRemoteState(previous,approvedRemoteBaseline),/SOURCE_COMMIT_MISMATCH/);
 });
 
-test('the one settings version accepts only the pinned annotated predecessor and exact script hash',()=>{
- const oldBaseline={...baseline,activeVersionId:approvedPreDeployLineage.activeVersionId,sourceCommit:approvedPreDeployLineage.sourceCommit};
- const state=remote();state.activeVersions[0].id=oldBaseline.activeVersionId;state.bindings.push({name:'ASSETS',type:'assets'});state.deploymentMessage='Dashboard settings update';
- const proof={activeVersionId:approvedPreDeployLineage.activeVersionId,priorVersionId:approvedPreDeployLineage.priorVersionId,activeDeploymentSourceAnnotation:'OTHER',priorDeploymentSourceAnnotation:'EXPECTED',activeScriptEtag:approvedPreDeployLineage.scriptEtag,priorScriptEtag:approvedPreDeployLineage.scriptEtag,scriptContentEqual:true,codeLineageEvidence:'SAME_SCRIPT_AS_ANNOTATED_PRIOR',sourceAnnotationGuardMatch:false,assetSetIdentifier:'NOT_EXPOSED_BY_VERSION_GET'};
- assert.throws(()=>assertRemoteState(state,oldBaseline),/SOURCE_COMMIT_MISMATCH/);
- assert.equal(assertRemoteState(state,oldBaseline,{preDeployLineage:proof}),true);
- const current=remote();current.bindings.push({name:'ASSETS',type:'assets'});current.deploymentMessage='Dashboard settings update';
- assert.throws(()=>assertRemoteState(current,baseline,{preDeployLineage:proof}),/SOURCE_COMMIT_MISMATCH/);
- for(const [key,value] of [['activeVersionId','other'],['priorVersionId','other'],['activeDeploymentSourceAnnotation','MISSING'],['priorDeploymentSourceAnnotation','OTHER'],['activeScriptEtag','a'.repeat(64)],['priorScriptEtag','a'.repeat(64)],['scriptContentEqual',false],['codeLineageEvidence','UNVERIFIED'],['sourceAnnotationGuardMatch',true]]){
-  assert.throws(()=>assertRemoteState(state,oldBaseline,{preDeployLineage:{...proof,[key]:value}}),/SOURCE_COMMIT_MISMATCH/,key);
+test('the PR9 settings version requires the pinned predecessor and unchanged script and settings',()=>{
+ const state=remote();state.bindings.push({name:'ASSETS',type:'assets'});state.deploymentMessage='Dashboard settings update';
+ const proof={activeVersionId:approvedPreDeployLineage.activeVersionId,priorVersionId:approvedPreDeployLineage.priorVersionId,activeDeploymentSourceAnnotation:'OTHER',priorDeploymentSourceAnnotation:'EXPECTED',activeDeploymentSource:'DASHBOARD',priorDeploymentSource:'WRANGLER',scriptEtagMatchesPinned:true,scriptContentEqual:true,runtimeMetadataEqual:true,knownBindingAddition:true,activeAssetsBindingCount:1,priorAssetsBindingCount:1,codeLineageEvidence:'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR',sourceAnnotationGuardMatch:false,assetSetIdentifier:'NOT_EXPOSED_BY_VERSION_GET'};
+ assert.throws(()=>assertRemoteState(state,baseline),/SOURCE_COMMIT_MISMATCH/);
+ assert.equal(assertRemoteState(state,baseline,{preDeployLineage:proof}),true);
+ const wrongBaseline={...baseline,sourceCommit:'e7dc354c2a1e7c6ac72d670928c28f4341585146'};
+ assert.throws(()=>assertRemoteState(state,wrongBaseline,{preDeployLineage:proof}),/SOURCE_COMMIT_MISMATCH/);
+ for(const [key,value] of [['activeVersionId','other'],['priorVersionId','other'],['activeDeploymentSourceAnnotation','MISSING'],['priorDeploymentSourceAnnotation','OTHER'],['activeDeploymentSource','OTHER'],['priorDeploymentSource','OTHER'],['scriptEtagMatchesPinned',false],['scriptContentEqual',false],['runtimeMetadataEqual',false],['knownBindingAddition',false],['activeAssetsBindingCount',0],['priorAssetsBindingCount',0],['codeLineageEvidence','UNVERIFIED'],['sourceAnnotationGuardMatch',true]]){
+  assert.throws(()=>assertRemoteState(state,baseline,{preDeployLineage:{...proof,[key]:value}}),/SOURCE_COMMIT_MISMATCH/,key);
  }
- const changed=structuredClone(state);changed.activeVersions[0].id='other';assert.throws(()=>assertRemoteState(changed,oldBaseline,{preDeployLineage:proof}),/ACTIVE_VERSION_MISMATCH/);
- changed.activeVersions[0].id=oldBaseline.activeVersionId;changed.bindings.find(item=>item.name==='DB').id='other';assert.throws(()=>assertRemoteState(changed,oldBaseline,{preDeployLineage:proof}),/D1_MISMATCH/);
- changed.bindings.find(item=>item.name==='DB').id=baseline.databaseId;changed.bindings.find(item=>item.name==='ACCESS_AUD').text='';assert.throws(()=>assertRemoteState(changed,oldBaseline,{preDeployLineage:proof}),/ACCESS_VARS_MISSING/);
- changed.bindings.find(item=>item.name==='ACCESS_AUD').text='test-audience-value';changed.bindings.pop();assert.throws(()=>assertRemoteState(changed,oldBaseline,{preDeployLineage:proof}),/BINDINGS_UNEXPECTED/);
+ const changed=structuredClone(state);changed.activeVersions[0].id='other';assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/ACTIVE_VERSION_MISMATCH/);
+ changed.activeVersions[0].id=baseline.activeVersionId;changed.bindings.find(item=>item.name==='DB').id='other';assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/D1_MISMATCH/);
+ changed.bindings.find(item=>item.name==='DB').id=baseline.databaseId;changed.bindings.find(item=>item.name==='ACCESS_AUD').text='';assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/ACCESS_VARS_MISSING/);
+ changed.bindings.find(item=>item.name==='ACCESS_AUD').text='test-audience-value';changed.bindings.pop();assert.throws(()=>assertRemoteState(changed,baseline,{preDeployLineage:proof}),/BINDINGS_UNEXPECTED/);
+ const missingSetting=structuredClone(state);missingSetting.bindings.find(item=>item.name==='GEMINI_LEGACY_QUOTE_RECOVERY_JSON').text='';assert.throws(()=>assertRemoteState(missingSetting,baseline,{preDeployLineage:proof}),/RECOVERY_SETTING_UNAVAILABLE/);
 });
 
 test('offline remote policy requires exactly one ASSETS before and after later deploys',()=>{

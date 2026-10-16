@@ -1,4 +1,4 @@
-import {approvedRemoteBaseline,assertRemoteState} from './remote-state-policy.mjs';
+import {approvedRemoteBaseline,assertRemoteState,legacyQuoteRecoveryBinding} from './remote-state-policy.mjs';
 import {readWorkerVersionLineage} from './worker-version-lineage-diagnostic.mjs';
 
 const accountId='fe9d7e2a164274b1ff6cef150a75cb0b';
@@ -55,7 +55,7 @@ export async function readRemoteState({token,fetcher=fetch}={}){
 
 export async function assertRemoteDeploymentBaseline(options){
   const baseline=options.baseline??approvedRemoteBaseline;
-  let state;
+  let state,firstRecoverySetting;
   for(let i=0;i<2;i++){
     state=await readRemoteState(options);
     if(options.ciMatchTag!==undefined&&state.workerTag!==options.ciMatchTag)throw Error('Remote deployment guard: WORKER_TAG_MISMATCH');
@@ -65,6 +65,9 @@ export async function assertRemoteDeploymentBaseline(options){
       const evidence=await readWorkerVersionLineage({token:options.token,fetcher:options.fetcher});
       assertRemoteState(state,baseline,{preDeployLineage:evidence});
     }
+    const currentRecoverySetting=state.bindings.find(item=>item.name===legacyQuoteRecoveryBinding)?.text;
+    if(i===0)firstRecoverySetting=currentRecoverySetting;
+    else if(currentRecoverySetting!==firstRecoverySetting)throw Error('Remote deployment guard: RECOVERY_SETTING_CHANGED');
   }
   return state;
 }

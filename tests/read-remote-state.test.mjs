@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readRemoteState,assertRemoteDeploymentBaseline} from '../scripts/read-remote-state.mjs';
 import {approvedRemoteBaseline,approvedPreDeployLineage} from '../scripts/remote-state-policy.mjs';
 
-function fakeApi({status=200,observability=approvedRemoteBaseline.observability,scriptSettings=approvedRemoteBaseline.scriptSettings,includeOptional=false,currentMessage=`source-commit:${approvedRemoteBaseline.sourceCommit}`,priorMessage=`source-commit:${approvedRemoteBaseline.sourceCommit}`,currentEtag=approvedPreDeployLineage.scriptEtag,priorEtag=approvedPreDeployLineage.scriptEtag}={}){
+function fakeApi({status=200,observability=approvedRemoteBaseline.observability,scriptSettings=approvedRemoteBaseline.scriptSettings,includeOptional=false,currentMessage=`source-commit:${approvedRemoteBaseline.sourceCommit}`,priorMessage=`source-commit:${approvedRemoteBaseline.sourceCommit}`,currentEtag=approvedPreDeployLineage.scriptEtag,priorEtag=approvedPreDeployLineage.scriptEtag,recoverySetting='PRIVATE_PRESERVED_SETTING'}={}){
   const seen=[];
   const fetcher=async(url,options)=>{
     seen.push({url,method:options.method,tokenPresent:options.headers.Authorization==='Bearer TEST_ONLY_TOKEN'});
@@ -27,14 +27,15 @@ function fakeApi({status=200,observability=approvedRemoteBaseline.observability,
       {name:'PAID_FIRST_TRIAL_USD_COST_REVIEWED',type:'plain_text',text:'true'},
       {name:'ENABLE_GEMINI_TWO_PASS',type:'secret_text'},
       {name:'GEMINI_TWO_PASS_ALLOWED_JOB_ID',type:'secret_text'},
+      {name:'GEMINI_LEGACY_QUOTE_RECOVERY_JSON',type:'plain_text',text:recoverySetting},
       {name:'ASSETS',type:'assets'},
     ];
     else if(path.endsWith('/subdomain'))result={enabled:true,previews_enabled:false};
     else if(path.endsWith('/routes'))result=[];
     else if(path.endsWith('/domains/records'))result=[];
-    else if(path.endsWith('/deployments'))result={deployments:[{versions:[{version_id:approvedRemoteBaseline.activeVersionId,percentage:100}],annotations:{'workers/message':currentMessage}},{versions:[{version_id:approvedPreDeployLineage.priorVersionId,percentage:100}],annotations:{'workers/message':priorMessage}}]};
-    else if(path.endsWith('/versions/'+approvedRemoteBaseline.activeVersionId))result={id:approvedRemoteBaseline.activeVersionId,resources:{script:{etag:currentEtag},bindings:[{name:'ASSETS',type:'assets'}]}};
-    else if(path.endsWith('/versions/'+approvedPreDeployLineage.priorVersionId))result={id:approvedPreDeployLineage.priorVersionId,resources:{script:{etag:priorEtag},bindings:[{name:'ASSETS',type:'assets'}]}};
+    else if(path.endsWith('/deployments'))result={deployments:[{source:'dash',versions:[{version_id:approvedRemoteBaseline.activeVersionId,percentage:100}],annotations:{'workers/message':currentMessage}},{source:'wrangler',versions:[{version_id:approvedPreDeployLineage.priorVersionId,percentage:100}],annotations:{'workers/message':priorMessage}}]};
+    else if(path.endsWith('/versions/'+approvedRemoteBaseline.activeVersionId))result={id:approvedRemoteBaseline.activeVersionId,resources:{script:{etag:currentEtag},script_runtime:{assets:{binding:'ASSETS'},compatibility_date:'2026-10-10'},bindings:[{name:'ASSETS',type:'assets'},{name:'KEY_ENCRYPTION_KEY_B64',type:'secret_text'},{name:'GEMINI_LEGACY_QUOTE_RECOVERY_JSON',type:'plain_text',text:recoverySetting}]}};
+    else if(path.endsWith('/versions/'+approvedPreDeployLineage.priorVersionId))result={id:approvedPreDeployLineage.priorVersionId,resources:{script:{etag:priorEtag},script_runtime:{assets:{binding:'ASSETS'},compatibility_date:'2026-10-10'},bindings:[{name:'ASSETS',type:'assets'},{name:'KEY_ENCRYPTION_KEY_B64',type:'secret_text'}]}};
     else if(path.endsWith('/script-settings'))result=scriptSettings;
     else throw Error('Unexpected test API path');
     return {ok:true,async json(){return {success:true,result};}};
@@ -63,22 +64,34 @@ test('guard fails closed when token, API read or observability fields are unavai
   assert.equal((await assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:fakeApi().fetcher,baseline})).environment,'production');
 });
 
-test('current annotated release rejects a settings version using old lineage evidence',async()=>{
- const {fetcher}=fakeApi({currentMessage:'Dashboard settings update'});
- await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher,ciMatchTag:'TEST_WORKER_TAG'}),/SOURCE_COMMIT_MISMATCH/);
+test('reviewed settings version requires exact PR9 lineage on both pre-deploy reads',async()=>{
+ const {fetcher,seen}=fakeApi({currentMessage:'Dashboard settings update'});
+ const state=await assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher,ciMatchTag:'TEST_WORKER_TAG'});
+ assert.equal(state.activeVersions[0].id,approvedRemoteBaseline.activeVersionId);
+ assert.equal(seen.length,22);assert.ok(seen.every(call=>call.method==='GET'&&call.tokenPresent));
 });
 
-test('missing current annotation fails closed even with old lineage evidence',async()=>{
+test('changed script, predecessor, setting, or observability fails closed',async()=>{
  for(const changed of [
   {currentEtag:'a'.repeat(64)},
   {priorEtag:'b'.repeat(64)},
   {currentEtag:null},
   {priorMessage:'other'},
+  {recoverySetting:''},
   {observability:{...approvedRemoteBaseline.observability,enabled:false}},
  ]){
   const {fetcher}=fakeApi({currentMessage:'Dashboard settings update',...changed});
-  await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher}),/Remote deployment guard: (SOURCE_COMMIT_MISMATCH|OBSERVABILITY_MISMATCH)/);
+  await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher}),/Remote deployment guard: (SOURCE_COMMIT_MISMATCH|OBSERVABILITY_MISMATCH|RECOVERY_SETTING_UNAVAILABLE)/);
  }
  const {fetcher}=fakeApi({currentMessage:'Dashboard settings update'});
  await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:async(url,options)=>url.includes('/versions/')?{ok:false,status:403}:fetcher(url,options)}),/READ_FAILED/);
+});
+test('a recovery setting change between pre-deploy reads blocks without revealing its value',async()=>{
+ const {fetcher}=fakeApi({currentMessage:'Dashboard settings update'});let bindingReads=0;
+ const changed=async(url,options)=>{
+  const response=await fetcher(url,options);
+  if(url.endsWith('/bindings')&&++bindingReads===2){const body=await response.json();body.result.find(item=>item.name==='GEMINI_LEGACY_QUOTE_RECOVERY_JSON').text='PRIVATE_CHANGED_SETTING';return {ok:true,json:async()=>body};}
+  return response;
+ };
+ await assert.rejects(assertRemoteDeploymentBaseline({token:'TEST_ONLY_TOKEN',fetcher:changed}),error=>error.message.includes('RECOVERY_SETTING_CHANGED')&&!error.message.includes('PRIVATE_'));
 });
