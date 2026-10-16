@@ -8,6 +8,10 @@ usage event, legacy pilot evidence, optional approval evidence, and report.
 The available production observations identify this comparison boundary, not
 which field changed. It is not evidence that the Groq quota is exhausted.
 
+The production job's differing field is still unknown. The local fixture tests
+prove that the diagnostic can distinguish source, audit, and serialization
+changes; they do not identify the field in the production database.
+
 ## Local fix
 
 Authenticated owner-only GET
@@ -46,6 +50,20 @@ It does not select report contents or any credential values.
    consistency, not provider organization membership. The current schema has no
    registration history or org/project identity. Never replace/expose a key to
    infer this relationship. No Free-project binding is claimed by this change.
+
+Before changing any recovery configuration or migrating a row, collect the
+owner-scoped job ID, recovery operation ID and state, the recorded contract
+hash, and the diagnostic's fixed-field comparison against current evidence.
+For each mismatch, verify the persisted source and audit revision, the original
+failed operation state and result hash, its usage event ID and token count, and
+any pilot or approval record used by that recovery. Establish the intended
+contract version and why the stored and recomputed forms differ. If only byte
+ordering differs, preserve both representations and require a reviewed
+migration; canonical equality alone does not authorize execution. Separately,
+confirm the currently registered app key's organization/project using provider
+account evidence without displaying or replacing the key, then confirm Free
+eligibility and capacity before any new model request. The console's Free plan
+and model limits alone do not bind the app key to that organization.
 
 No deployment, production setting update, key change, database mutation,
 retranscription, Gemini request or model generation is part of this work.
