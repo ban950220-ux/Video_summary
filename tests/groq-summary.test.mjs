@@ -15,6 +15,25 @@ import {assertGrounding} from '../src/groq-summary.mjs';
 import {completeCoverageManifest,evidenceNotes,synthesisTreeProgress,persistedSynthesisNode} from '../src/groq-complete-synthesis.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+
+test('recovery diagnostic is owner-scoped, GET-only, bounded, and cannot approve or mutate checkpoints',async()=>{
+ const f=await fixture(),originalFetch=globalThis.fetch;let calls=0;
+ try{
+  globalThis.fetch=async()=>{calls++;throw Error('forbidden provider call');};
+  const path=f.path+'/groq-summary-recovery-diagnostic';const none=await(await routeApi(request(path),f.env)).json();assert.equal(none.inspectedRecords,0);assert.equal(none.executionAllowed,false);
+  const state='DONE';for(let i=0;i<5;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary-recovery',0,?,?,?)").run(f.id+':groq-summary-recovery:'+'0'.repeat(64)+':raw:'+i,f.id,state,new Date().toISOString(),JSON.stringify({private:'DO_NOT_LEAK_RECOVERY',report:{summary:[{text:'PRIVATE_REPORT_TEXT'}]}}));
+  const before=f.db.prepare('SELECT total_changes() n').get().n,response=await routeApi(request(path),f.env),text=await response.text(),data=JSON.parse(text);assert.equal(response.status,200);assert.equal(data.inspectedRecords,3);assert.equal(data.omittedRecords,2);assert.equal(data.storedRecoveryCounts[0].count,5);assert.ok(data.records.every(row=>row.reason==='CONTRACT_HASH_CHANGED'));assert.equal(data.checkpointCountsVerified,false);assert.equal(data.remainingWork,'UNKNOWN_UNTIL_RECOVERY_SCOPE_IS_VALIDATED');assert.doesNotMatch(text,/DO_NOT_LEAK_RECOVERY|PRIVATE_REPORT_TEXT|private/);
+  assert.equal((await routeApi(request(path,'POST',{}),f.env)).status,405);assert.equal((await routeApi(request('/api/jobs/99999999-9999-4999-8999-999999999999/groq-summary-recovery-diagnostic'),f.env)).status,404);assert.equal(f.db.prepare('SELECT total_changes() n').get().n,before);assert.equal(calls,0);
+ }finally{globalThis.fetch=originalFetch;f.db.close();}
+});
+test('recovery metadata SQL stays SELECT-only and returns no IDs, hashes, report or credential material',async()=>{
+ const f=await fixture();try{
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary-recovery',0,'DONE',?,?)").run(f.id+':diagnostic-fixture',f.id,new Date().toISOString(),JSON.stringify({sourceSha256:'a'.repeat(64),auditSha256:'PRIVATE_AUDIT',report:{summary:'PRIVATE_REPORT_TEXT'},private:'PRIVATE_RESULT'}));
+  f.db.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','groq',1,'PRIVATE_IV','PRIVATE_CIPHER',?)").run(new Date().toISOString());
+  const sql=readFileSync(new URL('../tools/groq-recovery-metadata.sql',import.meta.url),'utf8').replaceAll('a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9',f.id),boundary=sql.indexOf('-- Registration does not');f.db.exec('PRAGMA query_only=ON');
+  const records=f.db.prepare(sql.slice(0,boundary)).all(),registration=f.db.prepare(sql.slice(boundary)).all();assert.equal(records[0].recovery_row_number,1);assert.equal(records[0].state,'DONE');assert.equal(records[0].valid_source_hash_shape,1);assert.equal(records[0].valid_audit_hash_shape,0);assert.equal(registration[0].groq_key_registered,1);assert.equal(registration[0].project_binding_evidence,'ORG_PROJECT_MAPPING_NOT_STORED');assert.doesNotMatch(JSON.stringify({records,registration}),/PRIVATE_|[a-f0-9]{64}|diagnostic-fixture|recovery_operation_id|recorded_source_hash/);
+ }finally{f.db.close();}
+});
 async function fixture({complete=true,large=false,sourceText=null,segmentText=null,longSource=false,fullScale=false}={}){
  const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));
  const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:r.changes}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};
@@ -1215,9 +1234,15 @@ test('1,954-character stored strict report recovers without a provider call and 
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{}',recoveryId);
   const isolated=await routeApi(request(f.path+'/summary-choice'),f.env);assert.equal(isolated.status,200,await isolated.clone().text());const isolatedChoice=await isolated.json();assert.equal(isolatedChoice.summary.recoveryReviewRequired,true);assert.equal(isolatedChoice.summary.savedRawStages,0);
   const groqBlocked=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal((await groqBlocked.json()).error.code,'SUMMARY_RECOVERY_SCOPE_CHANGED');
+   const beforeDiagnostic=f.db.prepare('SELECT total_changes() AS n').get().n;
+   const diagnosticResponse=await routeApi(request(f.path+'/groq-summary-recovery-diagnostic'),f.env);assert.equal(diagnosticResponse.status,200,await diagnosticResponse.clone().text());const diagnostic=await diagnosticResponse.json();
+   assert.equal(diagnostic.kind,'GROQ_RECOVERY_SCOPE_DIAGNOSTIC_V1');assert.equal(diagnostic.providerCalls,0);assert.equal(diagnostic.writes,0);assert.equal(diagnostic.executionAllowed,false);assert.equal(diagnostic.checkpointCountsVerified,false);assert.equal(diagnostic.credentialProjectBinding,'NOT_STORED_CANNOT_VERIFY');assert.equal(diagnostic.records[0].reason,'SUMMARY_RECOVERY_SCOPE_CHANGED');assert.equal(diagnostic.records[0].comparison.sameCanonicalRecord,false);assert.equal(diagnostic.records[0].comparison.fieldMatches.sourceSha256,false);assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n,beforeDiagnostic);
   f.db.exec(readFileSync(new URL('../migrations/0015_gemini_two_pass.sql',import.meta.url),'utf8'));
   const geminiStatus=await routeApi(request(f.path+'/gemini-two-pass-status'),f.env);assert.equal(geminiStatus.status,200);assert.equal((await geminiStatus.json()).state,'NOT_STARTED');
   assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(recoveryId).result_json,'{}');f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(savedRecovery,recoveryId);
+   const reordered=Object.fromEntries(Object.entries(JSON.parse(savedRecovery)).reverse());f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify(reordered),recoveryId);
+   const byteOnly=await(await routeApi(request(f.path+'/groq-summary-recovery-diagnostic'),f.env)).json();assert.equal(byteOnly.records[0].comparison.sameCanonicalRecord,true);assert.equal(byteOnly.records[0].comparison.sameSerializedRecord,false);assert.equal(byteOnly.executionAllowed,false);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+   const privateRecord=JSON.parse(savedRecovery);privateRecord.privatePayload='DO_NOT_LEAK_RECOVERY_PAYLOAD';f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify(privateRecord),recoveryId);const redacted=await routeApi(request(f.path+'/groq-summary-recovery-diagnostic'),f.env),redactedText=await redacted.text();assert.doesNotMatch(redactedText,/DO_NOT_LEAK_RECOVERY_PAYLOAD|privatePayload/);assert.equal(JSON.parse(redactedText).records[0].comparison.unexpectedFieldCount,1);f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(savedRecovery,recoveryId);
   assert.equal(providerCalls,0);
   assert.deepEqual({...f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(oldId)},{state:'FAILED_UNCERTAIN',error_code:'SUMMARY_RESPONSE_INVALID',result_json:oldResult});
   assert.deepEqual({...f.db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(newId)},{state:'FAILED_UNCERTAIN',error_code:'SUMMARY_CHECKPOINT_TOO_LARGE',result_json:newResult});
@@ -1237,6 +1262,7 @@ test('1,954-character stored strict report recovers without a provider call and 
   const afterMetadata=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal(afterMetadata.status,200,await afterMetadata.clone().text());
   f.db.prepare("UPDATE jobs SET audit_json=json_set(audit_json,'$.audioBoundaryReview','CHANGED_INPUT') WHERE id=?").run(f.id);
   const afterInputChange=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal((await afterInputChange.json()).error.code,'SUMMARY_RECOVERY_SCOPE_CHANGED');
+   const auditDiagnostic=await(await routeApi(request(f.path+'/groq-summary-recovery-diagnostic'),f.env)).json();assert.equal(auditDiagnostic.records[0].comparison.fieldMatches.auditSha256,false);assert.equal(auditDiagnostic.records[0].comparison.fieldMatches.sourceSha256,true);assert.equal(auditDiagnostic.records[0].comparison.fieldMatches.report,true);assert.equal(auditDiagnostic.executionAllowed,false);assert.equal(providerCalls,1);
  }finally{globalThis.fetch=oldFetch;f.db.close();}
 });
 test('1,226 source segments and 1,954-character chapter-rich checkpoints compose without loss or model input overflow',async()=>{

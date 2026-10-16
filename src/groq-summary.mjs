@@ -614,6 +614,30 @@ async function handlePilot(request,env,{id,job,source,transcriptHash,legacyTrans
  }
 }
 const recoveryId=(id,hash,index=0)=>id+':groq-summary-recovery:'+hash+':raw:'+index;
+const recoveryCanonical=value=>JSON.stringify(recoverySorted(value));
+function recoverySorted(value){if(Array.isArray(value))return value.map(recoverySorted);if(value&&typeof value==='object')return Object.fromEntries(Object.keys(value).sort().map(key=>[key,recoverySorted(value[key])]));return value;}
+function recoveryRecordComparison(row,expected){
+ let stored;try{stored=JSON.parse(row.result_json);}catch{}
+ const valid=stored&&typeof stored==='object'&&!Array.isArray(stored),fields=['stage','evidenceHash','failedOperationId','failedResultSha256','responseSha256','sourceSha256','auditSha256','contractHash','approvalId','approvalResultSha256','usageEventId','report'];
+ return {storedStateDone:row.state==='DONE',storedRecordObject:Boolean(valid),sameSerializedRecord:row.result_json===JSON.stringify(expected),sameCanonicalRecord:Boolean(valid)&&recoveryCanonical(stored)===recoveryCanonical(expected),unexpectedFieldCount:valid?Object.keys(stored).filter(key=>!fields.includes(key)).length:null,fieldMatches:Object.fromEntries(fields.map(key=>[key,Boolean(valid)&&Object.hasOwn(stored,key)===Object.hasOwn(expected,key)&&recoveryCanonical(stored[key])===recoveryCanonical(expected[key])]))};
+}
+async function recoveryScopeDiagnostic(env,{id,job,sourceOf}){
+ const base={kind:'GROQ_RECOVERY_SCOPE_DIAGNOSTIC_V1',jobId:id,providerCalls:0,writes:0,recoveryApplied:false,executionAllowed:false,checkpointCountsVerified:false,credentialProjectBinding:'NOT_STORED_CANNOT_VERIFY'};
+ let context;try{context={id,job,...await completeSource(env,job,sourceOf)};}catch(error){if(error instanceof ProviderError&&['COMPLETE_TRANSCRIPT_REQUIRED','TRANSCRIPT_PERSISTENCE_UNVERIFIED'].includes(error.code))return json({...base,sourceStatus:'BLOCKED',sourceErrorCode:error.code,records:[]});throw error;}
+ const counts=(await env.DB.prepare("SELECT CASE WHEN state IN ('DONE','REVIEWED','FAILED_UNCERTAIN','BLOCKED','CLAIMED','APPROVED','STOPPED') THEN state ELSE 'OTHER' END AS state,count(*) AS count FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery' GROUP BY 1").bind(id).all()).results||[];
+ const rows=(await env.DB.prepare("SELECT id,state,result_json,created_at FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery' ORDER BY created_at,id LIMIT 3").bind(id).all()).results||[],records=[];
+ const prefix=id+':groq-summary-recovery:';
+ for(const row of rows){
+  const match=row.id.startsWith(prefix)?row.id.slice(prefix.length).match(/^([a-f0-9]{64}):raw:(0|[1-9][0-9]*)$/):null,index=match?Number(match[2]):null;
+  const item={stage:Number.isSafeInteger(index)?'raw:'+index:null,storedState:counts.some(value=>value.state===row.state)?row.state:'OTHER',currentContractMatches:Boolean(match)&&match[1]===context.transcriptHash};
+  if(!match||!Number.isSafeInteger(index)){records.push({...item,verification:'BLOCKED',reason:'RECOVERY_ID_INVALID'});continue;}
+  if(!item.currentContractMatches){records.push({...item,verification:'BLOCKED',reason:'CONTRACT_HASH_CHANGED'});continue;}
+  try{await checkpointRecoveryContext(env,context,index,{savedRecoveryRow:row});records.push({...item,verification:'MATCHES_CURRENT_EVIDENCE',executionAllowed:false});}
+  catch(error){if(!(error instanceof ProviderError))throw error;const allowed=['SUMMARY_RECOVERY_SCOPE_CHANGED','SUMMARY_RECOVERY_EVIDENCE_INVALID','SUMMARY_RECOVERY_NOT_FOUND','SUMMARY_RESPONSE_INVALID'];records.push({...item,verification:'BLOCKED',reason:allowed.includes(error.code)?error.code:'CHECKPOINT_VALIDATION_BLOCKED',...(error.safeRecoveryComparison?{comparison:error.safeRecoveryComparison}:{})});}
+ }
+ const total=counts.reduce((sum,item)=>sum+item.count,0);
+ return json({...base,sourceStatus:'STORED_SOURCE_VALID',storedRecoveryCounts:counts,inspectedRecords:records.length,omittedRecords:Math.max(0,total-records.length),records,remainingWork:'UNKNOWN_UNTIL_RECOVERY_SCOPE_IS_VALIDATED',meaningReview:'NOT_PERFORMED'});
+}
 async function checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash},index=0,{savedRecoveryRow=undefined,failedRow=undefined,usageRows=undefined}={}){
  const audit=promptAudit(job),groups=partitionGroqTranscript(source.segments,audit),first=groups[index],failedId=stageId(id,transcriptHash,'raw:'+index);
  if(!Number.isSafeInteger(index)||index<0||!first)stop('SUMMARY_RECOVERY_NOT_FOUND','검토할 원시 구간이 없습니다.');
@@ -638,7 +662,7 @@ async function checkpointRecoveryContext(env,{id,job,source,transcriptHash,legac
  const evidence={...(index?{stage:'raw:'+index}:{}),jobId:id,owner:'owner',contractVersion:GROQ_SUMMARY_CONTRACT_VERSION,contractHash:transcriptHash,sourceSha256:await sha(JSON.stringify([source.raw,source.segments_json])),auditSha256:await sha(JSON.stringify(summaryInputAudit(job.audit))),failedOperationId:failedId,failedResultSha256:await sha(failed.result_json),responseSha256:await sha(raw),failedAt:failed.created_at,failedReservedUnits:failed.units,confirmedUsage:usage,usageEventId:usageRow.id,usageProvenance:usageRow.provenance,legacyEvidence,firstRange:{firstId:first[0].id,lastId:first.at(-1).id,startMs:first[0].startMs,endMs:first.at(-1).endMs},summaryCount:report.summary.length,chapterCount:report.chapters.length,storedUtf16Length:raw.length,compositionMode:'LOSSLESS_RAW_CHECKPOINTS'};
  const evidenceHash=await sha(JSON.stringify(evidence)),idForRecovery=recoveryId(id,transcriptHash,index),record={...(index?{stage:'raw:'+index}:{}),evidenceHash,failedOperationId:failedId,failedResultSha256:evidence.failedResultSha256,responseSha256:evidence.responseSha256,sourceSha256:evidence.sourceSha256,auditSha256:evidence.auditSha256,contractHash:transcriptHash,...(typeof saved?.approvalId==='string'?{approvalId:saved.approvalId,approvalResultSha256:saved.approvalResultSha256,usageEventId:usageRow.id}:{}),report};
  const row=savedRecoveryRow===undefined?await env.DB.prepare("SELECT state,result_json,created_at FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(idForRecovery,id).first():savedRecoveryRow;
- if(row&&!(row.state==='DONE'&&row.result_json===JSON.stringify(record)))stop('SUMMARY_RECOVERY_SCOPE_CHANGED','기존 복구 기록과 현재 근거가 다릅니다.');
+ if(row&&!(row.state==='DONE'&&row.result_json===JSON.stringify(record))){const error=new ProviderError('SUMMARY_RECOVERY_SCOPE_CHANGED','기존 복구 기록과 현재 근거가 다릅니다.');error.safeRecoveryComparison=recoveryRecordComparison(row,record);throw error;}
  return {evidence,evidenceHash,record,recovered:Boolean(row),recoveredAt:row?.created_at??null,idForRecovery,failedId,failedResultJson:failed.result_json,legacyFailedId:legacyEvidence?oldId:null};
 }
 export async function validatedRecoveredFirstCheckpoint(env,{id,job,source,transcriptHash,legacyTranscriptHash}){
@@ -1060,6 +1084,7 @@ export async function persistGroqSettlementsForDeletion(env,id,job,prepared){
  await env.DB.prepare("INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT json_extract(c.value,'$.failedId')||':settled',j.id,'groq-summary-settlement',0,'DONE',?,json_set(json_extract(c.value,'$.record'),'$.failedUnits',f.units,'$.failedErrorCode',f.error_code) FROM json_each(?) c JOIN jobs j ON j.id=? AND j.owner_id='owner' AND j.audit_json=? JOIN yta_sources s ON s.job_id=j.id AND s.raw=? AND s.segments_json=? JOIN yta_operations f ON f.id=json_extract(c.value,'$.failedId') AND f.job_id=j.id AND f.provider=json_extract(c.value,'$.failedProvider') AND f.state='FAILED_UNCERTAIN' AND f.result_json=json_extract(c.value,'$.failedJson') JOIN usage_events u ON u.id=json_extract(c.value,'$.usageEventId') AND u.job_id=j.id AND u.owner_id='owner' AND u.provider='groq' AND u.capability=json_extract(c.value,'$.capability') AND u.unit='actual_total_tokens' AND u.provenance=json_extract(c.value,'$.usageProvenance') AND u.used_units=json_extract(c.value,'$.usageTokens') JOIN yta_operations d ON d.id=j.id||':deleting' AND d.provider='deletion' AND d.state='DELETING' WHERE NOT EXISTS(SELECT 1 FROM json_each(c.value,'$.proofs') p WHERE NOT EXISTS(SELECT 1 FROM yta_operations r WHERE r.id=json_extract(p.value,'$.id') AND r.job_id=j.id AND r.provider=json_extract(p.value,'$.provider') AND r.state=json_extract(p.value,'$.state') AND r.result_json=json_extract(p.value,'$.resultJson'))) ").bind(nowIso(),JSON.stringify(candidates),id,JSON.stringify(job.audit),prepared.source.raw,prepared.source.segments_json).run();
 }
 export async function handleGroqSummaryAction(request,env,{id,action,job,sourceOf,ownedJob}){
+ if(action==='groq-summary-recovery-diagnostic'){if(request.method!=='GET')return json({error:{code:'METHOD_NOT_ALLOWED'}},405);return recoveryScopeDiagnostic(env,{id,job,sourceOf});}
  if(action==='groq-summary-status'&&request.method==='GET')return summaryStatus(env,job,sourceOf);
  const reviewing=request.method==='GET'&&['groq-summary-plan','groq-summary-approval'].includes(action);
  const read=async(stage,fn)=>{try{return await fn();}catch(error){if(!reviewing||error instanceof InputError||error instanceof ProviderError)throw error;throw Object.assign(new Error('요약 범위 읽기 오류 ('+stage+'). 저장된 원문은 보존됩니다.'),{safeReviewCode:'SUMMARY_REVIEW_'+stage+'_INTERNAL'});}};

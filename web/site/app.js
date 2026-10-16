@@ -164,6 +164,7 @@ function showGroqSummaryChoice(job,target,requestId){
  const scopeHost=el('div');
  statusBox.append(headline,detail,refreshButton,diagnosticButton,diagnosticDetail,correctionButton);
  target.append(reviewButton,statusBox,scopeHost);
+  const recoveryDiagnostic=groqRecoveryDiagnosticControl(job,current);recoveryDiagnostic.hidden=true;statusBox.append(recoveryDiagnostic);
  let status=null,phase='idle',reason=null,waitUntil=null,readSequence=0,running=false,runButton=null,finalizeButton=null,awaitingApprovalScope=null,unknownBaseline=null,safeUnsentInterruption=false,reviewedScope=null,diagnosticStage=null;
  const render=()=>{
   if(!current())return;
@@ -186,13 +187,14 @@ function showGroqSummaryChoice(job,target,requestId){
   try{
    const saved=await api(statusUrl);
    if(sequence===readSequence&&current()){
-    status=saved;
+     status=saved;recoveryDiagnostic.hidden=true;
     if(phase==='statusUnavailable'||phase==='approved'&&saved?.approval?.state==='APPROVED')phase='idle';
     if(phase==='unknown'&&Number.isSafeInteger(unknownBaseline)&&saved?.completedStages>unknownBaseline)phase='responseLostSaved';
     render();
    }
    return saved;
   }catch(error){
+    if(sequence===readSequence&&current()&&['SUMMARY_RECOVERY_SCOPE_CHANGED','SUMMARY_RECOVERY_EVIDENCE_INVALID','SUMMARY_RECOVERY_NOT_FOUND'].includes(error.code))recoveryDiagnostic.hidden=false;
    if(sequence===readSequence&&current()&&phase!=='unknown')setPhase('statusUnavailable');
    throw error;
   }
@@ -637,9 +639,15 @@ function showBoundaryReconcileChoice(job,target,requestId){
  };
  target.append(review);
 }
+function groqRecoveryDiagnosticControl(job,current){
+ const host=el('div'),button=el('button',{className:'btn secondary small',text:'복구 스코프 무호출 진단'}),detail=el('pre');host.append(button,detail);
+ button.onclick=async()=>{button.disabled=true;try{const result=await api('/api/jobs/'+encodeURIComponent(job.id)+'/groq-summary-recovery-diagnostic');if(!current())return;if(result.kind!=='GROQ_RECOVERY_SCOPE_DIAGNOSTIC_V1'||result.providerCalls!==0||result.writes!==0||result.executionAllowed!==false)throw Error('진단 형식을 확인하세요.');detail.textContent='스코프 검증은 유지됩니다. 저장 기록 복구·재호출·완료 처리는 하지 않았습니다.\n'+JSON.stringify({sourceStatus:result.sourceStatus,sourceErrorCode:result.sourceErrorCode,storedRecoveryCounts:result.storedRecoveryCounts,omittedRecords:result.omittedRecords,records:result.records,credentialProjectBinding:result.credentialProjectBinding},null,2);}catch(error){if(current())detail.textContent='무호출 진단 조회 실패: '+safeError(error);}finally{if(current())button.disabled=false;}};
+ return host;
+}
 async function showStoredTranscriptReview(job,target,requestId,error){
  const current=()=>detailCurrent(job.id,requestId,target);if(!current())return;
  empty(target);target.append(el('h2',{text:'저장 전사 원문 검토'}),el('p',{className:'tip',text:'기존 Groq 복구 기록과 현재 근거가 일치하지 않습니다. '+error.code+' · 전체 종합과 의미 검증은 완료되지 않았습니다. 아래 저장 전사는 별도로 읽을 수 있으며 복구 기록은 보존됩니다.'}));
+  target.append(groqRecoveryDiagnosticControl(job,current));
  try{
   const data=await api('/api/jobs/'+encodeURIComponent(job.id)+'/source');if(!current())return;
   const source=data.source;if(!Array.isArray(source?.segments))throw Error('저장 전사 구간을 읽을 수 없습니다.');
