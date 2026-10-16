@@ -26,12 +26,12 @@ test('recovery diagnostic is owner-scoped, GET-only, bounded, and cannot approve
   assert.equal((await routeApi(request(path,'POST',{}),f.env)).status,405);assert.equal((await routeApi(request('/api/jobs/99999999-9999-4999-8999-999999999999/groq-summary-recovery-diagnostic'),f.env)).status,404);assert.equal(f.db.prepare('SELECT total_changes() n').get().n,before);assert.equal(calls,0);
  }finally{globalThis.fetch=originalFetch;f.db.close();}
 });
-test('recovery metadata SQL stays SELECT-only and returns no stored report or credential material',async()=>{
+test('recovery metadata SQL stays SELECT-only and returns no IDs, hashes, report or credential material',async()=>{
  const f=await fixture();try{
   f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary-recovery',0,'DONE',?,?)").run(f.id+':diagnostic-fixture',f.id,new Date().toISOString(),JSON.stringify({sourceSha256:'a'.repeat(64),auditSha256:'PRIVATE_AUDIT',report:{summary:'PRIVATE_REPORT_TEXT'},private:'PRIVATE_RESULT'}));
   f.db.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','groq',1,'PRIVATE_IV','PRIVATE_CIPHER',?)").run(new Date().toISOString());
-  const sql=readFileSync(new URL('../tools/groq-recovery-metadata.sql',import.meta.url),'utf8').replaceAll('a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9',f.id),boundary=sql.indexOf('-- This proves');f.db.exec('PRAGMA query_only=ON');
-  const records=f.db.prepare(sql.slice(0,boundary)).all(),registration=f.db.prepare(sql.slice(boundary)).all();assert.equal(records[0].recorded_source_hash,'a'.repeat(64));assert.equal(records[0].recorded_audit_hash,null);assert.equal(registration[0].project_binding_evidence,'ORG_PROJECT_MAPPING_NOT_STORED');assert.doesNotMatch(JSON.stringify({records,registration}),/PRIVATE_/);
+  const sql=readFileSync(new URL('../tools/groq-recovery-metadata.sql',import.meta.url),'utf8').replaceAll('a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9',f.id),boundary=sql.indexOf('-- Registration does not');f.db.exec('PRAGMA query_only=ON');
+  const records=f.db.prepare(sql.slice(0,boundary)).all(),registration=f.db.prepare(sql.slice(boundary)).all();assert.equal(records[0].recovery_row_number,1);assert.equal(records[0].state,'DONE');assert.equal(records[0].valid_source_hash_shape,1);assert.equal(records[0].valid_audit_hash_shape,0);assert.equal(registration[0].groq_key_registered,1);assert.equal(registration[0].project_binding_evidence,'ORG_PROJECT_MAPPING_NOT_STORED');assert.doesNotMatch(JSON.stringify({records,registration}),/PRIVATE_|[a-f0-9]{64}|diagnostic-fixture|recovery_operation_id|recorded_source_hash/);
  }finally{f.db.close();}
 });
 async function fixture({complete=true,large=false,sourceText=null,segmentText=null,longSource=false,fullScale=false}={}){

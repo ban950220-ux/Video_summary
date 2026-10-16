@@ -31,7 +31,11 @@ evidence differs. No catch-and-continue execution path was added.
 
 `tools/groq-recovery-metadata.sql` supplies an existing-session SELECT-only
 alternative for safe metadata collection before any approved future release.
-It does not select report contents or any credential values.
+Its output is limited to row order, state, JSON/hash shape checks, and a key
+registration boolean. It returns no operation IDs, hash values, timestamps,
+report contents, or credential values. Shape checks alone cannot establish
+which current evidence differs; use the owner-scoped diagnostic comparison for
+that determination.
 
 ## Operational follow-up required
 
@@ -51,9 +55,11 @@ It does not select report contents or any credential values.
    registration history or org/project identity. Never replace/expose a key to
    infer this relationship. No Free-project binding is claimed by this change.
 
-Before changing any recovery configuration or migrating a row, collect the
-owner-scoped job ID, recovery operation ID and state, the recorded contract
-hash, and the diagnostic's fixed-field comparison against current evidence.
+Before changing any recovery configuration or migrating a row, verify within
+the protected operational review the owner-scoped job ID, recovery operation
+ID and state, the recorded contract hash, and the diagnostic's fixed-field
+comparison against current evidence. Do not export recovery operation IDs or
+hash values through the metadata SQL or a diagnostic response.
 For each mismatch, verify the persisted source and audit revision, the original
 failed operation state and result hash, its usage event ID and token count, and
 any pilot or approval record used by that recovery. Establish the intended
