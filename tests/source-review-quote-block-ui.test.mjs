@@ -28,3 +28,9 @@ test('stale Groq recovery does not prevent read-only stored transcript review or
  const text=collect(target);assert.match(text,/SUMMARY_RECOVERY_SCOPE_CHANGED/);assert.match(text,/완료되지 않았습니다/);for(const item of segments)assert.ok(text.includes(item.text));
  assert.equal(target.children.some(item=>item.tag==='button'||item.tag==='input'),false);assert.deepEqual(calls.map(item=>item.method),['GET','GET']);assert.ok(calls[1].path.endsWith('/source'));
 });
+
+test('stale recovery exposes an explicit diagnostic GET without approval, reset or provider POST',async()=>{
+ const calls=[],diagnostic={kind:'GROQ_RECOVERY_SCOPE_DIAGNOSTIC_V1',providerCalls:0,writes:0,executionAllowed:false,sourceStatus:'STORED_SOURCE_VALID',storedRecoveryCounts:[{state:'DONE',count:1}],omittedRecords:0,records:[{stage:'raw:0',verification:'BLOCKED',reason:'SUMMARY_RECOVERY_SCOPE_CHANGED',comparison:{sameSerializedRecord:false,sameCanonicalRecord:false,fieldMatches:{auditSha256:false,report:true}}}],credentialProjectBinding:'NOT_STORED_CANNOT_VERIFY'};
+ const {context,target}=mount(async(path,options)=>{calls.push({path,method:options.method});if(path.endsWith('/groq-summary-complete'))return response({error:{code:'SUMMARY_RECOVERY_SCOPE_CHANGED',message:'stale recovery'}},false);if(path.endsWith('/groq-summary-recovery-diagnostic'))return response(diagnostic);return response({source:{segments:[{id:1,startMs:0,endMs:1000,text:'saved source'}]}});});
+ await context.__review({id:'job-a'},target,0);const control=target.children.find(item=>item.tag==='div'&&item.children.some(child=>child.textContent==='복구 스코프 무호출 진단'));assert.ok(control);await control.children.find(item=>item.tag==='button').onclick();assert.match(collect(target),/auditSha256/);assert.match(collect(target),/복구·재호출·완료 처리는 하지 않았습니다/);assert.ok(calls.every(item=>item.method==='GET'));assert.equal(calls.filter(item=>item.path.endsWith('/groq-summary-recovery-diagnostic')).length,1);
+});
