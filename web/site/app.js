@@ -165,6 +165,7 @@ function showGroqSummaryChoice(job,target,requestId){
  statusBox.append(headline,detail,refreshButton,diagnosticButton,diagnosticDetail,correctionButton);
  target.append(reviewButton,statusBox,scopeHost);
   const recoveryDiagnostic=groqRecoveryDiagnosticControl(job,current);recoveryDiagnostic.hidden=true;statusBox.append(recoveryDiagnostic);
+  const compatibilityReview=groqLegacyRecoveryReviewControl(job,current);statusBox.append(compatibilityReview.host);
  let status=null,phase='idle',reason=null,waitUntil=null,readSequence=0,running=false,runButton=null,finalizeButton=null,awaitingApprovalScope=null,unknownBaseline=null,safeUnsentInterruption=false,reviewedScope=null,diagnosticStage=null;
  const render=()=>{
   if(!current())return;
@@ -187,7 +188,7 @@ function showGroqSummaryChoice(job,target,requestId){
   try{
    const saved=await api(statusUrl);
    if(sequence===readSequence&&current()){
-     status=saved;recoveryDiagnostic.hidden=true;
+     status=saved;recoveryDiagnostic.hidden=true;compatibilityReview.host.hidden=true;
     if(phase==='statusUnavailable'||phase==='approved'&&saved?.approval?.state==='APPROVED')phase='idle';
     if(phase==='unknown'&&Number.isSafeInteger(unknownBaseline)&&saved?.completedStages>unknownBaseline)phase='responseLostSaved';
     render();
@@ -195,6 +196,7 @@ function showGroqSummaryChoice(job,target,requestId){
    return saved;
   }catch(error){
     if(sequence===readSequence&&current()&&['SUMMARY_RECOVERY_SCOPE_CHANGED','SUMMARY_RECOVERY_EVIDENCE_INVALID','SUMMARY_RECOVERY_NOT_FOUND'].includes(error.code))recoveryDiagnostic.hidden=false;
+    if(sequence===readSequence&&current()&&error.code==='SUMMARY_RECOVERY_SCOPE_CHANGED')compatibilityReview.load();
    if(sequence===readSequence&&current()&&phase!=='unknown')setPhase('statusUnavailable');
    throw error;
   }
@@ -638,6 +640,38 @@ function showBoundaryReconcileChoice(job,target,requestId){
   }catch(error){review.disabled=false;if(isCurrent())toast(safeError(error));}
  };
  target.append(review);
+}
+function groqLegacyRecoveryReviewControl(job,current){
+ const path='/api/jobs/'+encodeURIComponent(job.id)+'/groq-summary-recovery-compat-review';
+ const host=el('div'),message=el('p',{attrs:{role:'status','aria-live':'polite'}});host.hidden=true;
+ let submitted=false,loading=false,submitError=null;
+ const load=async()=>{
+  if(loading||!current())return;
+  loading=true;
+  try{
+   const review=await api(path);if(!current())return;
+   if(review.kind!=='GROQ_LEGACY_RECOVERY_COMPAT_REVIEW_V1'||review.eligible!==true||review.originalRecoveryPreserved!==true||review.providerCalls!==0||review.writes!==0||typeof review.reviewed!=='boolean')throw Error('호환 복구 검토 상태를 확인할 수 없습니다.');
+   host.hidden=false;empty(host);host.append(message);
+   if(review.reviewed){message.textContent='기존 첫 구간 복구 기록을 보존한 호환성 검토가 기록됐습니다. 저장 상태를 다시 조회하세요.';return;}
+   if(submitted){message.textContent=(submitError?'검토 기록 저장 오류: '+submitError+' ':'검토 요청 결과를 확인할 수 없습니다. ')+'자동 재시도하지 않습니다. 기록 상태를 다시 조회하세요.';return;}
+   message.textContent='첫 구간 복구 기록과 현재 근거의 호환성 검토가 가능합니다. 아래 확인 후 검토 기록 1건만 저장합니다. 모델을 호출하거나 전체 요약을 시작하지 않습니다.';
+   const form=el('form',{className:'fields'});
+   const labels=['원본 DONE 복구 기록과 저장 전사가 보존된 것을 확인했습니다.','과거 근거와 현재 근거의 차이를 검토했습니다.','이 검토는 모델 호출과 자동 진행을 하지 않음을 확인했습니다.','Groq Free 키의 조직·프로젝트 연결은 별도 확인이 필요함을 이해했습니다.'];
+   const checks=labels.map(label=>{const input=el('input',{attrs:{type:'checkbox',required:'true'}}),row=el('label',{text:label});row.prepend(input);form.append(row);return input;});
+   const submit=el('button',{className:'btn secondary small',text:'첫 구간 호환성 검토 기록 1건 저장'});form.append(submit);
+   form.onsubmit=async event=>{
+    event.preventDefault();if(submitted||!current()||checks.some(input=>!input.checked))return;
+    submitted=true;submit.disabled=true;message.textContent='검토 기록 저장 결과를 확인 중입니다. 다시 보내지 않습니다.';
+    try{
+     await api(path,{method:'POST',body:{step:'record-compatibility-review',confirmOriginalRecoveryPreserved:true,confirmHistoricalAndCurrentEvidence:true,confirmNoProviderCall:true,confirmSeparateFreeKeyBinding:true}});
+     if(current())await load();
+    }catch(error){if(current()){submitError=safeError(error);await load();}}
+   };
+   host.append(form);
+  }catch(error){if(current()){host.hidden=error.code==='SUMMARY_RECOVERY_COMPAT_SCOPE_BLOCKED';empty(host);message.textContent='호환 복구 검토 상태 조회 실패: '+safeError(error);host.append(message);}}
+  finally{loading=false;}
+ };
+ return {host,load};
 }
 function groqRecoveryDiagnosticControl(job,current){
  const host=el('div'),button=el('button',{className:'btn secondary small',text:'복구 스코프 무호출 진단'}),detail=el('pre');host.append(button,detail);

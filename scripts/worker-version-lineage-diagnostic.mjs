@@ -1,7 +1,7 @@
 // Workers Builds diagnostic only. All requests are fixed Cloudflare GETs.
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {approvedRemoteBaseline,approvedPreDeployLineage,protectedRemoteBaseline,legacyQuoteRecoveryBinding,sameCanonical} from './remote-state-policy.mjs';
+import {approvedRemoteBaseline,approvedPreDeployLineage,protectedRemoteBaseline,legacyQuoteRecoveryBinding,legacyGroqRecoveryScopeBinding,sameCanonical} from './remote-state-policy.mjs';
 
 export const expectedPriorVersionId=approvedPreDeployLineage.priorVersionId;
 const etag=/^[0-9a-f]{64}$/i;
@@ -15,7 +15,9 @@ function knownBindingAddition(current,prior){
  const names=present.map(item=>item?.name),oldNames=original.map(item=>item?.name);
  if(new Set(names).size!==names.length||new Set(oldNames).size!==oldNames.length)return false;
  const added=present.filter(item=>!oldNames.includes(item.name));
- return added.length===1&&added[0].name===legacyQuoteRecoveryBinding&&added[0].type==='plain_text'&&typeof added[0].text==='string'&&added[0].text.length>0&&sameCanonical(present.filter(item=>item.name!==legacyQuoteRecoveryBinding).sort((a,b)=>a.name.localeCompare(b.name)),[...original].sort((a,b)=>a.name.localeCompare(b.name)));
+ if(added.length!==1)return false;
+ const binding=added[0],known=binding.name===legacyQuoteRecoveryBinding&&binding.type==='plain_text'&&typeof binding.text==='string'&&binding.text.length>0||binding.name===legacyGroqRecoveryScopeBinding&&binding.type==='secret_text'&&!Object.hasOwn(binding,'text');
+ return known&&sameCanonical(present.filter(item=>item.name!==binding.name).sort((a,b)=>a.name.localeCompare(b.name)),[...original].sort((a,b)=>a.name.localeCompare(b.name)));
 }
 
 export function safeWorkerLineageReport(deployments,current,prior,baseline=approvedRemoteBaseline){

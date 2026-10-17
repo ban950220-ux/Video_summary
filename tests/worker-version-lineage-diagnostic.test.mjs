@@ -26,6 +26,17 @@ test('fixed account and versions use only three authenticated GETs and print saf
  const output=writes.join('\n'),report=JSON.parse(output);assert.ok(!output.includes(secret));assert.ok(!output.includes(approvedPreDeployLineage.scriptEtag));assert.equal(report.activeDeploymentSourceAnnotation,'OTHER');assert.equal(report.priorDeploymentSourceAnnotation,'EXPECTED');assert.equal(report.activeDeploymentSource,'DASHBOARD');assert.equal(report.priorDeploymentSource,'WRANGLER');assert.equal(report.scriptEtagMatchesPinned,true);assert.equal(report.scriptContentEqual,true);assert.equal(report.runtimeMetadataEqual,true);assert.equal(report.knownBindingAddition,true);assert.equal(report.codeLineageEvidence,'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR');assert.equal(report.sourceAnnotationGuardMatch,false);assert.equal(report.activeAssetsBindingCount,1);assert.equal(report.assetSetIdentifier,'NOT_EXPOSED_BY_VERSION_GET');
 });
 
+test('one encrypted Groq scope addition preserves exact code and all prior bindings',()=>{
+ const current=version(approvedRemoteBaseline.activeVersionId),prior=version(priorVersionId);
+ current.resources.bindings=current.resources.bindings.filter(item=>item.name!=='GEMINI_LEGACY_QUOTE_RECOVERY_JSON');
+ current.resources.bindings.push({name:'GROQ_LEGACY_RECOVERY_SCOPE_JSON',type:'secret_text'});
+ assert.equal(safeWorkerLineageReport(deployments(),current,prior).codeLineageEvidence,'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR');
+ const wrongType=structuredClone(current);wrongType.resources.bindings.at(-1).type='plain_text';assert.equal(safeWorkerLineageReport(deployments(),wrongType,prior).knownBindingAddition,false);
+ const exposed=structuredClone(current);exposed.resources.bindings.at(-1).text=secret;assert.equal(safeWorkerLineageReport(deployments(),exposed,prior).knownBindingAddition,false);
+ const altered=structuredClone(current);altered.resources.bindings[0].secret='changed';assert.equal(safeWorkerLineageReport(deployments(),altered,prior).knownBindingAddition,false);
+ const extra=structuredClone(current);extra.resources.bindings.push({name:'OTHER',type:'secret_text'});assert.equal(safeWorkerLineageReport(deployments(),extra,prior).knownBindingAddition,false);
+});
+
 test('missing or differing script hashes and annotations never establish lineage',()=>{
  const current=version(approvedRemoteBaseline.activeVersionId),prior=version(priorVersionId);
  let report=safeWorkerLineageReport(deployments(),current,{...prior,resources:{...prior.resources,script:{etag:'b'.repeat(64)}}});assert.equal(report.scriptContentEqual,false);assert.equal(report.codeLineageEvidence,'UNVERIFIED');
