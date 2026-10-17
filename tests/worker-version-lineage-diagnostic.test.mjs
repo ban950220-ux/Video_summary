@@ -27,13 +27,19 @@ test('fixed account and versions use only three authenticated GETs and print saf
  const output=writes.join('\n'),report=JSON.parse(output);assert.ok(!output.includes(secret));assert.ok(!output.includes(approvedPreDeployLineage.scriptEtag));assert.ok(!output.includes(approvedRemoteBaseline.activeVersionId));assert.ok(!output.includes(priorVersionId));assert.equal(report.activeDeploymentSourceAnnotation,'OTHER');assert.equal(report.priorDeploymentSourceAnnotation,'EXPECTED');assert.equal(report.activeDeploymentSource,'DASHBOARD');assert.equal(report.priorDeploymentSource,'WRANGLER');assert.equal(report.scriptEtagMatchesPinned,true);assert.equal(report.scriptContentEqual,true);assert.equal(report.runtimeMetadataEqual,true);assert.equal(report.knownBindingAddition,true);assert.equal(report.codeLineageEvidence,'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR');assert.equal(report.sourceAnnotationGuardMatch,false);assert.equal(report.activeAssetsBindingCount,1);assert.equal(report.assetSetIdentifier,'NOT_EXPOSED_BY_VERSION_GET');
 });
 
-test('real pre-deploy guard consumes the encrypted-scope lineage evidence on both reads',async()=>{
- const b=approvedRemoteBaseline,calls=[],bindings=[...Object.entries(b.runtimeFlags).map(([name,text])=>({name,text,type:'plain_text'})),
+for(const synthesis of [false,true])test(`real pre-deploy guard consumes ${synthesis?'approved synthesis':'encrypted-scope'} lineage evidence on both reads`,async()=>{
+ const b={...approvedRemoteBaseline,completeSynthesisEnabled:synthesis},calls=[],bindings=[...Object.entries(b.runtimeFlags).map(([name,text])=>({name,text,type:'plain_text'})),
   {name:'DB',type:'d1',id:b.databaseId},{name:'ASSETS',type:'assets'},
   {name:'ACCESS_AUD',type:'plain_text',text:'test-audience-value'},{name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:'https://test.cloudflareaccess.com'},
   ...['ACCESS_OWNER_EMAIL','KEY_ENCRYPTION_KEY_B64','ENABLE_GEMINI_TWO_PASS','GEMINI_TWO_PASS_ALLOWED_JOB_ID','GROQ_LEGACY_RECOVERY_SCOPE_JSON'].map(name=>({name,type:'secret_text'})),
   {name:'GEMINI_LEGACY_QUOTE_RECOVERY_JSON',type:'plain_text',text:secret}];
  const current=version(b.activeVersionId);current.resources.bindings=current.resources.bindings.filter(x=>x.name!=='GEMINI_LEGACY_QUOTE_RECOVERY_JSON');current.resources.bindings.push({name:'GROQ_LEGACY_RECOVERY_SCOPE_JSON',type:'secret_text'});
+ const prior=version(priorVersionId);
+ if(synthesis){
+  prior.resources.bindings.push({name:'GROQ_LEGACY_RECOVERY_SCOPE_JSON',type:'secret_text'});
+  current.resources.bindings.push({name:'ENABLE_COMPLETE_SYNTHESIS',type:'plain_text',text:'true'});
+  bindings.push({name:'ENABLE_COMPLETE_SYNTHESIS',type:'plain_text',text:'true'});
+ }
  const fetcher=async(url,options)=>{
   calls.push(options.method);let result;
   if(url.endsWith('/workers/services/'+b.workerName))result={default_environment:{environment:'production',script:{tag:'expected-tag'}}};
@@ -44,12 +50,30 @@ test('real pre-deploy guard consumes the encrypted-scope lineage evidence on bot
   else if(url.endsWith('/script-settings'))result=b.scriptSettings;
   else if(url.includes('/deployments'))result={deployments:deployments()};
   else if(url.endsWith('/versions/'+b.activeVersionId))result=current;
-  else if(url.endsWith('/versions/'+priorVersionId))result=version(priorVersionId);
+  else if(url.endsWith('/versions/'+priorVersionId))result=prior;
   else throw Error('unexpected mock request');
   return {ok:true,json:async()=>({success:true,result})};
  };
  const result=await assertRemoteDeploymentBaseline({token:secret,baseline:b,ciMatchTag:'expected-tag',fetcher});
  assert.equal(result.activeVersions[0].id,b.activeVersionId);assert.equal(calls.length,22);assert.ok(calls.every(method=>method==='GET'));
+});
+
+test('only explicitly approved single synthesis addition establishes lineage',()=>{
+ const b={...approvedRemoteBaseline,completeSynthesisEnabled:true},current=version(b.activeVersionId),prior=version(priorVersionId);
+ current.resources.bindings=current.resources.bindings.filter(item=>item.name!=='GEMINI_LEGACY_QUOTE_RECOVERY_JSON');
+ current.resources.bindings.push({name:'ENABLE_COMPLETE_SYNTHESIS',type:'plain_text',text:'true'});
+ assert.equal(safeWorkerLineageReport(deployments(),current,prior,b).knownBindingAddition,true);
+ assert.equal(safeWorkerLineageReport(deployments(),current,prior).knownBindingAddition,false);
+ for(const added of [{name:'GROQ_LEGACY_RECOVERY_SCOPE_JSON',type:'secret_text'},{name:'GEMINI_LEGACY_QUOTE_RECOVERY_JSON',type:'plain_text',text:secret}]){
+  const previous=structuredClone(current),changed=structuredClone(current);changed.resources.bindings.push(added);
+  assert.equal(safeWorkerLineageReport(deployments(),changed,{...previous,id:priorVersionId},b).knownBindingAddition,false);
+ }
+ for(const mutate of [
+  value=>{value.resources.bindings.at(-1).text='false';},
+  value=>{value.resources.bindings.at(-1).type='secret_text';},
+  value=>{value.resources.bindings[0].secret='changed';},
+  value=>value.resources.bindings.push({name:'OTHER',type:'plain_text',text:'true'}),
+ ]){const changed=structuredClone(current);mutate(changed);assert.equal(safeWorkerLineageReport(deployments(),changed,prior,b).knownBindingAddition,false);}
 });
 
 test('one encrypted Groq scope addition preserves exact code and all prior bindings',()=>{

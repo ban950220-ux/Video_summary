@@ -17,6 +17,7 @@ export const sameCanonical=(left,right)=>canonical(left)===canonical(right);
 const fail=code=>{throw Error(`Remote deployment guard: ${code}`);};
 export const legacyQuoteRecoveryBinding='GEMINI_LEGACY_QUOTE_RECOVERY_JSON';
 export const legacyGroqRecoveryScopeBinding='GROQ_LEGACY_RECOVERY_SCOPE_JSON';
+export const completeSynthesisBinding='ENABLE_COMPLETE_SYNTHESIS';
 const requiredBindingTypes=new Map([
   ['DB','d1'],['ACCESS_AUD','plain_text'],['ACCESS_TEAM_DOMAIN','plain_text'],
   ['ACCESS_OWNER_EMAIL','secret_text'],['KEY_ENCRYPTION_KEY_B64','secret_text'],
@@ -27,13 +28,14 @@ const requiredBindingTypes=new Map([
   [legacyQuoteRecoveryBinding,'plain_text'],
 ]);
 
-export function inspectBindingSet(bindings,{expectAssets=false}={}){
+export function inspectBindingSet(bindings,{expectAssets=false,completeSynthesisEnabled=false}={}){
   if(!Array.isArray(bindings))return {available:false,unique:false,complete:false};
   const names=bindings.map(binding=>binding?.name);
   const unique=names.every(name=>typeof name==='string')&&new Set(names).size===names.length;
   const actual=new Map(bindings.map(binding=>[binding?.name,binding?.type]));
   const expected=new Map(requiredBindingTypes);
   if(expectAssets)expected.set('ASSETS','assets');
+  if(completeSynthesisEnabled===true)expected.set(completeSynthesisBinding,'plain_text');
   if(actual.has(legacyGroqRecoveryScopeBinding))expected.set(legacyGroqRecoveryScopeBinding,'secret_text');
   return {available:true,unique,complete:unique&&actual.size===expected.size&&[...expected].every(([name,type])=>actual.get(name)===type)};
 }
@@ -75,12 +77,16 @@ export const approvedPreDeployLineage={
 export function protectedRemoteBaseline(env=process.env){
  let approval;try{approval=JSON.parse(env.GROQ_DEPLOYMENT_EVIDENCE_JSON);}catch{fail('DEPLOYMENT_EVIDENCE_UNAVAILABLE');}
  const keys=['kind','accountId','workerName','databaseId','activeVersionId','priorVersionId','scriptEtag','sourceCommit','reviewedAt','expiresAt'];
+ if(approval&&Object.hasOwn(approval,'completeSynthesisEnabled')){
+  if(approval.completeSynthesisEnabled!==true)fail('DEPLOYMENT_EVIDENCE_INVALID');
+  keys.push('completeSynthesisEnabled');
+ }
  if(!approval||typeof approval!=='object'||Array.isArray(approval)||Object.keys(approval).sort().join(',')!==keys.sort().join(','))fail('DEPLOYMENT_EVIDENCE_INVALID');
  const uuid=/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i,hex32=/^[0-9a-f]{32}$/i,worker=/^[a-z0-9][a-z0-9-]{0,62}$/i,sha=/^[0-9a-f]{40}$/i,iso=/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
  if(approval.kind!=='REMOTE_DEPLOYMENT_REVIEW_V1'||!hex32.test(approval.accountId)||!worker.test(approval.workerName)||!uuid.test(approval.databaseId)||!uuid.test(approval.activeVersionId)||!uuid.test(approval.priorVersionId)||!(/^[0-9a-f]{64}$/i).test(approval.scriptEtag)||approval.priorVersionId===approval.activeVersionId||!sha.test(approval.sourceCommit)||!iso.test(approval.reviewedAt)||!iso.test(approval.expiresAt))fail('DEPLOYMENT_EVIDENCE_INVALID');
  const start=Date.parse(approval.reviewedAt),end=Date.parse(approval.expiresAt),now=Date.now();
  if(!Number.isFinite(start)||!Number.isFinite(end)||start>now||end<=now||end-start>24*60*60*1000)fail('DEPLOYMENT_EVIDENCE_EXPIRED');
- return {...approvedRemoteBaseline,accountId:approval.accountId,workerName:approval.workerName,databaseId:approval.databaseId,activeVersionId:approval.activeVersionId,priorVersionId:approval.priorVersionId,scriptEtag:approval.scriptEtag,sourceCommit:approval.sourceCommit};
+ return {...approvedRemoteBaseline,accountId:approval.accountId,workerName:approval.workerName,databaseId:approval.databaseId,activeVersionId:approval.activeVersionId,priorVersionId:approval.priorVersionId,scriptEtag:approval.scriptEtag,sourceCommit:approval.sourceCommit,completeSynthesisEnabled:approval.completeSynthesisEnabled===true};
 }
 
 export function assertProtectedDeployTarget(config,baseline,env={}){
@@ -110,10 +116,12 @@ export function assertRemoteState(remote,baseline,{postDeploy=false,preDeployLin
   if(canonical(remote.observability)!==canonical(baseline.observability))fail('OBSERVABILITY_MISMATCH');
   for(const path of Object.keys(requiredObservability))if(valueAt(remote.scriptSettings.observability,path)===undefined||valueAt(baseline.scriptSettings.observability,path)===undefined)fail('SCRIPT_SETTINGS_OBSERVABILITY_INCOMPLETE');
   if(canonical(remote.scriptSettings.observability)!==canonical(baseline.scriptSettings.observability))fail('SCRIPT_SETTINGS_OBSERVABILITY_MISMATCH');
-  const shape=inspectBindingSet(remote.bindings,{expectAssets:postDeploy||baseline.assetsPresent});
+  if(Object.hasOwn(baseline,'completeSynthesisEnabled')&&typeof baseline.completeSynthesisEnabled!=='boolean')fail('RUNTIME_FLAGS_BASELINE_INVALID');
+  const shape=inspectBindingSet(remote.bindings,{expectAssets:postDeploy||baseline.assetsPresent,completeSynthesisEnabled:baseline.completeSynthesisEnabled});
   if(!shape.available)fail('BINDINGS_UNAVAILABLE');
   if(!shape.unique||!shape.complete)fail('BINDINGS_UNEXPECTED');
   const bindings=new Map(remote.bindings.map(binding=>[binding.name,binding]));
+  if(baseline.completeSynthesisEnabled===true&&bindings.get(completeSynthesisBinding)?.text!=='true')fail('RUNTIME_FLAGS_MISMATCH');
   if(typeof bindings.get(legacyQuoteRecoveryBinding)?.text!=='string'||!bindings.get(legacyQuoteRecoveryBinding).text)fail('RECOVERY_SETTING_UNAVAILABLE');
   if(bindings.get('DB')?.id!==baseline.databaseId)fail('D1_MISMATCH');
   const expectedFlags={...baseline.runtimeFlags,...(postDeploy?{ENABLE_LIVE_FREE:'true'}:{})};
