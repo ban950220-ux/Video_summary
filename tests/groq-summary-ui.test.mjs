@@ -5,6 +5,35 @@ import {runInNewContext} from 'node:vm';
 import {runApprovedGroqSummary,detailRequestIsCurrent,beginDetailAction} from '../web/site/audio-runner.mjs';
 import {groqSummaryProgress} from '../web/site/groq-summary-progress.mjs';
 
+test('legacy recovery review UI requires eligibility and one deliberate POST, then reads the saved result',async()=>{
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__reviewControl=groqLegacyRecoveryReviewControl;');
+ const node=tag=>({tag,children:[],hidden:false,append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}});
+ let eligible=true,reviewed=false,posts=0,releasePost;
+ const fetcher=async(path,options)=>{
+  assert.match(path,/\/groq-summary-recovery-compat-review$/);
+  if(options.method==='POST'){
+   posts++;assert.equal(JSON.parse(options.body).step,'record-compatibility-review');
+   await new Promise(resolve=>releasePost=resolve);reviewed=true;throw Error('response lost after commit');
+  }
+  return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({kind:'GROQ_LEGACY_RECOVERY_COMPAT_REVIEW_V1',eligible,reviewed,originalRecoveryPreserved:true,providerCalls:0,writes:0})};
+ };
+ const context={document:{createElement:node},window:{},location:{hash:''},fetch:fetcher};
+ runInNewContext(source,context,{filename:'web/site/app.js'});
+ const control=context.__reviewControl({id:'job-a'},()=>true);
+ assert.equal(control.host.hidden,true);assert.equal(posts,0);
+ await control.load();assert.equal(control.host.hidden,false);assert.equal(posts,0);
+ const form=control.host.children.find(item=>item.tag==='form');assert.ok(form);
+ await form.onsubmit({preventDefault(){}});assert.equal(posts,0);
+ for(const row of form.children.filter(item=>item.tag==='label'))row.children[0].checked=true;
+ const first=form.onsubmit({preventDefault(){}});await form.onsubmit({preventDefault(){}});
+ assert.equal(posts,1);releasePost();await first;
+ assert.equal(posts,1);assert.equal(control.host.children.some(item=>item.tag==='form'),false);
+ assert.match(control.host.children[0].textContent,/검토가 기록/);
+ eligible=false;reviewed=false;
+ const ineligible=context.__reviewControl({id:'job-b'},()=>true);await ineligible.load();
+ assert.equal(ineligible.host.children.some(item=>item.tag==='form'),false);assert.equal(posts,1);
+});
+
 test('reviewed gap UI discloses the held group and records approval before offering execution',async()=>{
  const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
  const preview={approved:false,jobId:'job-a',transcriptHash:'a'.repeat(64),sourceAuditSha256:'b'.repeat(64),model:'openai/gpt-oss-120b',outputKind:'RAW_CHECKPOINTS_WITH_REVIEW_GAP',contractVersion:'raw-checkpoints-reviewed-gap-v1',gap:{stage:'raw:8',firstId:144,lastId:165,failureCode:'SUMMARY_RESPONSE_INVALID',originalSha256:'c'.repeat(64),correctionSha256:'d'.repeat(64)},completedRawStages:8,contiguousRawStages:8,heldRawStages:1,pendingRawStages:11,rawStages:20,nextRawStage:'raw:9',windowStart:9,totalRequests:20,maxRequests:11,maxInputTokensPerRequest:4800,maxCompletionTokensPerRequest:1800,totalTokenUpperBound:72600,credentialGeneration:'opaque'};
