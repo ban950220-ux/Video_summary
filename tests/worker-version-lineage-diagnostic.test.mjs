@@ -2,6 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {expectedPriorVersionId,runWorkerVersionLineageDiagnostic,safeWorkerLineageReport} from '../scripts/worker-version-lineage-diagnostic.mjs';
 import {approvedRemoteBaseline,approvedPreDeployLineage} from '../scripts/remote-state-policy.mjs';
+import {assertRemoteDeploymentBaseline} from '../scripts/read-remote-state.mjs';
 
 const priorVersionId=approvedPreDeployLineage.priorVersionId;
 const reviewEnv={GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify({kind:'REMOTE_DEPLOYMENT_REVIEW_V1',accountId:approvedRemoteBaseline.accountId,workerName:approvedRemoteBaseline.workerName,databaseId:approvedRemoteBaseline.databaseId,activeVersionId:approvedRemoteBaseline.activeVersionId,priorVersionId,scriptEtag:approvedRemoteBaseline.scriptEtag,sourceCommit:approvedRemoteBaseline.sourceCommit,reviewedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString()})};
@@ -23,7 +24,32 @@ test('fixed account and versions use only three authenticated GETs and print saf
  };
  assert.equal(await runWorkerVersionLineageDiagnostic({env:{...reviewEnv,WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher,write:value=>writes.push(value)}),true);
  assert.equal(calls.length,3);assert.ok(calls.every(call=>call.method==='GET'&&call.authorized&&call.url.startsWith(`https://api.cloudflare.com/client/v4/accounts/${approvedRemoteBaseline.accountId}/workers/scripts/${approvedRemoteBaseline.workerName}/`)));
- const output=writes.join('\n'),report=JSON.parse(output);assert.ok(!output.includes(secret));assert.ok(!output.includes(approvedPreDeployLineage.scriptEtag));assert.equal(report.activeDeploymentSourceAnnotation,'OTHER');assert.equal(report.priorDeploymentSourceAnnotation,'EXPECTED');assert.equal(report.activeDeploymentSource,'DASHBOARD');assert.equal(report.priorDeploymentSource,'WRANGLER');assert.equal(report.scriptEtagMatchesPinned,true);assert.equal(report.scriptContentEqual,true);assert.equal(report.runtimeMetadataEqual,true);assert.equal(report.knownBindingAddition,true);assert.equal(report.codeLineageEvidence,'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR');assert.equal(report.sourceAnnotationGuardMatch,false);assert.equal(report.activeAssetsBindingCount,1);assert.equal(report.assetSetIdentifier,'NOT_EXPOSED_BY_VERSION_GET');
+ const output=writes.join('\n'),report=JSON.parse(output);assert.ok(!output.includes(secret));assert.ok(!output.includes(approvedPreDeployLineage.scriptEtag));assert.ok(!output.includes(approvedRemoteBaseline.activeVersionId));assert.ok(!output.includes(priorVersionId));assert.equal(report.activeDeploymentSourceAnnotation,'OTHER');assert.equal(report.priorDeploymentSourceAnnotation,'EXPECTED');assert.equal(report.activeDeploymentSource,'DASHBOARD');assert.equal(report.priorDeploymentSource,'WRANGLER');assert.equal(report.scriptEtagMatchesPinned,true);assert.equal(report.scriptContentEqual,true);assert.equal(report.runtimeMetadataEqual,true);assert.equal(report.knownBindingAddition,true);assert.equal(report.codeLineageEvidence,'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR');assert.equal(report.sourceAnnotationGuardMatch,false);assert.equal(report.activeAssetsBindingCount,1);assert.equal(report.assetSetIdentifier,'NOT_EXPOSED_BY_VERSION_GET');
+});
+
+test('real pre-deploy guard consumes the encrypted-scope lineage evidence on both reads',async()=>{
+ const b=approvedRemoteBaseline,calls=[],bindings=[...Object.entries(b.runtimeFlags).map(([name,text])=>({name,text,type:'plain_text'})),
+  {name:'DB',type:'d1',id:b.databaseId},{name:'ASSETS',type:'assets'},
+  {name:'ACCESS_AUD',type:'plain_text',text:'test-audience-value'},{name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:'https://test.cloudflareaccess.com'},
+  ...['ACCESS_OWNER_EMAIL','KEY_ENCRYPTION_KEY_B64','ENABLE_GEMINI_TWO_PASS','GEMINI_TWO_PASS_ALLOWED_JOB_ID','GROQ_LEGACY_RECOVERY_SCOPE_JSON'].map(name=>({name,type:'secret_text'})),
+  {name:'GEMINI_LEGACY_QUOTE_RECOVERY_JSON',type:'plain_text',text:secret}];
+ const current=version(b.activeVersionId);current.resources.bindings=current.resources.bindings.filter(x=>x.name!=='GEMINI_LEGACY_QUOTE_RECOVERY_JSON');current.resources.bindings.push({name:'GROQ_LEGACY_RECOVERY_SCOPE_JSON',type:'secret_text'});
+ const fetcher=async(url,options)=>{
+  calls.push(options.method);let result;
+  if(url.endsWith('/workers/services/'+b.workerName))result={default_environment:{environment:'production',script:{tag:'expected-tag'}}};
+  else if(url.endsWith('/environments/production'))result={script:{compatibility_date:b.compatibilityDate,observability:b.observability}};
+  else if(url.endsWith('/bindings'))result=bindings;
+  else if(url.endsWith('/subdomain'))result={enabled:true,previews_enabled:false};
+  else if(url.includes('/routes?')||url.includes('/workers/domains/records?'))result=[];
+  else if(url.endsWith('/script-settings'))result=b.scriptSettings;
+  else if(url.includes('/deployments'))result={deployments:deployments()};
+  else if(url.endsWith('/versions/'+b.activeVersionId))result=current;
+  else if(url.endsWith('/versions/'+priorVersionId))result=version(priorVersionId);
+  else throw Error('unexpected mock request');
+  return {ok:true,json:async()=>({success:true,result})};
+ };
+ const result=await assertRemoteDeploymentBaseline({token:secret,baseline:b,ciMatchTag:'expected-tag',fetcher});
+ assert.equal(result.activeVersions[0].id,b.activeVersionId);assert.equal(calls.length,22);assert.ok(calls.every(method=>method==='GET'));
 });
 
 test('one encrypted Groq scope addition preserves exact code and all prior bindings',()=>{
