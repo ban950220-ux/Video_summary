@@ -30,15 +30,105 @@ test('recovery metadata SQL stays SELECT-only and returns no IDs, hashes, report
  const f=await fixture();try{
   f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary-recovery',0,'DONE',?,?)").run(f.id+':diagnostic-fixture',f.id,new Date().toISOString(),JSON.stringify({sourceSha256:'a'.repeat(64),auditSha256:'PRIVATE_AUDIT',report:{summary:'PRIVATE_REPORT_TEXT'},private:'PRIVATE_RESULT'}));
   f.db.prepare("INSERT INTO provider_credentials(owner_id,provider,cipher_version,iv_b64,ciphertext_b64,updated_at) VALUES('owner','groq',1,'PRIVATE_IV','PRIVATE_CIPHER',?)").run(new Date().toISOString());
-  const sql=readFileSync(new URL('../tools/groq-recovery-metadata.sql',import.meta.url),'utf8').replaceAll('a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9',f.id),boundary=sql.indexOf('-- Registration does not');f.db.exec('PRAGMA query_only=ON');
+  const sql=readFileSync(new URL('../tools/groq-recovery-metadata.sql',import.meta.url),'utf8').replaceAll('__OWNER_SCOPED_JOB_UUID__',f.id),boundary=sql.indexOf('-- Registration does not');f.db.exec('PRAGMA query_only=ON');
   const records=f.db.prepare(sql.slice(0,boundary)).all(),registration=f.db.prepare(sql.slice(boundary)).all();assert.equal(records[0].recovery_row_number,1);assert.equal(records[0].state,'DONE');assert.equal(records[0].valid_source_hash_shape,1);assert.equal(records[0].valid_audit_hash_shape,0);assert.equal(registration[0].groq_key_registered,1);assert.equal(registration[0].project_binding_evidence,'ORG_PROJECT_MAPPING_NOT_STORED');assert.doesNotMatch(JSON.stringify({records,registration}),/PRIVATE_|[a-f0-9]{64}|diagnostic-fixture|recovery_operation_id|recorded_source_hash/);
  }finally{f.db.close();}
 });
-async function fixture({complete=true,large=false,sourceText=null,segmentText=null,longSource=false,fullScale=false}={}){
+test('one exact legacy recovery needs an immutable review and reblocks on evidence drift',async()=>{
+ const f=await fixture({fixedId:crypto.randomUUID()}),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  globalThis.fetch=async()=>{calls++;throw Error('provider call forbidden');};
+  const job=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),audit=JSON.parse(job.audit_json),raw=f.segments.map(item=>item.text).join('\n');
+  const legacyHash=await digest([raw,f.segments,audit.audioFileSha256,promptAudit({audit,duration_seconds:job.duration_seconds})]);
+  const oldId=f.id+':groq-summary:'+legacyHash+':raw:0',failedId=f.id+':groq-summary:'+f.plan.transcriptHash+':raw:0',stamp='2020-01-02T09:00:00.000Z';
+  const responseText=JSON.stringify(valid(1)),failedResult=JSON.stringify({reviewResult:{partialText:responseText,usage:{inputTokens:300,outputTokens:90,reasoningTokens:10,totalTokens:390}}});
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").run(oldId,f.id,stamp,'{}');
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_CHECKPOINT_TOO_LARGE',?)").run(failedId,f.id,stamp,failedResult);
+  for(const [kind,state] of [['review','REVIEWED'],['approval','APPROVED']])f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)').run(f.id+':groq-summary-pilot:'+kind+':'+legacyHash,f.id,'groq-summary-pilot-'+kind,0,state,stamp,'{}');
+  const usageId=crypto.randomUUID(),provenance='PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN';
+  f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',390,0,NULL,?,?)").run(usageId,f.id,provenance,stamp);
+  const recoveryUrl=f.path+'/groq-summary-checkpoint-recovery',preview=await(await routeApi(request(recoveryUrl),f.env)).json();
+  assert.equal(preview.failedOperationId,failedId);
+  const body={step:'recover',evidenceHash:preview.evidenceHash,failedOperationId:failedId,contractHash:f.plan.transcriptHash,responseSha256:preview.responseSha256,acknowledgeOriginalUsage:390,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true};
+  const recovered=await routeApi(request(recoveryUrl,'POST',body),f.env);assert.equal(recovered.status,200,await recovered.clone().text());
+  const rowId=f.id+':groq-summary-recovery:'+f.plan.transcriptHash+':raw:0',row=f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(rowId);
+  const {evidenceHash,recovered:unusedRecovered,recoveryRecordExists,automaticContinuation,providerCalls,usageEventId,usageProvenance,...historicalEvidence}=preview;
+  assert.equal(evidenceHash,JSON.parse(row.result_json).evidenceHash);assert.equal(unusedRecovered,false);assert.equal(recoveryRecordExists,false);assert.equal(automaticContinuation,false);assert.equal(providerCalls,0);assert.equal(typeof usageEventId,'string');assert.equal(typeof usageProvenance,'string');
+  const originalJson=JSON.stringify({...JSON.parse(row.result_json),evidenceHash:await digest(historicalEvidence)});
+  f.db.prepare('UPDATE yta_operations SET result_json=?,created_at=? WHERE id=?').run(originalJson,'2020-01-02T09:01:00.000Z',rowId);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  const authorizedAt=new Date(Date.now()-1000).toISOString(),expiresAt=new Date(Date.now()+3600000).toISOString();
+  const scope={kind:'GROQ_LEGACY_RECOVERY_COMPAT_V1',jobId:f.id,ownerId:'owner',stage:'raw:0',recoveryOperationId:rowId,failedOperationId:failedId,historicalEvidenceHash:JSON.parse(originalJson).evidenceHash,recoveryCreatedBefore:'2020-01-03T00:00:00.000Z',authorizedAt,expiresAt};
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(scope);
+  const reviewUrl=f.path+'/groq-summary-recovery-compat-review';
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,historicalEvidenceHash:'0'.repeat(64)});
+  assert.equal((await routeApi(request(reviewUrl),f.env)).status,409,'historical hash must match independently of the time bound');
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(scope);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify({...JSON.parse(originalJson),evidenceHash:'0'.repeat(64)}),rowId);
+  assert.equal((await routeApi(request(reviewUrl),f.env)).status,409,'stored historical hash must match the recomputed evidence');
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(originalJson,rowId);
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,recoveryCreatedBefore:'2026-10-13T10:51:47.001Z'});
+  assert.equal((await routeApi(request(reviewUrl),f.env)).status,409,'later cutoff must fail even when the historical hash matches');
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(scope);
+  const inspection=await routeApi(request(reviewUrl),f.env);assert.equal(inspection.status,200,await inspection.clone().text());
+  assert.deepEqual((({eligible,reviewed,providerCalls,writes})=>({eligible,reviewed,providerCalls,writes}))(await inspection.json()),{eligible:true,reviewed:false,providerCalls:0,writes:0});
+  const denied=await handleSiteRequest(request(reviewUrl),{...f.env,ACCESS_TEAM_DOMAIN:'https://owner.cloudflareaccess.com',ACCESS_AUD:'legacy-recovery-owner-audience',ACCESS_OWNER_EMAIL:'owner@example.com'});assert.equal(denied.status,401);
+  assert.equal((await routeApi(request(reviewUrl,'POST',{step:'record-compatibility-review'}),f.env)).status,400);
+  const siblingJob=await sibling(f,{approve:false});assert.equal((await routeApi(request(siblingJob.path+'/groq-summary-recovery-compat-review'),f.env)).status,409);
+  const changes=f.db.prepare('SELECT total_changes() AS n').get().n;
+  const reviewBody={step:'record-compatibility-review',confirmOriginalRecoveryPreserved:true,confirmHistoricalAndCurrentEvidence:true,confirmNoProviderCall:true,confirmSeparateFreeKeyBinding:true};
+  const reviewed=await routeApi(request(reviewUrl,'POST',reviewBody),f.env);assert.equal(reviewed.status,200,await reviewed.clone().text());assert.equal((await reviewed.json()).reviewed,true);
+  assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n,changes+1);assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(rowId).result_json,originalJson);
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review' AND state='REVIEWED'").get(f.id).n,1);
+  const status=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal(status.status,200,await status.clone().text());assert.equal((await status.json()).completedStages,1);
+  assert.equal((await routeApi(request(reviewUrl,'POST',reviewBody),f.env)).status,409);
+  const oldFailedAt=f.db.prepare('SELECT created_at FROM yta_operations WHERE id=?').get(failedId).created_at;
+  f.db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run('2020-01-02T09:00:01.000Z',failedId);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run(oldFailedAt,failedId);
+  f.db.prepare('UPDATE usage_events SET provenance=? WHERE id=?').run('PROVIDER_REPORTED_ACCOUNT_REMAINING_UNKNOWN',usageId);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE usage_events SET provenance=? WHERE id=?').run(provenance,usageId);
+  const duplicateUsageId=crypto.randomUUID();f.db.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',390,0,NULL,?,?)").run(duplicateUsageId,f.id,provenance,stamp);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);f.db.prepare('DELETE FROM usage_events WHERE id=?').run(duplicateUsageId);
+  const pilotReviewId=f.id+':groq-summary-pilot:review:'+legacyHash;
+  f.db.prepare('UPDATE yta_operations SET provider=? WHERE id=?').run('unrelated-provider',pilotReviewId);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE yta_operations SET provider=? WHERE id=?').run('groq-summary-pilot-review',pilotReviewId);
+  const pilotApprovalId=f.id+':groq-summary-pilot:approval:'+legacyHash;
+  for(const [id,field,value] of [[pilotApprovalId,'provider','unrelated-provider'],[oldId,'provider','unrelated-provider'],[pilotReviewId,'units',1],[pilotApprovalId,'created_at','2020-01-02T09:00:02.000Z'],[pilotReviewId,'error_code','CHANGED'],[oldId,'units',1],[oldId,'created_at','2020-01-02T09:00:02.000Z']]){
+   const before=f.db.prepare(`SELECT ${field} AS value FROM yta_operations WHERE id=?`).get(id).value;
+   f.db.prepare(`UPDATE yta_operations SET ${field}=? WHERE id=?`).run(value,id);
+   assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409,`${id} ${field}`);
+   f.db.prepare(`UPDATE yta_operations SET ${field}=? WHERE id=?`).run(before,id);
+  }
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{"changed":true}',pilotReviewId);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{}',pilotReviewId);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{}',rowId);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(originalJson,rowId);
+  f.db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(raw+'changed',f.id);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(raw,f.id);
+  f.db.prepare('UPDATE yta_sources SET provenance=? WHERE job_id=?').run('GEMINI_OWNED_AUDIO',f.id);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE yta_sources SET provenance=? WHERE job_id=?').run('GROQ_OWNED_AUDIO',f.id);
+  f.db.prepare('UPDATE yta_operations SET id=? WHERE id=?').run(rowId+':wrong',rowId);assert.equal((await routeApi(request(reviewUrl),f.env)).status,409);
+  f.db.prepare('UPDATE yta_operations SET id=? WHERE id=?').run(rowId,rowId+':wrong');
+  f.db.prepare('UPDATE jobs SET owner_id=? WHERE id=?').run('different-owner',f.id);assert.equal((await routeApi(request(reviewUrl),f.env)).status,404);
+  f.db.prepare('UPDATE jobs SET owner_id=? WHERE id=?').run('owner',f.id);
+  const seal=f.db.prepare("SELECT id,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").get(f.id);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{}',seal.id);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(seal.result_json,seal.id);
+  for(const changed of [null,{...scope,jobId:crypto.randomUUID()},{...scope,recoveryOperationId:rowId+':other'},{...scope,failedOperationId:failedId+':other'},{...scope,historicalEvidenceHash:'0'.repeat(64)},{...scope,ownerId:'someone-else'},{...scope,stage:'raw:1'},{...scope,expiresAt:new Date(Date.now()-1).toISOString()},{...scope,expiresAt:new Date(Date.now()+73*3600000).toISOString()}]){
+   if(changed)f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(changed);else delete f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON;
+   assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+   assert.equal((await routeApi(request(reviewUrl),f.env)).status,409);
+  }
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(scope);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,200);assert.equal(calls,0);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+async function fixture({complete=true,large=false,sourceText=null,segmentText=null,longSource=false,fullScale=false,fixedId=null}={}){
  const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));
  const DB={prepare(sql){const make=args=>({bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:r.changes}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);}};
  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'NOT_REAL_TEST_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
- const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:fullScale?5892.864:longSource?6000:600,title:'Offline Groq summary'}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
+ const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:fullScale?5892.864:longSource?6000:600,title:'Offline Groq summary'}),env)).json(),id=fixedId??created.job.id,path='/api/jobs/'+id;
+ if(fixedId)db.prepare('UPDATE jobs SET id=? WHERE id=?').run(fixedId,created.job.id);
  const count=fullScale?1226:longSource?125:large?25:2,span=fullScale?5892864/count:longSource?48000:large?24000:300000;
  const segments=Array.from({length:count},(_,i)=>({id:i+1,startMs:Math.floor(i*span),endMs:Math.floor((i+1)*span),text:segmentText?segmentText(i+1):sourceText??`원문 ${i+1} ${longSource?'가나다라마바사아자차카타파하 '.repeat(28):large?'가나다라마바사 '.repeat(12):'검증'}`}));
  const raw=segments.map(part=>part.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:complete?1:0,audioFileSha256:'a'.repeat(64),audioSegmentOrigins:large&&!fullScale?Array.from({length:500},(_,i)=>({segmentId:i+1,chunkIndex:i,startMs:i*1000,endMs:i*1000+900})):[],...(fullScale?{audioBoundaryAmbiguities:Array.from({length:47},(_,i)=>({segmentId:2+i*25,chunkIndex:i+1,startMs:0,endMs:1}))}:{})};
@@ -1231,6 +1321,24 @@ test('1,954-character stored strict report recovers without a provider call and 
   const recovered=await routeApi(request(url,'POST',body),f.env);assert.equal(recovered.status,200,await recovered.clone().text());assert.equal((await recovered.json()).automaticContinuation,false);
   const choice=await(await routeApi(request(f.path+'/summary-choice'),f.env)).json();assert.equal(choice.summary.savedRawStages,1);assert.equal(choice.summary.remainingRawStages,choice.summary.rawStages-1);
   const recoveryId=f.id+':groq-summary-recovery:'+plan.transcriptHash+':raw:0',savedRecovery=f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(recoveryId).result_json;
+  const failedAt=f.db.prepare('SELECT created_at FROM yta_operations WHERE id=?').get(newId).created_at;
+  f.db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run(new Date(Date.parse(failedAt)+1000).toISOString(),newId);
+  const timestampDrift=await(await routeApi(request(f.path+'/groq-summary-recovery-diagnostic'),f.env)).json();
+  assert.equal(timestampDrift.records[0].reason,'SUMMARY_RECOVERY_SCOPE_CHANGED');
+  assert.deepEqual(Object.entries(timestampDrift.records[0].comparison.fieldMatches).filter(([,matches])=>!matches).map(([field])=>field),['evidenceHash']);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run(failedAt,newId);
+  const {evidenceHash,recovered:wasRecovered,recoveryRecordExists,automaticContinuation,providerCalls:previewProviderCalls,usageEventId,usageProvenance,...legacyEvidence}=preview;
+  assert.equal(wasRecovered,false);assert.equal(recoveryRecordExists,false);assert.equal(previewProviderCalls,0);
+  assert.equal(automaticContinuation,false);assert.equal(typeof usageEventId,'string');assert.equal(typeof usageProvenance,'string');
+  assert.equal(evidenceHash,JSON.parse(savedRecovery).evidenceHash);
+  const preUsageIdentityRecord={...JSON.parse(savedRecovery),evidenceHash:await digest(legacyEvidence)};
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(JSON.stringify(preUsageIdentityRecord),recoveryId);
+  const legacyHashDrift=await(await routeApi(request(f.path+'/groq-summary-recovery-diagnostic'),f.env)).json();
+  assert.equal(legacyHashDrift.records[0].reason,'SUMMARY_RECOVERY_SCOPE_CHANGED');
+  assert.deepEqual(Object.entries(legacyHashDrift.records[0].comparison.fieldMatches).filter(([,matches])=>!matches).map(([field])=>field),['evidenceHash']);
+  assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(savedRecovery,recoveryId);
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{}',recoveryId);
   const isolated=await routeApi(request(f.path+'/summary-choice'),f.env);assert.equal(isolated.status,200,await isolated.clone().text());const isolatedChoice=await isolated.json();assert.equal(isolatedChoice.summary.recoveryReviewRequired,true);assert.equal(isolatedChoice.summary.savedRawStages,0);
   const groqBlocked=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal((await groqBlocked.json()).error.code,'SUMMARY_RECOVERY_SCOPE_CHANGED');

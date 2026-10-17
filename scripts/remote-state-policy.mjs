@@ -16,6 +16,7 @@ const canonical=value=>JSON.stringify(value,(_,entry)=>entry&&typeof entry==='ob
 export const sameCanonical=(left,right)=>canonical(left)===canonical(right);
 const fail=code=>{throw Error(`Remote deployment guard: ${code}`);};
 export const legacyQuoteRecoveryBinding='GEMINI_LEGACY_QUOTE_RECOVERY_JSON';
+export const legacyGroqRecoveryScopeBinding='GROQ_LEGACY_RECOVERY_SCOPE_JSON';
 const requiredBindingTypes=new Map([
   ['DB','d1'],['ACCESS_AUD','plain_text'],['ACCESS_TEAM_DOMAIN','plain_text'],
   ['ACCESS_OWNER_EMAIL','secret_text'],['KEY_ENCRYPTION_KEY_B64','secret_text'],
@@ -33,6 +34,7 @@ export function inspectBindingSet(bindings,{expectAssets=false}={}){
   const actual=new Map(bindings.map(binding=>[binding?.name,binding?.type]));
   const expected=new Map(requiredBindingTypes);
   if(expectAssets)expected.set('ASSETS','assets');
+  if(actual.has(legacyGroqRecoveryScopeBinding))expected.set(legacyGroqRecoveryScopeBinding,'secret_text');
   return {available:true,unique,complete:unique&&actual.size===expected.size&&[...expected].every(([name,type])=>actual.get(name)===type)};
 }
 const baselineObservability={
@@ -41,10 +43,14 @@ const baselineObservability={
   traces:{enabled:false,head_sampling_rate:1,persist:true},
 };
 
+// Offline shape fixture; deployment identity must come from protected evidence.
 export const approvedRemoteBaseline={
-  activeVersionId:'6b2f1c56-7880-4515-aea0-786b51b4c625',
-  sourceCommit:'950cce886988803765616212ef657254b415bb9a',
-  databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',
+  accountId:'a'.repeat(32),workerName:'example-worker',
+  activeVersionId:'11111111-1111-4111-8111-111111111111',
+  sourceCommit:'a'.repeat(40),
+  databaseId:'22222222-2222-4222-8222-222222222222',
+  priorVersionId:'33333333-3333-4333-8333-333333333333',
+  scriptEtag:'a'.repeat(64),
   routes:[],domains:[],compatibilityDate:'2026-10-10',compatibilityFlagsPresent:false,
   assetsPresent:true,
   // The dashboard settings version has no source annotation. The fixed
@@ -58,17 +64,40 @@ export const approvedRemoteBaseline={
   observability:baselineObservability,
 };
 export const approvedPreDeployLineage={
- activeVersionId:'6b2f1c56-7880-4515-aea0-786b51b4c625',
- priorVersionId:'6a3fcf05-03fe-4d2b-911f-b43631a17a85',
- sourceCommit:'950cce886988803765616212ef657254b415bb9a',
- scriptEtag:'2efe59af35cb9398abc0f1d649cb94d354243f7e782c8e9eadd2d891e3bfa15d',
+ activeVersionId:'11111111-1111-4111-8111-111111111111',
+ priorVersionId:'33333333-3333-4333-8333-333333333333',
+ sourceCommit:'a'.repeat(40),
+ scriptEtag:'a'.repeat(64),
 };
+
+// The current deployment identity is supplied by a protected CI variable.
+// Without a recent, exact approval the production preflight never starts.
+export function protectedRemoteBaseline(env=process.env){
+ let approval;try{approval=JSON.parse(env.GROQ_DEPLOYMENT_EVIDENCE_JSON);}catch{fail('DEPLOYMENT_EVIDENCE_UNAVAILABLE');}
+ const keys=['kind','accountId','workerName','databaseId','activeVersionId','priorVersionId','scriptEtag','sourceCommit','reviewedAt','expiresAt'];
+ if(!approval||typeof approval!=='object'||Array.isArray(approval)||Object.keys(approval).sort().join(',')!==keys.sort().join(','))fail('DEPLOYMENT_EVIDENCE_INVALID');
+ const uuid=/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i,hex32=/^[0-9a-f]{32}$/i,worker=/^[a-z0-9][a-z0-9-]{0,62}$/i,sha=/^[0-9a-f]{40}$/i,iso=/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
+ if(approval.kind!=='REMOTE_DEPLOYMENT_REVIEW_V1'||!hex32.test(approval.accountId)||!worker.test(approval.workerName)||!uuid.test(approval.databaseId)||!uuid.test(approval.activeVersionId)||!uuid.test(approval.priorVersionId)||!(/^[0-9a-f]{64}$/i).test(approval.scriptEtag)||approval.priorVersionId===approval.activeVersionId||!sha.test(approval.sourceCommit)||!iso.test(approval.reviewedAt)||!iso.test(approval.expiresAt))fail('DEPLOYMENT_EVIDENCE_INVALID');
+ const start=Date.parse(approval.reviewedAt),end=Date.parse(approval.expiresAt),now=Date.now();
+ if(!Number.isFinite(start)||!Number.isFinite(end)||start>now||end<=now||end-start>24*60*60*1000)fail('DEPLOYMENT_EVIDENCE_EXPIRED');
+ return {...approvedRemoteBaseline,accountId:approval.accountId,workerName:approval.workerName,databaseId:approval.databaseId,activeVersionId:approval.activeVersionId,priorVersionId:approval.priorVersionId,scriptEtag:approval.scriptEtag,sourceCommit:approval.sourceCommit};
+}
+
+export function assertProtectedDeployTarget(config,baseline,env={}){
+ if(typeof config!=='string'||!baseline||typeof baseline.accountId!=='string')fail('PROTECTED_DEPLOY_TARGET_MISMATCH');
+ const worker=[...config.matchAll(/^name\s*=\s*"([^"]+)"\s*$/gm)];
+ const database=[...config.matchAll(/^database_id\s*=\s*"([^"]+)"\s*$/gm)];
+ if(worker.length!==1||database.length!==1||worker[0][1]!==baseline?.workerName||database[0][1]!==baseline?.databaseId)fail('PROTECTED_DEPLOY_TARGET_MISMATCH');
+ if(env.CLOUDFLARE_ACCOUNT_ID&&env.CLOUDFLARE_ACCOUNT_ID!==baseline.accountId)fail('PROTECTED_DEPLOY_TARGET_MISMATCH');
+ if(env.WRANGLER_CI_OVERRIDE_NAME&&env.WRANGLER_CI_OVERRIDE_NAME!==baseline.workerName)fail('PROTECTED_DEPLOY_TARGET_MISMATCH');
+ return true;
+}
 
 export function assertRemoteState(remote,baseline,{postDeploy=false,preDeployLineage=null}={}){
   if(baseline?.remoteSettingsReviewed!==true)fail('REMOTE_SETTINGS_BASELINE_UNVERIFIED');
   if(typeof baseline.assetsPresent!=='boolean')fail('BINDINGS_BASELINE_INVALID');
   if(!remote||!baseline||!Array.isArray(remote.routes)||!Array.isArray(remote.domains)||!Array.isArray(baseline.routes)||!Array.isArray(baseline.domains)||typeof remote.compatibilityFlagsPresent!=='boolean'||typeof baseline.compatibilityFlagsPresent!=='boolean'||(remote.compatibilityFlagsPresent&&!Array.isArray(remote.compatibilityFlags))||(baseline.compatibilityFlagsPresent&&!Array.isArray(baseline.compatibilityFlags)))fail('METADATA_INCOMPLETE');
-  if(remote?.workerName!=='holy-rice-b914'||remote.environment!=='production')fail('WORKER_TARGET_MISMATCH');
+  if(typeof baseline.workerName!=='string'||remote?.workerName!==baseline.workerName||remote.environment!=='production')fail('WORKER_TARGET_MISMATCH');
   if(!Array.isArray(remote.activeVersions)||remote.activeVersions.length!==1||remote.activeVersions[0]?.percentage!==100||remote.activeVersions[0]?.id!==baseline?.activeVersionId)fail('ACTIVE_VERSION_MISMATCH');
   if(remote.workersDev!==true||remote.previewUrls!==false)fail('PUBLIC_URL_SETTINGS_MISMATCH');
   if(canonical(remote.routes)!==canonical(baseline.routes)||canonical(remote.domains)!==canonical(baseline.domains))fail('ROUTES_MISMATCH');
@@ -94,7 +123,7 @@ export function assertRemoteState(remote,baseline,{postDeploy=false,preDeployLin
   }
   if(typeof bindings.get('ACCESS_AUD')?.text!=='string'||bindings.get('ACCESS_AUD').text.length<12||!/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(bindings.get('ACCESS_TEAM_DOMAIN')?.text??''))fail('ACCESS_VARS_MISSING');
   if(!postDeploy&&(typeof baseline.sourceCommit!=='string'||!/^[0-9a-f]{40}$/.test(baseline.sourceCommit)||remote.deploymentMessage!==`source-commit:${baseline.sourceCommit}`)){
-   const expected=approvedPreDeployLineage,evidence=preDeployLineage;
+   const expected=baseline,evidence=preDeployLineage;
    // Script ETag proves only script content. Current assets and settings are
    // checked separately above; this exception never applies after upload.
    if(baseline.activeVersionId!==expected.activeVersionId||baseline.sourceCommit!==expected.sourceCommit||remote.activeVersions[0].id!==expected.activeVersionId||typeof remote.deploymentMessage!=='string'||!evidence||evidence.activeVersionId!==expected.activeVersionId||evidence.priorVersionId!==expected.priorVersionId||evidence.activeDeploymentSourceAnnotation!=='OTHER'||evidence.priorDeploymentSourceAnnotation!=='EXPECTED'||evidence.activeDeploymentSource!=='DASHBOARD'||evidence.priorDeploymentSource!=='WRANGLER'||evidence.scriptEtagMatchesPinned!==true||evidence.scriptContentEqual!==true||evidence.runtimeMetadataEqual!==true||evidence.knownBindingAddition!==true||evidence.activeAssetsBindingCount!==1||evidence.priorAssetsBindingCount!==1||evidence.codeLineageEvidence!=='SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR'||evidence.sourceAnnotationGuardMatch!==false)fail('SOURCE_COMMIT_MISMATCH');
