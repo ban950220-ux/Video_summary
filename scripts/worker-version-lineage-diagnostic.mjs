@@ -62,13 +62,14 @@ export async function readWorkerVersionLineage({token,fetcher=fetch,baseline=pro
  const deployments=(await read('/deployments?per_page=100')).deployments;
  if(!Array.isArray(deployments)||deployments[0]?.versions?.length!==1||deployments[0]?.versions[0]?.version_id!==baseline.activeVersionId||deployments[0]?.versions[0]?.percentage!==100)throw Error('ACTIVE_VERSION_MISMATCH');
  const [current,prior]=await Promise.all([read(`/versions/${baseline.activeVersionId}`),read(`/versions/${baseline.priorVersionId}`)]);
- return safeWorkerLineageReport(deployments,current,prior,baseline);
+ return {...safeWorkerLineageReport(deployments,current,prior,baseline),activeVersionId:current.id,priorVersionId:prior.id};
 }
 
 export async function runWorkerVersionLineageDiagnostic({env=process.env,fetcher=fetch,write=console.log}={}){
  if(!env.WORKERS_CI||!env.CLOUDFLARE_API_TOKEN){write('WORKER_VERSION_DIAGNOSTIC_FAILED: BUILD_CONTEXT_OR_TOKEN_UNAVAILABLE');return false;}
  try{
-  write(JSON.stringify(await readWorkerVersionLineage({token:env.CLOUDFLARE_API_TOKEN,fetcher,baseline:protectedRemoteBaseline(env)})));
+  const {activeVersionId,priorVersionId,...report}=await readWorkerVersionLineage({token:env.CLOUDFLARE_API_TOKEN,fetcher,baseline:protectedRemoteBaseline(env)});
+  write(JSON.stringify(report));
   return true;
  }catch{write('WORKER_VERSION_DIAGNOSTIC_FAILED: READ_OR_SCOPE_INVALID');return false;}
 }
