@@ -115,16 +115,48 @@ test('one exact legacy recovery needs an immutable review and reblocks on eviden
   const reviewBody={step:'record-compatibility-review',confirmOriginalRecoveryPreserved:true,confirmHistoricalAndCurrentEvidence:true,confirmNoProviderCall:true,confirmSeparateFreeKeyBinding:true};
   const reviewed=await routeApi(request(reviewUrl,'POST',reviewBody),f.env);assert.equal(reviewed.status,200,await reviewed.clone().text());assert.equal((await reviewed.json()).reviewed,true);
   assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n,changes+1);assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(rowId).result_json,originalJson);
+  // Simulate the already-deployed fixed v1 review ID without changing its sealed contents.
+  const firstReview=f.db.prepare("SELECT id,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").get(f.id),legacyReviewId=f.id+':groq-summary-recovery-compat-review:v1';
+  f.db.prepare('UPDATE yta_operations SET id=? WHERE id=?').run(legacyReviewId,firstReview.id);
   assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review' AND state='REVIEWED'").get(f.id).n,1);
   const status=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal(status.status,200,await status.clone().text());assert.equal((await status.json()).completedStages,1);
   assert.equal((await diagnostic()).records[0].legacyCompatibility,'REVIEW_MATCHES');
+  const beforeExpiryTests=f.db.prepare('SELECT total_changes() AS n').get().n;
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,authorizedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+250).toISOString()});
+  const delayedRequest=request(reviewUrl,'POST',reviewBody),parseBody=delayedRequest.json.bind(delayedRequest);
+  delayedRequest.json=async()=>{await new Promise(resolve=>setTimeout(resolve,350));return parseBody();};
+  assert.equal((await routeApi(delayedRequest,f.env)).status,409,'scope expiring while reading the POST body must not record a review');
+  assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n,beforeExpiryTests);
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,authorizedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+250).toISOString()});
+  const originalDb=f.env.DB;let delayedInsert=false;
+  f.env.DB={prepare(sql){const statement=originalDb.prepare(sql);if(!sql.includes("AND julianday('now') < julianday(?)"))return statement;return {bind(...args){const bound=statement.bind(...args);return {async run(){delayedInsert=true;await new Promise(resolve=>setTimeout(resolve,350));return bound.run();}};}};}};
+  try{assert.equal((await routeApi(request(reviewUrl,'POST',reviewBody),f.env)).status,409,'D1 execution after scope expiry must not insert a review');}
+  finally{f.env.DB=originalDb;}
+  assert.equal(delayedInsert,true,'the expiry check must reach the INSERT execution boundary');
+  assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n,beforeExpiryTests);
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(scope);
   f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,expiresAt:new Date(Date.parse(scope.expiresAt)+1000).toISOString()});
   const changedScope=await diagnostic();assert.equal(changedScope.legacyScopeStatus,'VALID');assert.equal(changedScope.records[0].legacyCompatibility,'REVIEW_SCOPE_HASH_MISMATCH');assert.equal(changedScope.records[0].verification,'BLOCKED');
   assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  const renewalWrites=f.db.prepare('SELECT total_changes() AS n').get().n;
+  const [renewed,renewedDuplicate]=await Promise.all([routeApi(request(reviewUrl,'POST',reviewBody),f.env),routeApi(request(reviewUrl,'POST',reviewBody),f.env)]);
+  assert.equal(renewed.status,200,await renewed.clone().text());assert.equal(renewedDuplicate.status,200,await renewedDuplicate.clone().text());
+  assert.equal((await renewed.json()).providerCalls,0);assert.equal((await renewedDuplicate.json()).providerCalls,0);
+  assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n,renewalWrites+1);
+  assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(legacyReviewId).result_json,firstReview.result_json,'existing v1 review is immutable');
+  const successor=f.db.prepare("SELECT id,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review' AND id<>?").get(f.id,legacyReviewId);
+  assert.match(successor.id,new RegExp('^'+f.id+':groq-summary-recovery-compat-review:v2:[0-9a-f]{64}$'));
+  assert.notEqual(JSON.parse(successor.result_json).scopeApprovalSha256,JSON.parse(firstReview.result_json).scopeApprovalSha256);
+  assert.equal((await diagnostic()).records[0].legacyCompatibility,'REVIEW_MATCHES');
+  assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,200);
+  const repeatWrites=f.db.prepare('SELECT total_changes() AS n').get().n;
+  const repeat=await routeApi(request(reviewUrl,'POST',reviewBody),f.env);assert.equal(repeat.status,200);assert.equal((await repeat.json()).alreadyRecorded,true);assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n,repeatWrites);
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,expiresAt:new Date(Date.now()-1).toISOString()});
+  assert.equal((await diagnostic()).legacyScopeStatus,'EXPIRED');assert.equal((await routeApi(request(reviewUrl,'POST',reviewBody),f.env)).status,409);assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n,repeatWrites);
   f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,historicalEvidenceHash:'0'.repeat(64)});
   assert.equal((await diagnostic()).records[0].legacyCompatibility,'CANDIDATE_UNAVAILABLE');
   f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(scope);
-  assert.equal((await routeApi(request(reviewUrl,'POST',reviewBody),f.env)).status,409);
+  const idempotent=await routeApi(request(reviewUrl,'POST',reviewBody),f.env);assert.equal(idempotent.status,200);assert.equal((await idempotent.json()).alreadyRecorded,true);
   const oldFailedAt=f.db.prepare('SELECT created_at FROM yta_operations WHERE id=?').get(failedId).created_at;
   f.db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run('2020-01-02T09:00:01.000Z',failedId);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
   f.db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run(oldFailedAt,failedId);
@@ -155,7 +187,7 @@ test('one exact legacy recovery needs an immutable review and reblocks on eviden
   f.db.prepare('UPDATE yta_operations SET id=? WHERE id=?').run(rowId,rowId+':wrong');
   f.db.prepare('UPDATE jobs SET owner_id=? WHERE id=?').run('different-owner',f.id);assert.equal((await routeApi(request(reviewUrl),f.env)).status,404);
   f.db.prepare('UPDATE jobs SET owner_id=? WHERE id=?').run('owner',f.id);
-  const seal=f.db.prepare("SELECT id,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").get(f.id);
+  const seal=f.db.prepare("SELECT id,result_json FROM yta_operations WHERE id=?").get(legacyReviewId);
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{}',seal.id);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
   assert.equal((await diagnostic()).records[0].legacyCompatibility,'REVIEW_RECORD_MISMATCH');
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(seal.result_json,seal.id);

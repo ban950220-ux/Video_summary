@@ -186,20 +186,41 @@ test('legacy recovery review seal inserts exactly once on local Workerd D1',asyn
   env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=approvedScope;
   const reviewBody={step:'record-compatibility-review',confirmOriginalRecoveryPreserved:true,confirmHistoricalAndCurrentEvidence:true,confirmNoProviderCall:true,confirmSeparateFreeKeyBinding:true};
   const reviewed=await routeApi(request(reviewUrl,'POST',reviewBody),env);assert.equal(reviewed.status,200,await reviewed.clone().text());
-  assert.equal((await routeApi(request(reviewUrl,'POST',reviewBody),env)).status,409);
+  const firstReview=await DB.prepare("SELECT id,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").bind(id).first();
+  const sealId=id+':groq-summary-recovery-compat-review:v1';
+  await DB.prepare('UPDATE yta_operations SET id=? WHERE id=?').bind(sealId,firstReview.id).run();
+  const duplicate=await routeApi(request(reviewUrl,'POST',reviewBody),env);assert.equal(duplicate.status,200);assert.equal((await duplicate.json()).alreadyRecorded,true);
   assert.equal((await DB.prepare('SELECT result_json FROM yta_operations WHERE id=?').bind(recoveryId).first()).result_json,originalJson);
   assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").bind(id).first()).n,1);
   assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,200);assert.equal(calls,0);
   env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...JSON.parse(approvedScope),authorizedAt:new Date(Date.now()-500).toISOString(),expiresAt:new Date(Date.now()+7200000).toISOString()});
   assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,409,'a renewed authorization period must not reuse the old seal');
+  const successor=await routeApi(request(reviewUrl,'POST',reviewBody),env);assert.equal(successor.status,200,await successor.clone().text());
+  assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").bind(id).first()).n,2);
+  assert.equal((await DB.prepare('SELECT result_json FROM yta_operations WHERE id=?').bind(sealId).first()).result_json,firstReview.result_json);
+  assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,200);assert.equal(calls,0);
   env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=approvedScope;
-  const sealId=id+':groq-summary-recovery-compat-review:v1',seal=await DB.prepare('SELECT units,error_code,created_at FROM yta_operations WHERE id=?').bind(sealId).first();
+  const seal=await DB.prepare('SELECT units,error_code,created_at FROM yta_operations WHERE id=?').bind(sealId).first();
   for(const [column,changed] of [['units',1],['error_code','DRIFT'],['created_at','2020-01-04T00:00:00.000Z']]){
    await DB.prepare(`UPDATE yta_operations SET ${column}=? WHERE id=?`).bind(changed,sealId).run();
    assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,409,column);
    await DB.prepare(`UPDATE yta_operations SET ${column}=? WHERE id=?`).bind(seal[column],sealId).run();
   }
   assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,200);assert.equal(calls,0);
+  const beforeExpiredInsert=(await DB.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").bind(id).first()).n;
+  env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...JSON.parse(approvedScope),authorizedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+1000).toISOString()});
+  let delayedInsert=false;
+  env.DB={prepare(sql){const statement=DB.prepare(sql);if(!sql.includes("AND julianday('now') < julianday(?)"))return statement;return {bind(...args){const bound=statement.bind(...args);return {async run(){delayedInsert=true;await new Promise(resolve=>setTimeout(resolve,1200));return bound.run();}};}};}};
+  try{assert.equal((await routeApi(request(reviewUrl,'POST',reviewBody),env)).status,409,'D1 execution after scope expiry must not record a review');}
+  finally{env.DB=DB;}
+  assert.equal(delayedInsert,true,'the review must reach the D1 INSERT boundary');
+  assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").bind(id).first()).n,beforeExpiredInsert);
+  assert.equal(calls,0);
+  // A job with only an earlier v2 review still reports a renewed scope mismatch on D1.
+  await DB.prepare('DELETE FROM yta_operations WHERE id=?').bind(sealId).run();
+  env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...JSON.parse(approvedScope),authorizedAt:new Date(Date.now()-250).toISOString(),expiresAt:new Date(Date.now()+10800000).toISOString()});
+  const diagnostic=await(await routeApi(request(path+'/groq-summary-recovery-diagnostic'),env)).json();
+  assert.equal(diagnostic.records[0].legacyCompatibility,'REVIEW_SCOPE_HASH_MISMATCH');assert.equal(calls,0);
  }finally{globalThis.fetch=oldFetch;await mf.dispose();}
 });
 
