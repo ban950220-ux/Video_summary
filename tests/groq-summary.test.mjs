@@ -26,6 +26,32 @@ test('recovery diagnostic is owner-scoped, GET-only, bounded, and cannot approve
   assert.equal((await routeApi(request(path,'POST',{}),f.env)).status,405);assert.equal((await routeApi(request('/api/jobs/99999999-9999-4999-8999-999999999999/groq-summary-recovery-diagnostic'),f.env)).status,404);assert.equal(f.db.prepare('SELECT total_changes() n').get().n,before);assert.equal(calls,0);
  }finally{globalThis.fetch=originalFetch;f.db.close();}
 });
+test('scope diagnostic classifies safe configuration failures without returning scope values',async()=>{
+ const f=await fixture(),oldFetch=globalThis.fetch;let calls=0;
+ try{
+  globalThis.fetch=async()=>{calls++;throw Error('provider forbidden');};
+  const now=Date.now(),scope={kind:'GROQ_LEGACY_RECOVERY_COMPAT_V1',jobId:f.id,ownerId:'owner',stage:'raw:0',recoveryOperationId:'PRIVATE_RECOVERY_ID',failedOperationId:'PRIVATE_FAILED_ID',historicalEvidenceHash:'a'.repeat(64),recoveryCreatedBefore:'2020-01-03T00:00:00.000Z',authorizedAt:new Date(now-1000).toISOString(),expiresAt:new Date(now+3600000).toISOString()};
+  const cases=[
+   [undefined,'MISSING'],['PRIVATE_INVALID_JSON','INVALID_FORMAT'],[null,'INVALID_FORMAT'],[{...scope,extra:'PRIVATE_EXTRA'},'INVALID_FORMAT'],
+   [{...scope,ownerId:'other'},'INVALID_FORMAT'],[{...scope,stage:'raw:1'},'INVALID_FORMAT'],[{...scope,expiresAt:'not-a-date'},'INVALID_FORMAT'],
+   [{...scope,authorizedAt:new Date(now+60000).toISOString()},'INVALID_TIME_WINDOW'],
+   [{...scope,expiresAt:new Date(now+73*3600000).toISOString()},'INVALID_TIME_WINDOW'],
+   [{...scope,expiresAt:scope.authorizedAt},'INVALID_TIME_WINDOW'],
+   [{...scope,recoveryCreatedBefore:'2026-10-14T00:00:00.000Z'},'INVALID_TIME_WINDOW'],
+   [{...scope,expiresAt:new Date(now-1).toISOString()},'EXPIRED'],
+   [{...scope,jobId:crypto.randomUUID()},'JOB_MISMATCH'],[scope,'VALID'],
+  ];
+  const before=f.db.prepare('SELECT total_changes() n').get().n;
+  for(const [value,status] of cases){
+   if(value===undefined)delete f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON;else f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=typeof value==='string'?value:JSON.stringify(value);
+   const response=await routeApi(request(f.path+'/groq-summary-recovery-diagnostic'),f.env),text=await response.text(),data=JSON.parse(text);
+   assert.equal(response.status,200);assert.equal(data.legacyScopeStatus,status);assert.equal(data.executionAllowed,false);assert.equal(data.providerCalls,0);assert.equal(data.writes,0);
+   assert.doesNotMatch(text,/PRIVATE_|a{64}|authorizedAt|expiresAt|scopeApprovalSha256/);
+  }
+  assert.equal(f.db.prepare('SELECT total_changes() n').get().n,before);assert.equal(calls,0);
+ }finally{globalThis.fetch=oldFetch;f.db.close();}
+});
+
 test('recovery metadata SQL stays SELECT-only and returns no IDs, hashes, report or credential material',async()=>{
  const f=await fixture();try{
   f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary-recovery',0,'DONE',?,?)").run(f.id+':diagnostic-fixture',f.id,new Date().toISOString(),JSON.stringify({sourceSha256:'a'.repeat(64),auditSha256:'PRIVATE_AUDIT',report:{summary:'PRIVATE_REPORT_TEXT'},private:'PRIVATE_RESULT'}));
@@ -52,6 +78,7 @@ test('one exact legacy recovery needs an immutable review and reblocks on eviden
   const body={step:'recover',evidenceHash:preview.evidenceHash,failedOperationId:failedId,contractHash:f.plan.transcriptHash,responseSha256:preview.responseSha256,acknowledgeOriginalUsage:390,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true};
   const recovered=await routeApi(request(recoveryUrl,'POST',body),f.env);assert.equal(recovered.status,200,await recovered.clone().text());
   const rowId=f.id+':groq-summary-recovery:'+f.plan.transcriptHash+':raw:0',row=f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(rowId);
+  const currentDiagnostic=await(await routeApi(request(f.path+'/groq-summary-recovery-diagnostic'),f.env)).json();assert.equal(currentDiagnostic.records[0].legacyCompatibility,'NOT_REQUIRED');
   const {evidenceHash,recovered:unusedRecovered,recoveryRecordExists,automaticContinuation,providerCalls,usageEventId,usageProvenance,...historicalEvidence}=preview;
   assert.equal(evidenceHash,JSON.parse(row.result_json).evidenceHash);assert.equal(unusedRecovered,false);assert.equal(recoveryRecordExists,false);assert.equal(automaticContinuation,false);assert.equal(providerCalls,0);assert.equal(typeof usageEventId,'string');assert.equal(typeof usageProvenance,'string');
   const originalJson=JSON.stringify({...JSON.parse(row.result_json),evidenceHash:await digest(historicalEvidence)});
@@ -61,6 +88,15 @@ test('one exact legacy recovery needs an immutable review and reblocks on eviden
   const scope={kind:'GROQ_LEGACY_RECOVERY_COMPAT_V1',jobId:f.id,ownerId:'owner',stage:'raw:0',recoveryOperationId:rowId,failedOperationId:failedId,historicalEvidenceHash:JSON.parse(originalJson).evidenceHash,recoveryCreatedBefore:'2020-01-03T00:00:00.000Z',authorizedAt,expiresAt};
   f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(scope);
   const reviewUrl=f.path+'/groq-summary-recovery-compat-review';
+  const diagnostic=async()=>{
+   const before=f.db.prepare('SELECT total_changes() n').get().n;
+   const response=await routeApi(request(f.path+'/groq-summary-recovery-diagnostic'),f.env),data=await response.json();
+   assert.equal(response.status,200);assert.equal(data.providerCalls,0);assert.equal(data.writes,0);assert.equal(data.executionAllowed,false);
+   assert.equal(f.db.prepare('SELECT total_changes() n').get().n,before);
+   assert.ok(!JSON.stringify(data).includes(scope.historicalEvidenceHash));assert.ok(!JSON.stringify(data).includes(scope.recoveryOperationId));
+   return data;
+  };
+  assert.equal((await diagnostic()).records[0].legacyCompatibility,'REVIEW_MISSING');
   f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,historicalEvidenceHash:'0'.repeat(64)});
   assert.equal((await routeApi(request(reviewUrl),f.env)).status,409,'historical hash must match independently of the time bound');
   f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(scope);
@@ -81,6 +117,13 @@ test('one exact legacy recovery needs an immutable review and reblocks on eviden
   assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n,changes+1);assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(rowId).result_json,originalJson);
   assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review' AND state='REVIEWED'").get(f.id).n,1);
   const status=await routeApi(request(f.path+'/groq-summary-status'),f.env);assert.equal(status.status,200,await status.clone().text());assert.equal((await status.json()).completedStages,1);
+  assert.equal((await diagnostic()).records[0].legacyCompatibility,'REVIEW_MATCHES');
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,expiresAt:new Date(Date.parse(scope.expiresAt)+1000).toISOString()});
+  const changedScope=await diagnostic();assert.equal(changedScope.legacyScopeStatus,'VALID');assert.equal(changedScope.records[0].legacyCompatibility,'REVIEW_SCOPE_HASH_MISMATCH');assert.equal(changedScope.records[0].verification,'BLOCKED');
+  assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...scope,historicalEvidenceHash:'0'.repeat(64)});
+  assert.equal((await diagnostic()).records[0].legacyCompatibility,'CANDIDATE_UNAVAILABLE');
+  f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(scope);
   assert.equal((await routeApi(request(reviewUrl,'POST',reviewBody),f.env)).status,409);
   const oldFailedAt=f.db.prepare('SELECT created_at FROM yta_operations WHERE id=?').get(failedId).created_at;
   f.db.prepare('UPDATE yta_operations SET created_at=? WHERE id=?').run('2020-01-02T09:00:01.000Z',failedId);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
@@ -104,6 +147,7 @@ test('one exact legacy recovery needs an immutable review and reblocks on eviden
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{}',rowId);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(originalJson,rowId);
   f.db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(raw+'changed',f.id);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  const changedSource=await diagnostic();assert.equal(changedSource.legacyScopeStatus,'VALID');assert.equal(changedSource.sourceStatus,'BLOCKED');assert.equal(changedSource.sourceErrorCode,'TRANSCRIPT_PERSISTENCE_UNVERIFIED');assert.deepEqual(changedSource.records,[]);
   f.db.prepare('UPDATE yta_sources SET raw=? WHERE job_id=?').run(raw,f.id);
   f.db.prepare('UPDATE yta_sources SET provenance=? WHERE job_id=?').run('GEMINI_OWNED_AUDIO',f.id);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
   f.db.prepare('UPDATE yta_sources SET provenance=? WHERE job_id=?').run('GROQ_OWNED_AUDIO',f.id);
@@ -113,6 +157,7 @@ test('one exact legacy recovery needs an immutable review and reblocks on eviden
   f.db.prepare('UPDATE jobs SET owner_id=? WHERE id=?').run('owner',f.id);
   const seal=f.db.prepare("SELECT id,result_json FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").get(f.id);
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run('{}',seal.id);assert.equal((await routeApi(request(f.path+'/groq-summary-status'),f.env)).status,409);
+  assert.equal((await diagnostic()).records[0].legacyCompatibility,'REVIEW_RECORD_MISMATCH');
   f.db.prepare('UPDATE yta_operations SET result_json=? WHERE id=?').run(seal.result_json,seal.id);
   for(const changed of [null,{...scope,jobId:crypto.randomUUID()},{...scope,recoveryOperationId:rowId+':other'},{...scope,failedOperationId:failedId+':other'},{...scope,historicalEvidenceHash:'0'.repeat(64)},{...scope,ownerId:'someone-else'},{...scope,stage:'raw:1'},{...scope,expiresAt:new Date(Date.now()-1).toISOString()},{...scope,expiresAt:new Date(Date.now()+73*3600000).toISOString()}]){
    if(changed)f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify(changed);else delete f.env.GROQ_LEGACY_RECOVERY_SCOPE_JSON;

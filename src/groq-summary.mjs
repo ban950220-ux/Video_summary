@@ -619,18 +619,22 @@ const LEGACY_RECOVERY_SCOPE_MAX_MS=72*60*60*1000;
 // Conservative source-commit bound: the usage-linked evidence form first
 // appears at this commit time. This is not a claim about deployment time.
 const LEGACY_RECOVERY_FORMAT_CHANGE_NOT_AFTER='2026-10-13T10:51:47.000Z';
-function legacyRecoveryScope(env){
- let scope;try{scope=JSON.parse(env.GROQ_LEGACY_RECOVERY_SCOPE_JSON);}catch{return null;}
+function inspectLegacyRecoveryScope(env){
+ const invalid=status=>({status,scope:null});
+ if(env.GROQ_LEGACY_RECOVERY_SCOPE_JSON===undefined)return invalid('MISSING');
+ let scope;try{scope=JSON.parse(env.GROQ_LEGACY_RECOVERY_SCOPE_JSON);}catch{return invalid('INVALID_FORMAT');}
  const fields=['kind','jobId','ownerId','stage','recoveryOperationId','failedOperationId','historicalEvidenceHash','recoveryCreatedBefore','authorizedAt','expiresAt'];
- if(!scope||typeof scope!=='object'||Array.isArray(scope)||Object.keys(scope).sort().join(',')!==fields.sort().join(','))return null;
+ if(!scope||typeof scope!=='object'||Array.isArray(scope)||Object.keys(scope).sort().join(',')!==fields.sort().join(','))return invalid('INVALID_FORMAT');
  const uuid=/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i,hash=/^[0-9a-f]{64}$/i,iso=/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
- if(scope.kind!==LEGACY_RECOVERY_SCOPE_KIND||!uuid.test(scope.jobId)||scope.ownerId!=='owner'||scope.stage!=='raw:0'||typeof scope.recoveryOperationId!=='string'||typeof scope.failedOperationId!=='string'||!hash.test(scope.historicalEvidenceHash))return null;
+ if(scope.kind!==LEGACY_RECOVERY_SCOPE_KIND||!uuid.test(scope.jobId)||scope.ownerId!=='owner'||scope.stage!=='raw:0'||typeof scope.recoveryOperationId!=='string'||typeof scope.failedOperationId!=='string'||!hash.test(scope.historicalEvidenceHash))return invalid('INVALID_FORMAT');
  const times=[scope.recoveryCreatedBefore,scope.authorizedAt,scope.expiresAt];
- if(times.some(value=>typeof value!=='string'||!iso.test(value)||!Number.isFinite(Date.parse(value))))return null;
+ if(times.some(value=>typeof value!=='string'||!iso.test(value)||!Number.isFinite(Date.parse(value))))return invalid('INVALID_FORMAT');
  const [before,authorized,expires]=times.map(Date.parse),now=Date.now();
- if(!(before<=Date.parse(LEGACY_RECOVERY_FORMAT_CHANGE_NOT_AFTER)&&before<authorized&&authorized<=now&&now<expires&&expires-authorized<=LEGACY_RECOVERY_SCOPE_MAX_MS))return null;
- return scope;
+ if(!(before<=Date.parse(LEGACY_RECOVERY_FORMAT_CHANGE_NOT_AFTER)&&before<authorized&&authorized<=now&&expires>authorized&&expires-authorized<=LEGACY_RECOVERY_SCOPE_MAX_MS))return invalid('INVALID_TIME_WINDOW');
+ if(now>=expires)return invalid('EXPIRED');
+ return {status:'VALID',scope};
 }
+const legacyRecoveryScope=env=>inspectLegacyRecoveryScope(env).scope;
 const legacyRecoveryReviewId=id=>id+':groq-summary-recovery-compat-review:v1';
 const legacyOperationMetadata=row=>({provider:row.provider,state:row.state,errorCode:row.error_code,units:row.units,createdAt:row.created_at});
 const recoveryCanonical=value=>JSON.stringify(recoverySorted(value));
@@ -660,7 +664,8 @@ async function reviewedLegacyRecovery(env,id,candidate){
  return review.result_json===JSON.stringify({...JSON.parse(candidate.resultJson),reviewCreatedAt:review.created_at});
 }
 async function recoveryScopeDiagnostic(env,{id,job,sourceOf}){
- const base={kind:'GROQ_RECOVERY_SCOPE_DIAGNOSTIC_V1',jobId:id,providerCalls:0,writes:0,recoveryApplied:false,executionAllowed:false,checkpointCountsVerified:false,credentialProjectBinding:'NOT_STORED_CANNOT_VERIFY'};
+ const inspectedScope=inspectLegacyRecoveryScope(env),legacyScopeStatus=inspectedScope.scope&&inspectedScope.scope.jobId!==id?'JOB_MISMATCH':inspectedScope.status;
+ const base={kind:'GROQ_RECOVERY_SCOPE_DIAGNOSTIC_V1',jobId:id,legacyScopeStatus,providerCalls:0,writes:0,recoveryApplied:false,executionAllowed:false,checkpointCountsVerified:false,credentialProjectBinding:'NOT_STORED_CANNOT_VERIFY'};
  let context;try{context={id,job,...await completeSource(env,job,sourceOf)};}catch(error){if(error instanceof ProviderError&&['COMPLETE_TRANSCRIPT_REQUIRED','TRANSCRIPT_PERSISTENCE_UNVERIFIED'].includes(error.code))return json({...base,sourceStatus:'BLOCKED',sourceErrorCode:error.code,records:[]});throw error;}
  const counts=(await env.DB.prepare("SELECT CASE WHEN state IN ('DONE','REVIEWED','FAILED_UNCERTAIN','BLOCKED','CLAIMED','APPROVED','STOPPED') THEN state ELSE 'OTHER' END AS state,count(*) AS count FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery' GROUP BY 1").bind(id).all()).results||[];
  const rows=(await env.DB.prepare("SELECT id,state,result_json,created_at FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery' ORDER BY created_at,id LIMIT 3").bind(id).all()).results||[],records=[];
@@ -670,8 +675,18 @@ async function recoveryScopeDiagnostic(env,{id,job,sourceOf}){
   const item={stage:Number.isSafeInteger(index)?'raw:'+index:null,storedState:counts.some(value=>value.state===row.state)?row.state:'OTHER',currentContractMatches:Boolean(match)&&match[1]===context.transcriptHash};
   if(!match||!Number.isSafeInteger(index)){records.push({...item,verification:'BLOCKED',reason:'RECOVERY_ID_INVALID'});continue;}
   if(!item.currentContractMatches){records.push({...item,verification:'BLOCKED',reason:'CONTRACT_HASH_CHANGED'});continue;}
-  try{const verified=await checkpointRecoveryContext(env,context,index,{savedRecoveryRow:row});records.push({...item,verification:verified.compatible?'MATCHES_REVIEWED_LEGACY_EVIDENCE':'MATCHES_CURRENT_EVIDENCE',executionAllowed:false});}
-  catch(error){if(!(error instanceof ProviderError))throw error;const allowed=['SUMMARY_RECOVERY_SCOPE_CHANGED','SUMMARY_RECOVERY_EVIDENCE_INVALID','SUMMARY_RECOVERY_NOT_FOUND','SUMMARY_RESPONSE_INVALID'];records.push({...item,verification:'BLOCKED',reason:allowed.includes(error.code)?error.code:'CHECKPOINT_VALIDATION_BLOCKED',...(error.safeRecoveryComparison?{comparison:error.safeRecoveryComparison}:{})});}
+  try{
+   // Inspection discovers a candidate without applying it or relaxing execution guards.
+   const verified=await checkpointRecoveryContext(env,context,index,{savedRecoveryRow:row,legacyReviewInspection:true});
+   if(verified.compatible){
+    const candidate=verified.legacyCandidate,review=await env.DB.prepare("SELECT state,result_json,units,error_code,created_at FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery-compat-review'").bind(candidate.id,id).first();
+    let stored;try{stored=JSON.parse(review?.result_json);}catch{}
+    const expected=JSON.parse(candidate.resultJson),matches=review?.state==='REVIEWED'&&review.units===0&&review.error_code===null&&typeof review.created_at==='string'&&review.result_json===JSON.stringify({...expected,reviewCreatedAt:review.created_at});
+    const legacyCompatibility=matches?'REVIEW_MATCHES':!review?'REVIEW_MISSING':stored&&typeof stored.scopeApprovalSha256==='string'&&stored.scopeApprovalSha256!==expected.scopeApprovalSha256?'REVIEW_SCOPE_HASH_MISMATCH':'REVIEW_RECORD_MISMATCH';
+    records.push({...item,legacyCompatibility,verification:matches?'MATCHES_REVIEWED_LEGACY_EVIDENCE':'BLOCKED',...(matches?{}:{reason:'SUMMARY_RECOVERY_SCOPE_CHANGED'}),executionAllowed:false});
+   }else records.push({...item,legacyCompatibility:'NOT_REQUIRED',verification:'MATCHES_CURRENT_EVIDENCE',executionAllowed:false});
+  }
+  catch(error){if(!(error instanceof ProviderError))throw error;const allowed=['SUMMARY_RECOVERY_SCOPE_CHANGED','SUMMARY_RECOVERY_EVIDENCE_INVALID','SUMMARY_RECOVERY_NOT_FOUND','SUMMARY_RESPONSE_INVALID'];records.push({...item,verification:'BLOCKED',reason:allowed.includes(error.code)?error.code:'CHECKPOINT_VALIDATION_BLOCKED',legacyCompatibility:index===0?(legacyScopeStatus==='VALID'?'CANDIDATE_UNAVAILABLE':'SCOPE_UNAVAILABLE'):'NOT_APPLICABLE',...(error.safeRecoveryComparison?{comparison:error.safeRecoveryComparison}:{})});}
  }
  const total=counts.reduce((sum,item)=>sum+item.count,0);
  return json({...base,sourceStatus:'STORED_SOURCE_VALID',storedRecoveryCounts:counts,inspectedRecords:records.length,omittedRecords:Math.max(0,total-records.length),records,remainingWork:'UNKNOWN_UNTIL_RECOVERY_SCOPE_IS_VALIDATED',meaningReview:'NOT_PERFORMED'});
