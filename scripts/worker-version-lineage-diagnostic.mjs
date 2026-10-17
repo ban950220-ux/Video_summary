@@ -1,7 +1,7 @@
 // Workers Builds diagnostic only. All requests are fixed Cloudflare GETs.
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {approvedRemoteBaseline,approvedPreDeployLineage,protectedRemoteBaseline,legacyQuoteRecoveryBinding,legacyGroqRecoveryScopeBinding,sameCanonical} from './remote-state-policy.mjs';
+import {approvedRemoteBaseline,approvedPreDeployLineage,protectedRemoteBaseline,legacyQuoteRecoveryBinding,legacyGroqRecoveryScopeBinding,completeSynthesisBinding,sameCanonical} from './remote-state-policy.mjs';
 
 export const expectedPriorVersionId=approvedPreDeployLineage.priorVersionId;
 const etag=/^[0-9a-f]{64}$/i;
@@ -9,14 +9,16 @@ const annotationKind=(value,message)=>value===message?'EXPECTED':value===undefin
 const safeEtag=value=>typeof value==='string'&&etag.test(value)?value.toLowerCase():null;
 const assetBindingCount=value=>Array.isArray(value)?value.filter(item=>item?.name==='ASSETS'&&item?.type==='assets').length:null;
 const sourceKind=value=>value==='dash'?'DASHBOARD':value==='wrangler'?'WRANGLER':'OTHER';
-function knownBindingAddition(current,prior){
+function knownBindingAddition(current,prior,baseline){
  const present=current.resources?.bindings,original=prior.resources?.bindings;
  if(!Array.isArray(present)||!Array.isArray(original)||present.length!==original.length+1)return false;
  const names=present.map(item=>item?.name),oldNames=original.map(item=>item?.name);
  if(new Set(names).size!==names.length||new Set(oldNames).size!==oldNames.length)return false;
  const added=present.filter(item=>!oldNames.includes(item.name));
  if(added.length!==1)return false;
- const binding=added[0],known=binding.name===legacyQuoteRecoveryBinding&&binding.type==='plain_text'&&typeof binding.text==='string'&&binding.text.length>0||binding.name===legacyGroqRecoveryScopeBinding&&binding.type==='secret_text'&&!Object.hasOwn(binding,'text');
+ const binding=added[0],known=baseline.completeSynthesisEnabled===true
+  ?binding.name===completeSynthesisBinding&&binding.type==='plain_text'&&binding.text==='true'
+  :binding.name===legacyQuoteRecoveryBinding&&binding.type==='plain_text'&&typeof binding.text==='string'&&binding.text.length>0||binding.name===legacyGroqRecoveryScopeBinding&&binding.type==='secret_text'&&!Object.hasOwn(binding,'text');
  return known&&sameCanonical(present.filter(item=>item.name!==binding.name).sort((a,b)=>a.name.localeCompare(b.name)),[...original].sort((a,b)=>a.name.localeCompare(b.name)));
 }
 
@@ -30,7 +32,7 @@ export function safeWorkerLineageReport(deployments,current,prior,baseline=appro
  const currentAssets=assetBindingCount(current.resources?.bindings),priorAssets=assetBindingCount(prior.resources?.bindings);
  const priorAnnotation=oldDeployment?annotationKind(oldDeployment.annotations?.['workers/message'],message):'DEPLOYMENT_NOT_IN_PAGE';
  const runtimeMetadataEqual=Boolean(current.resources?.script_runtime&&prior.resources?.script_runtime&&sameCanonical(current.resources.script_runtime,prior.resources.script_runtime));
- const bindingAddition=knownBindingAddition(current,prior),pinnedEtag=Boolean(currentEtag&&priorEtag&&currentEtag===baseline.scriptEtag&&priorEtag===baseline.scriptEtag);
+ const bindingAddition=knownBindingAddition(current,prior,baseline),pinnedEtag=Boolean(currentEtag&&priorEtag&&currentEtag===baseline.scriptEtag&&priorEtag===baseline.scriptEtag);
  const provenance=sourceKind(latest.source)==='DASHBOARD'&&sourceKind(oldDeployment?.source)==='WRANGLER';
  const sameKnownLineage=Boolean(pinnedEtag&&priorAnnotation==='EXPECTED'&&annotationKind(latest.annotations?.['workers/message'],message)==='OTHER'&&provenance&&runtimeMetadataEqual&&bindingAddition&&currentAssets===1&&priorAssets===1);
  return {

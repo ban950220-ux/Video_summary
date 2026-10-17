@@ -26,6 +26,16 @@ const remote=()=>({
 const transport=()=>Object.assign(Error('PRIVATE_TRANSPORT_DETAIL'),{retryableReadTransport:true});
 const verify=(read,wait=async()=>{})=>verifyPostDeploy({token:'TEST_ONLY_TOKEN',ciMatchTag:'EXPECTED_TAG',deployed,before:remote(),baseline,read,wait});
 
+test('both post-deploy reads require the explicitly approved synthesis flag unchanged',async()=>{
+ const approved={...baseline,completeSynthesisEnabled:true};
+ const enabled=()=>{const state=remote();state.bindings.push({name:'ENABLE_COMPLETE_SYNTHESIS',type:'plain_text',text:'true'});return state;};
+ const run=read=>verifyPostDeploy({token:'TEST_ONLY_TOKEN',ciMatchTag:'EXPECTED_TAG',deployed,before:enabled(),baseline:approved,read,wait:async()=>{throw Error('must not retry guard failures');}});
+ let reads=0;await run(async()=>{reads++;return enabled();});assert.equal(reads,2);
+ for(const changed of [remote(),(()=>{const state=enabled();state.bindings.at(-1).text='false';return state;})(),(()=>{const state=enabled();state.bindings.at(-1).type='secret_text';return state;})()]){
+  reads=0;await assert.rejects(run(async()=>++reads===1?enabled():changed),/POST_DEPLOY_BASELINE_MISMATCH/);assert.equal(reads,2);
+ }
+});
+
 test('post-deploy verification also requires protected approval when no baseline is injected',async()=>{
  await assert.rejects(verifyPostDeploy({token:'TEST_ONLY_TOKEN',deployed,before:remote(),env:{},read:async()=>remote()}),/DEPLOYMENT_EVIDENCE_UNAVAILABLE/);
 });

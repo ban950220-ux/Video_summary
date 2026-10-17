@@ -34,6 +34,25 @@ const remote=()=>({workerName:baseline.workerName,environment:'production',activ
   {name:'GEMINI_LEGACY_QUOTE_RECOVERY_JSON',type:'plain_text',text:'PRIVATE_PRESERVED_SETTING'},
 ]});
 
+test('complete synthesis binding requires explicit protected approval and exact preservation',()=>{
+ const state=remote();state.bindings.push({name:'ASSETS',type:'assets'},{name:'ENABLE_COMPLETE_SYNTHESIS',type:'plain_text',text:'true'});
+ const approved={...baseline,completeSynthesisEnabled:true};
+ for(const postDeploy of [false,true]){
+  assert.throws(()=>assertRemoteState(state,baseline,{postDeploy}),/BINDINGS_UNEXPECTED/);
+  assert.equal(assertRemoteState(state,approved,{postDeploy}),true);
+  for(const mutate of [
+   value=>value.bindings.pop(),
+   value=>value.bindings.push({...value.bindings.at(-1)}),
+   value=>{value.bindings.at(-1).type='secret_text';},
+   value=>{value.bindings.push({name:'UNAPPROVED_FLAG',type:'plain_text',text:'true'});},
+  ]){const changed=structuredClone(state);mutate(changed);assert.throws(()=>assertRemoteState(changed,approved,{postDeploy}),/BINDINGS_UNEXPECTED/);}
+  for(const text of ['false','TRUE','1',true,undefined]){const changed=structuredClone(state);changed.bindings.at(-1).text=text;assert.throws(()=>assertRemoteState(changed,approved,{postDeploy}),/RUNTIME_FLAGS_MISMATCH/);}
+ }
+ const approval={kind:'REMOTE_DEPLOYMENT_REVIEW_V1',accountId:baseline.accountId,workerName:baseline.workerName,databaseId:baseline.databaseId,activeVersionId:baseline.activeVersionId,priorVersionId:baseline.priorVersionId,scriptEtag:baseline.scriptEtag,sourceCommit:baseline.sourceCommit,reviewedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString(),completeSynthesisEnabled:true};
+ assert.equal(protectedRemoteBaseline({GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify(approval)}).completeSynthesisEnabled,true);
+ for(const value of [false,'true',null,1])assert.throws(()=>protectedRemoteBaseline({GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify({...approval,completeSynthesisEnabled:value})}),/DEPLOYMENT_EVIDENCE_INVALID/);
+});
+
 test('guard baseline pins the verified active Worker version and source commit',()=>{
   assert.match(approvedRemoteBaseline.activeVersionId,/^[0-9a-f-]{36}$/);
   assert.match(approvedRemoteBaseline.sourceCommit,/^[0-9a-f]{40}$/);
