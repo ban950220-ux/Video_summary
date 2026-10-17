@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {expectedPriorVersionId,runWorkerVersionLineageDiagnostic,safeWorkerLineageReport} from '../scripts/worker-version-lineage-diagnostic.mjs';
 import {approvedRemoteBaseline,approvedPreDeployLineage} from '../scripts/remote-state-policy.mjs';
 
-const priorVersionId='6a3fcf05-03fe-4d2b-911f-b43631a17a85';
+const priorVersionId=approvedPreDeployLineage.priorVersionId;
+const reviewEnv={GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify({kind:'REMOTE_DEPLOYMENT_REVIEW_V1',accountId:approvedRemoteBaseline.accountId,workerName:approvedRemoteBaseline.workerName,databaseId:approvedRemoteBaseline.databaseId,activeVersionId:approvedRemoteBaseline.activeVersionId,priorVersionId,scriptEtag:approvedRemoteBaseline.scriptEtag,sourceCommit:approvedRemoteBaseline.sourceCommit,reviewedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString()})};
 const secret='PRIVATE_SENTINEL_DO_NOT_PRINT';
 const sourceMessage=`source-commit:${approvedRemoteBaseline.sourceCommit}`;
 const deployments=()=>[
@@ -20,8 +21,8 @@ test('fixed account and versions use only three authenticated GETs and print saf
   const result=url.endsWith('/deployments?per_page=100')?{deployments:deployments()}:url.endsWith('/versions/'+approvedRemoteBaseline.activeVersionId)?version(approvedRemoteBaseline.activeVersionId):url.endsWith('/versions/'+priorVersionId)?version(priorVersionId):null;
   assert.ok(result);return {ok:true,json:async()=>({success:true,result})};
  };
- assert.equal(await runWorkerVersionLineageDiagnostic({env:{WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher,write:value=>writes.push(value)}),true);
- assert.equal(calls.length,3);assert.ok(calls.every(call=>call.method==='GET'&&call.authorized&&call.url.startsWith('https://api.cloudflare.com/client/v4/accounts/fe9d7e2a164274b1ff6cef150a75cb0b/workers/scripts/holy-rice-b914/')));
+ assert.equal(await runWorkerVersionLineageDiagnostic({env:{...reviewEnv,WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher,write:value=>writes.push(value)}),true);
+ assert.equal(calls.length,3);assert.ok(calls.every(call=>call.method==='GET'&&call.authorized&&call.url.startsWith(`https://api.cloudflare.com/client/v4/accounts/${approvedRemoteBaseline.accountId}/workers/scripts/${approvedRemoteBaseline.workerName}/`)));
  const output=writes.join('\n'),report=JSON.parse(output);assert.ok(!output.includes(secret));assert.ok(!output.includes(approvedPreDeployLineage.scriptEtag));assert.equal(report.activeDeploymentSourceAnnotation,'OTHER');assert.equal(report.priorDeploymentSourceAnnotation,'EXPECTED');assert.equal(report.activeDeploymentSource,'DASHBOARD');assert.equal(report.priorDeploymentSource,'WRANGLER');assert.equal(report.scriptEtagMatchesPinned,true);assert.equal(report.scriptContentEqual,true);assert.equal(report.runtimeMetadataEqual,true);assert.equal(report.knownBindingAddition,true);assert.equal(report.codeLineageEvidence,'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR');assert.equal(report.sourceAnnotationGuardMatch,false);assert.equal(report.activeAssetsBindingCount,1);assert.equal(report.assetSetIdentifier,'NOT_EXPOSED_BY_VERSION_GET');
 });
 
@@ -35,14 +36,23 @@ test('missing or differing script hashes and annotations never establish lineage
  const altered=structuredClone(current);altered.resources.bindings[0].secret='changed';assert.equal(safeWorkerLineageReport(deployments(),altered,prior).knownBindingAddition,false);
  const runtime=structuredClone(current);runtime.resources.script_runtime.compatibility_date='2026-10-11';assert.equal(safeWorkerLineageReport(deployments(),runtime,prior).runtimeMetadataEqual,false);
  const wrongSource=deployments();wrongSource[0].source='wrangler';assert.equal(safeWorkerLineageReport(wrongSource,current,prior).codeLineageEvidence,'UNVERIFIED');
- assert.throws(()=>safeWorkerLineageReport(deployments(),current,{...prior,id:'a797acea-1111-4111-8111-111111111111'}),/DIAGNOSTIC_SCOPE_INVALID/);
+ assert.throws(()=>safeWorkerLineageReport(deployments(),current,{...prior,id:'55555555-5555-4555-8555-555555555555'}),/DIAGNOSTIC_SCOPE_INVALID/);
+});
+
+test('lineage compares annotations to the protected source commit',()=>{
+ const baseline={...approvedRemoteBaseline,sourceCommit:'b'.repeat(40)};
+ const history=deployments();history[1].annotations['workers/message']=`source-commit:${baseline.sourceCommit}`;
+ const report=safeWorkerLineageReport(history,version(baseline.activeVersionId),version(baseline.priorVersionId),baseline);
+ assert.equal(report.priorDeploymentSourceAnnotation,'EXPECTED');
+ assert.equal(report.codeLineageEvidence,'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR');
+ assert.equal(report.sourceAnnotationGuardMatch,false);
 });
 
 test('missing credentials, denied API and changed active deployment fail closed without leaking values',async()=>{
  const writes=[],write=value=>writes.push(value),fetcher=async()=>{throw Error(secret);};
  assert.equal(await runWorkerVersionLineageDiagnostic({env:{},fetcher,write}),false);
- assert.equal(await runWorkerVersionLineageDiagnostic({env:{WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher,write}),false);
- const denied=async()=>({ok:false,status:403});assert.equal(await runWorkerVersionLineageDiagnostic({env:{WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher:denied,write}),false);
- const wrong=async()=>({ok:true,json:async()=>({success:true,result:{deployments:[{versions:[{version_id:priorVersionId,percentage:100}]}]}})});assert.equal(await runWorkerVersionLineageDiagnostic({env:{WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher:wrong,write}),false);
+ assert.equal(await runWorkerVersionLineageDiagnostic({env:{...reviewEnv,WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher,write}),false);
+ const denied=async()=>({ok:false,status:403});assert.equal(await runWorkerVersionLineageDiagnostic({env:{...reviewEnv,WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher:denied,write}),false);
+ const wrong=async()=>({ok:true,json:async()=>({success:true,result:{deployments:[{versions:[{version_id:priorVersionId,percentage:100}]}]}})});assert.equal(await runWorkerVersionLineageDiagnostic({env:{...reviewEnv,WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher:wrong,write}),false);
  assert.ok(writes.every(value=>!value.includes(secret)));
 });

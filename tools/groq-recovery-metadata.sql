@@ -1,12 +1,13 @@
 -- READ ONLY. Output contains only row order, state, and shape checks.
 -- No operation IDs, hashes, timestamps, transcript, report, result JSON, or key material.
--- Run using the existing authorized D1 session; do not repair/reset these rows.
+-- Substitute __OWNER_SCOPED_JOB_UUID__ in a protected authorized D1 session.
+-- Do not commit the substituted query or repair/reset these rows.
 WITH records AS (
  SELECT row_number() OVER (ORDER BY created_at,id) AS recovery_row_number,state,
  CASE WHEN json_valid(result_json) THEN result_json ELSE '{}' END AS safe_json,
  json_valid(result_json) AS valid_json
  FROM yta_operations
- WHERE job_id='a69c6a73-6aa6-4ccb-a912-1fab0c35d6a9'
+ WHERE job_id='__OWNER_SCOPED_JOB_UUID__'
  AND provider='groq-summary-recovery'
 )
 SELECT recovery_row_number,state,valid_json,

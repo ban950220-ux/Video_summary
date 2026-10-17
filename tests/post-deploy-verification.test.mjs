@@ -6,7 +6,7 @@ import {approvedRemoteBaseline as baseline} from '../scripts/remote-state-policy
 
 const deployed={versionId:'11111111-1111-4111-8111-111111111111',sourceCommit:'a'.repeat(40)};
 const remote=()=>({
- workerName:'holy-rice-b914',environment:'production',workerTag:'EXPECTED_TAG',
+ workerName:baseline.workerName,environment:'production',workerTag:'EXPECTED_TAG',
  activeVersions:[{id:deployed.versionId,percentage:100}],deploymentMessage:`source-commit:${deployed.sourceCommit}`,
  workersDev:true,previewUrls:false,routes:[],domains:[],compatibilityDate:baseline.compatibilityDate,compatibilityFlagsPresent:false,
  observability:structuredClone(baseline.observability),optionalScriptFields:structuredClone(baseline.optionalScriptFields),scriptSettings:structuredClone(baseline.scriptSettings),
@@ -24,7 +24,11 @@ const remote=()=>({
  ],
 });
 const transport=()=>Object.assign(Error('PRIVATE_TRANSPORT_DETAIL'),{retryableReadTransport:true});
-const verify=(read,wait=async()=>{})=>verifyPostDeploy({token:'TEST_ONLY_TOKEN',ciMatchTag:'EXPECTED_TAG',deployed,before:remote(),read,wait});
+const verify=(read,wait=async()=>{})=>verifyPostDeploy({token:'TEST_ONLY_TOKEN',ciMatchTag:'EXPECTED_TAG',deployed,before:remote(),baseline,read,wait});
+
+test('post-deploy verification also requires protected approval when no baseline is injected',async()=>{
+ await assert.rejects(verifyPostDeploy({token:'TEST_ONLY_TOKEN',deployed,before:remote(),env:{},read:async()=>remote()}),/DEPLOYMENT_EVIDENCE_UNAVAILABLE/);
+});
 
 test('post-deploy transport errors retry bounded GET reads without another upload',async()=>{
  let reads=0;const delays=[];
@@ -68,7 +72,7 @@ test('postcheck preserves the exact recovery variable without exposing its value
 });
 
 test('only fetch transport exceptions receive the retry marker',async()=>{
- await assert.rejects(readRemoteState({token:'TEST_ONLY_TOKEN',fetcher:async()=>{throw Error('PRIVATE_NETWORK_DETAIL');}}),error=>error.retryableReadTransport===true&&error.message==='Remote deployment guard: REMOTE_READ_FAILED'&&!error.message.includes('PRIVATE_'));
- await assert.rejects(readRemoteState({token:'TEST_ONLY_TOKEN',fetcher:async()=>({ok:false,status:403})}),error=>error.retryableReadTransport!==true&&error.message==='Remote deployment guard: REMOTE_READ_FAILED');
- await assert.rejects(readRemoteState({token:'TEST_ONLY_TOKEN',fetcher:async()=>({ok:true,json:async()=>{throw Error('PRIVATE_BODY_DETAIL');}})}),error=>error.retryableReadTransport!==true&&error.message==='Remote deployment guard: REMOTE_RESPONSE_INVALID');
+ await assert.rejects(readRemoteState({token:'TEST_ONLY_TOKEN',target:baseline,fetcher:async()=>{throw Error('PRIVATE_NETWORK_DETAIL');}}),error=>error.retryableReadTransport===true&&error.message==='Remote deployment guard: REMOTE_READ_FAILED'&&!error.message.includes('PRIVATE_'));
+ await assert.rejects(readRemoteState({token:'TEST_ONLY_TOKEN',target:baseline,fetcher:async()=>({ok:false,status:403})}),error=>error.retryableReadTransport!==true&&error.message==='Remote deployment guard: REMOTE_READ_FAILED');
+ await assert.rejects(readRemoteState({token:'TEST_ONLY_TOKEN',target:baseline,fetcher:async()=>({ok:true,json:async()=>{throw Error('PRIVATE_BODY_DETAIL');}})}),error=>error.retryableReadTransport!==true&&error.message==='Remote deployment guard: REMOTE_RESPONSE_INVALID');
 });

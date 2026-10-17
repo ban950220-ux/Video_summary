@@ -153,6 +153,55 @@ test('stored oversized strict checkpoint recovery is atomic on local Workerd D1 
   assert.equal((await routeApi(request(url,'POST',body),env)).status,409);
  }finally{globalThis.fetch=oldFetch;await mf.dispose();}
 });
+test('legacy recovery review seal inserts exactly once on local Workerd D1',async()=>{
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'legacy-recovery-review-test',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'legacy-recovery-review-local'}}]})),oldFetch=globalThis.fetch;
+ try{
+  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
+  const id=crypto.randomUUID(),path='/api/jobs/'+id,stamp='2020-01-02T09:00:00.000Z',segments=[{id:1,startMs:0,endMs:300000,text:'source one'},{id:2,startMs:300000,endMs:600000,text:'source two'}];
+  const raw=segments.map(item=>item.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64)};
+  await DB.prepare("INSERT INTO jobs(id,owner_id,title,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json) VALUES(?,'owner','Legacy Workerd review','audio','TRANSCRIBED',600,?,?,?,?)").bind(id,stamp,stamp,'null',JSON.stringify(audit)).run();
+  await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',stamp).run();
+  const plan=await(await routeApi(request(path+'/groq-summary-plan'),env)).json(),hash=async value=>Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(typeof value==='string'?value:JSON.stringify(value)))).toString('hex');
+  const oldHash=await hash([raw,segments,audit.audioFileSha256,promptAudit({audit,duration_seconds:600})]),oldId=id+':groq-summary:'+oldHash+':raw:0',failedId=id+':groq-summary:'+plan.transcriptHash+':raw:0';
+  const report={summary:[{text:'grounded summary',evidenceIds:[1]}],chapters:[{text:'grounded chapter',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'grounded conclusion'};
+  const failedResult=JSON.stringify({reviewResult:{partialText:JSON.stringify(report),usage:{inputTokens:300,outputTokens:90,reasoningTokens:10,totalTokens:390}}});
+  await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID','{}')").bind(oldId,id,stamp).run();
+  await DB.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_CHECKPOINT_TOO_LARGE',?)").bind(failedId,id,stamp,failedResult).run();
+  for(const [kind,state] of [['review','REVIEWED'],['approval','APPROVED']])await DB.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)').bind(id+':groq-summary-pilot:'+kind+':'+oldHash,id,'groq-summary-pilot-'+kind,0,state,stamp,'{}').run();
+  await DB.prepare("INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,'owner','groq','LIVE_FREE_SUMMARY','actual_total_tokens',390,0,NULL,'PROVIDER_REPORTED_FAILED_OUTPUT_ACCOUNT_REMAINING_UNKNOWN',?)").bind(crypto.randomUUID(),id,stamp).run();
+  let calls=0;globalThis.fetch=async()=>{calls++;throw Error('provider dispatch forbidden');};
+  const recoveryUrl=path+'/groq-summary-checkpoint-recovery',preview=await(await routeApi(request(recoveryUrl),env)).json();
+  const recovered=await routeApi(request(recoveryUrl,'POST',{step:'recover',evidenceHash:preview.evidenceHash,failedOperationId:failedId,contractHash:plan.transcriptHash,responseSha256:preview.responseSha256,acknowledgeOriginalUsage:390,confirmNoProviderCall:true,confirmNoAutomaticContinuation:true}),env);assert.equal(recovered.status,200,await recovered.clone().text());
+  const recoveryId=id+':groq-summary-recovery:'+plan.transcriptHash+':raw:0',saved=(await DB.prepare('SELECT result_json FROM yta_operations WHERE id=?').bind(recoveryId).first()).result_json;
+  const {evidenceHash,recovered:wasRecovered,recoveryRecordExists,automaticContinuation,providerCalls,usageEventId,usageProvenance,...historicalEvidence}=preview;
+  assert.equal(evidenceHash,JSON.parse(saved).evidenceHash);assert.equal(wasRecovered,false);assert.equal(recoveryRecordExists,false);assert.equal(automaticContinuation,false);assert.equal(providerCalls,0);assert.equal(typeof usageEventId,'string');assert.equal(typeof usageProvenance,'string');
+  const originalJson=JSON.stringify({...JSON.parse(saved),evidenceHash:await hash(historicalEvidence)});
+  await DB.prepare('UPDATE yta_operations SET result_json=?,created_at=? WHERE id=?').bind(originalJson,'2020-01-02T09:01:00.000Z',recoveryId).run();
+  const reviewUrl=path+'/groq-summary-recovery-compat-review';assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,409);
+  env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({kind:'GROQ_LEGACY_RECOVERY_COMPAT_V1',jobId:id,ownerId:'owner',stage:'raw:0',recoveryOperationId:recoveryId,failedOperationId:failedId,historicalEvidenceHash:JSON.parse(originalJson).evidenceHash,recoveryCreatedBefore:'2020-01-03T00:00:00.000Z',authorizedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString()});
+  const approvedScope=env.GROQ_LEGACY_RECOVERY_SCOPE_JSON;
+  env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...JSON.parse(approvedScope),recoveryCreatedBefore:'2026-10-13T10:51:47.001Z'});
+  assert.equal((await routeApi(request(reviewUrl),env)).status,409,'cutoff after format change must not qualify');
+  env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=approvedScope;
+  const reviewBody={step:'record-compatibility-review',confirmOriginalRecoveryPreserved:true,confirmHistoricalAndCurrentEvidence:true,confirmNoProviderCall:true,confirmSeparateFreeKeyBinding:true};
+  const reviewed=await routeApi(request(reviewUrl,'POST',reviewBody),env);assert.equal(reviewed.status,200,await reviewed.clone().text());
+  assert.equal((await routeApi(request(reviewUrl,'POST',reviewBody),env)).status,409);
+  assert.equal((await DB.prepare('SELECT result_json FROM yta_operations WHERE id=?').bind(recoveryId).first()).result_json,originalJson);
+  assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review'").bind(id).first()).n,1);
+  assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,200);assert.equal(calls,0);
+  env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=JSON.stringify({...JSON.parse(approvedScope),authorizedAt:new Date(Date.now()-500).toISOString(),expiresAt:new Date(Date.now()+7200000).toISOString()});
+  assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,409,'a renewed authorization period must not reuse the old seal');
+  env.GROQ_LEGACY_RECOVERY_SCOPE_JSON=approvedScope;
+  const sealId=id+':groq-summary-recovery-compat-review:v1',seal=await DB.prepare('SELECT units,error_code,created_at FROM yta_operations WHERE id=?').bind(sealId).first();
+  for(const [column,changed] of [['units',1],['error_code','DRIFT'],['created_at','2020-01-04T00:00:00.000Z']]){
+   await DB.prepare(`UPDATE yta_operations SET ${column}=? WHERE id=?`).bind(changed,sealId).run();
+   assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,409,column);
+   await DB.prepare(`UPDATE yta_operations SET ${column}=? WHERE id=?`).bind(seal[column],sealId).run();
+  }
+  assert.equal((await routeApi(request(path+'/groq-summary-status'),env)).status,200);assert.equal(calls,0);
+ }finally{globalThis.fetch=oldFetch;await mf.dispose();}
+});
 
 test('live recovered failure proof is checked within final Workerd D1 dispatch statement',async()=>{
  const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'summary-live-proof-test',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'summary-live-proof-local'}}]})),oldFetch=globalThis.fetch;

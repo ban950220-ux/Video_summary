@@ -2,7 +2,7 @@
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {readRemoteState} from './read-remote-state.mjs';
-import {approvedRemoteBaseline,assertRemoteState,inspectBindingSet,sameCanonical} from './remote-state-policy.mjs';
+import {approvedRemoteBaseline,protectedRemoteBaseline,assertRemoteState,inspectBindingSet,sameCanonical} from './remote-state-policy.mjs';
 
 // Report shape without ever copying a remote string or object into build logs.
 const field=(parent,key,valid,project=value=>value)=>{
@@ -39,12 +39,12 @@ function safeOptional(field,kind){
 export function safeRemoteBaselineReport(remote,env={}){
   const bindings=Array.isArray(remote?.bindings)?remote.bindings:[];
   const binding=name=>bindings.find(item=>item?.name===name);
-  const expected=approvedRemoteBaseline;
+  const expected=env.GROQ_DEPLOYMENT_EVIDENCE_JSON?protectedRemoteBaseline(env):approvedRemoteBaseline;
   const flags=expected.runtimeFlags;
   const report={
     kind:'REMOTE_BASELINE_PREFLIGHT',readOnly:true,diagnosticReadSucceeded:true,
     bindings:inspectBindingSet(remote?.bindings,{expectAssets:expected.assetsPresent}),
-    target:{workerMatched:remote?.workerName==='holy-rice-b914',productionEnvironment:remote?.environment==='production',buildTagMatched:env.WRANGLER_CI_MATCH_TAG?remote?.workerTag===env.WRANGLER_CI_MATCH_TAG:'NOT_SUPPLIED',activeVersionMatchesExpected:Boolean(remote?.activeVersions?.length===1&&remote.activeVersions[0]?.id===expected.activeVersionId&&remote.activeVersions[0]?.percentage===100),d1MatchesExpected:Boolean(binding('DB')?.type==='d1'&&binding('DB')?.id===expected.databaseId),accessBindingsPresent:Boolean(binding('ACCESS_AUD')?.type==='plain_text'&&binding('ACCESS_TEAM_DOMAIN')?.type==='plain_text'&&binding('ACCESS_OWNER_EMAIL')?.type==='secret_text'&&binding('KEY_ENCRYPTION_KEY_B64')?.type==='secret_text'),accessVarsValid:typeof binding('ACCESS_AUD')?.text==='string'&&binding('ACCESS_AUD').text.length>=12&&/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(binding('ACCESS_TEAM_DOMAIN')?.text??''),runtimeFlagsMatch:Object.entries(flags).every(([name,value])=>binding(name)?.type==='plain_text'&&binding(name)?.text===value)},
+    target:{workerMatched:remote?.workerName===expected.workerName,productionEnvironment:remote?.environment==='production',buildTagMatched:env.WRANGLER_CI_MATCH_TAG?remote?.workerTag===env.WRANGLER_CI_MATCH_TAG:'NOT_SUPPLIED',activeVersionMatchesExpected:Boolean(remote?.activeVersions?.length===1&&remote.activeVersions[0]?.id===expected.activeVersionId&&remote.activeVersions[0]?.percentage===100),d1MatchesExpected:Boolean(binding('DB')?.type==='d1'&&binding('DB')?.id===expected.databaseId),accessBindingsPresent:Boolean(binding('ACCESS_AUD')?.type==='plain_text'&&binding('ACCESS_TEAM_DOMAIN')?.type==='plain_text'&&binding('ACCESS_OWNER_EMAIL')?.type==='secret_text'&&binding('KEY_ENCRYPTION_KEY_B64')?.type==='secret_text'),accessVarsValid:typeof binding('ACCESS_AUD')?.text==='string'&&binding('ACCESS_AUD').text.length>=12&&/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(binding('ACCESS_TEAM_DOMAIN')?.text??''),runtimeFlagsMatch:Object.entries(flags).every(([name,value])=>binding(name)?.type==='plain_text'&&binding(name)?.text===value)},
     exposure:{workersDev:boolean(remote,'workersDev'),previewUrls:boolean(remote,'previewUrls'),routeCount:count(remote,'routes'),domainCount:count(remote,'domains')},
     metadata:{compatibilityDateMatchesExpected:remote?.compatibilityDate===expected.compatibilityDate,compatibilityFlags:{kind:remote?.compatibilityFlagsPresent===false?'OMITTED':field(remote,'compatibilityFlags',Array.isArray,()=> 'ARRAY'),count:remote?.compatibilityFlagsPresent===false?'OMITTED':count(remote,'compatibilityFlags')},compatibilityFlagsMatchExpected:remote?.compatibilityFlagsPresent===expected.compatibilityFlagsPresent&&sameCanonical(remote?.compatibilityFlags,expected.compatibilityFlags),observability:safeObservability(remote?.observability),observabilityMatchesProposed:sameCanonical(remote?.observability,expected.observability),limits:safeOptional(remote?.optionalScriptFields?.limits,'limits'),placementMode:safeOptional(remote?.optionalScriptFields?.placement_mode,'placement'),streamingTailConsumers:safeOptional(remote?.optionalScriptFields?.streaming_tail_consumers,'consumers'),optionalFieldsMatchProposed:sameCanonical(remote?.optionalScriptFields,expected.optionalScriptFields)},
     scriptSettings:{logpush:boolean(remote?.scriptSettings,'logpush'),logpushMatchesProposed:remote?.scriptSettings?.logpush===expected.scriptSettings.logpush,tailConsumerCount:count(remote?.scriptSettings,'tail_consumers'),tailConsumersMatchProposed:sameCanonical(remote?.scriptSettings?.tail_consumers,expected.scriptSettings.tail_consumers),observability:safeObservability(remote?.scriptSettings?.observability),observabilityMatchesProposed:sameCanonical(remote?.scriptSettings?.observability,expected.scriptSettings.observability)},
@@ -53,7 +53,7 @@ export function safeRemoteBaselineReport(remote,env={}){
   if(env.REMOTE_PREFLIGHT_VERSION_DIAGNOSTIC==='true'){
     const version=remote?.activeVersions?.length===1?remote.activeVersions[0]?.id:null;
     const source=/^source-commit:([0-9a-f]{40})$/i.exec(remote?.deploymentMessage??'');
-    report.versionDiagnostic={activeVersionId:typeof version==='string'&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(version)?version:'UNAVAILABLE',sourceCommit:source?.[1]??'UNAVAILABLE'};
+    report.versionDiagnostic={activeVersionFormatValid:typeof version==='string'&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(version),sourceCommitFormatValid:Boolean(source)};
   }
   try{
     // Diagnostic comparison only: the approved baseline object remains blocked.
@@ -71,7 +71,8 @@ export function safeRemoteBaselineReport(remote,env={}){
 export async function runRemoteBaselinePreflight({env=process.env,fetcher=fetch,write=console.log}={}){
   if(!env.WORKERS_CI||!env.CLOUDFLARE_API_TOKEN){write('REMOTE_BASELINE_PREFLIGHT_FAILED: BUILD_CONTEXT_OR_TOKEN_UNAVAILABLE');return false;}
   try{
-    const remote=await readRemoteState({token:env.CLOUDFLARE_API_TOKEN,fetcher});
+    const target=protectedRemoteBaseline(env);
+    const remote=await readRemoteState({token:env.CLOUDFLARE_API_TOKEN,fetcher,target});
     write(JSON.stringify(safeRemoteBaselineReport(remote,env)));
     return true;
   }catch{

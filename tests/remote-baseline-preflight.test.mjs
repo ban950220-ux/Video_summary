@@ -4,8 +4,9 @@ import {runRemoteBaselinePreflight,safeRemoteBaselineReport} from '../scripts/re
 import {approvedRemoteBaseline} from '../scripts/remote-state-policy.mjs';
 
 const secret='PRIVATE_SENTINEL_DO_NOT_PRINT';
+const reviewEnv={GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify({kind:'REMOTE_DEPLOYMENT_REVIEW_V1',accountId:approvedRemoteBaseline.accountId,workerName:approvedRemoteBaseline.workerName,databaseId:approvedRemoteBaseline.databaseId,activeVersionId:approvedRemoteBaseline.activeVersionId,priorVersionId:approvedRemoteBaseline.priorVersionId,scriptEtag:approvedRemoteBaseline.scriptEtag,sourceCommit:approvedRemoteBaseline.sourceCommit,reviewedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString()})};
 const remote=()=>({
- workerName:'holy-rice-b914',environment:'production',workerTag:secret,
+ workerName:approvedRemoteBaseline.workerName,environment:'production',workerTag:secret,
  activeVersions:[{id:approvedRemoteBaseline.activeVersionId,percentage:100}],
  workersDev:true,previewUrls:false,routes:[{pattern:secret}],domains:[{hostname:secret}],deploymentMessage:secret,
  compatibilityDate:'2026-10-10',compatibilityFlagsPresent:true,compatibilityFlags:[],
@@ -39,10 +40,10 @@ test('preflight emits only approved booleans, rates, presence and counts',()=>{
 test('version diagnostic emits only validated active UUID and source SHA',()=>{
  const state=remote(),sha='a'.repeat(40);state.deploymentMessage='source-commit:'+sha;
  const report=safeRemoteBaselineReport(state,{REMOTE_PREFLIGHT_VERSION_DIAGNOSTIC:'true'});
- assert.deepEqual(report.versionDiagnostic,{activeVersionId:approvedRemoteBaseline.activeVersionId,sourceCommit:sha});
+ assert.deepEqual(report.versionDiagnostic,{activeVersionFormatValid:true,sourceCommitFormatValid:true});
  assert.ok(!JSON.stringify(report).includes(secret));
  state.deploymentMessage=secret;state.activeVersions[0].id=secret;
- assert.deepEqual(safeRemoteBaselineReport(state,{REMOTE_PREFLIGHT_VERSION_DIAGNOSTIC:'true'}).versionDiagnostic,{activeVersionId:'UNAVAILABLE',sourceCommit:'UNAVAILABLE'});
+ assert.deepEqual(safeRemoteBaselineReport(state,{REMOTE_PREFLIGHT_VERSION_DIAGNOSTIC:'true'}).versionDiagnostic,{activeVersionFormatValid:false,sourceCommitFormatValid:false});
  assert.equal(Object.hasOwn(safeRemoteBaselineReport(state,{}),'versionDiagnostic'),false);
 });
 
@@ -60,7 +61,7 @@ test('diagnostic ignores object key order and reports complete, unique bindings 
  state.bindings.push({name:'ASSETS',type:'assets'});
  const report=safeRemoteBaselineReport(state,{WRANGLER_CI_MATCH_TAG:secret,REMOTE_PREFLIGHT_VERSION_DIAGNOSTIC:'true'});
  assert.deepEqual(report.bindings,{available:true,unique:true,complete:true});
- assert.deepEqual(report.versionDiagnostic,{activeVersionId:approvedRemoteBaseline.activeVersionId,sourceCommit:approvedRemoteBaseline.sourceCommit});
+ assert.deepEqual(report.versionDiagnostic,{activeVersionFormatValid:true,sourceCommitFormatValid:true});
  assert.deepEqual(report.target,{workerMatched:true,productionEnvironment:true,buildTagMatched:true,activeVersionMatchesExpected:true,d1MatchesExpected:true,accessBindingsPresent:true,accessVarsValid:true,runtimeFlagsMatch:true});
  assert.deepEqual(report.exposure,{workersDev:true,previewUrls:false,routeCount:0,domainCount:0});
  assert.equal(report.metadata.compatibilityDateMatchesExpected,true);
@@ -154,7 +155,7 @@ test('preflight uses only fixed Cloudflare GET endpoints and never logs API data
   calls.push({url,method:options.method});
   const path=new URL(url).pathname;
   let result;
-  if(path.endsWith('/workers/services/holy-rice-b914'))result={default_environment:{environment:'production',script:{tag:secret}}};
+  if(path.endsWith('/workers/services/'+approvedRemoteBaseline.workerName))result={default_environment:{environment:'production',script:{tag:secret}}};
   else if(path.endsWith('/environments/production'))result={script:{compatibility_date:'2026-10-10',observability:remote().observability}};
   else if(path.endsWith('/bindings'))result=remote().bindings;
   else if(path.endsWith('/subdomain'))result={enabled:true,previews_enabled:false};
@@ -165,12 +166,12 @@ test('preflight uses only fixed Cloudflare GET endpoints and never logs API data
   else throw Error('unexpected endpoint');
   return {ok:true,json:async()=>({success:true,result})};
  };
- assert.equal(await runRemoteBaselinePreflight({env:{WORKERS_CI:'1',CLOUDFLARE_API_TOKEN:secret,WRANGLER_CI_MATCH_TAG:secret},fetcher,write:value=>output.push(value)}),true);
+ assert.equal(await runRemoteBaselinePreflight({env:{...reviewEnv,WORKERS_CI:'1',CLOUDFLARE_API_TOKEN:secret,WRANGLER_CI_MATCH_TAG:secret},fetcher,write:value=>output.push(value)}),true);
  assert.equal(calls.length,8);
  assert.ok(calls.every(call=>call.method==='GET'&&call.url.startsWith('https://api.cloudflare.com/client/v4/accounts/')));
  assert.ok(!output.join('').includes(secret));
  assert.deepEqual(JSON.parse(output[0]).metadata.compatibilityFlags,{kind:'OMITTED',count:'OMITTED'});
  const denied=[];
- assert.equal(await runRemoteBaselinePreflight({env:{WORKERS_CI:'1',CLOUDFLARE_API_TOKEN:secret},fetcher:()=>{throw Error(secret);},write:value=>denied.push(value)}),false);
+ assert.equal(await runRemoteBaselinePreflight({env:{...reviewEnv,WORKERS_CI:'1',CLOUDFLARE_API_TOKEN:secret},fetcher:()=>{throw Error(secret);},write:value=>denied.push(value)}),false);
  assert.deepEqual(denied,['REMOTE_BASELINE_PREFLIGHT_FAILED: READ_OR_RESPONSE_INVALID']);
 });
