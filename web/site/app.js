@@ -160,9 +160,10 @@ function showGroqSummaryChoice(job,target,requestId){
  const statusBox=el('section',{className:'summary-progress',attrs:{role:'status','aria-live':'polite','aria-atomic':'true'}});
  const headline=el('strong'),detail=el('p'),refreshButton=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});
  const diagnosticButton=el('button',{className:'btn secondary small',text:'실패 단계 무호출 진단'}),diagnosticDetail=el('p');diagnosticButton.hidden=true;
+ const diagnosticEvidence=el('div');
  const correctionButton=el('button',{className:'btn secondary small',text:'raw:8 무료 1회 교정 견적 검토'});correctionButton.hidden=true;
  const scopeHost=el('div');
- statusBox.append(headline,detail,refreshButton,diagnosticButton,diagnosticDetail,correctionButton);
+ statusBox.append(headline,detail,refreshButton,diagnosticButton,diagnosticDetail,diagnosticEvidence,correctionButton);
  target.append(reviewButton,statusBox,scopeHost);
   const recoveryDiagnostic=groqRecoveryDiagnosticControl(job,current);recoveryDiagnostic.hidden=true;statusBox.append(recoveryDiagnostic);
   const compatibilityReview=groqLegacyRecoveryReviewControl(job,current);statusBox.append(compatibilityReview.host);
@@ -177,10 +178,33 @@ function showGroqSummaryChoice(job,target,requestId){
   diagnosticButton.hidden=!failedKey;
   correctionButton.hidden=failedKey!=='raw:8';
   if(failedKey!==diagnosticStage){diagnosticStage=failedKey;diagnosticDetail.textContent=failedKey?`실패 단계 ${failedKey} · 저장된 응답만 진단할 수 있습니다.`:'';}
+  if(failedKey!==diagnosticEvidence.dataset.stage){diagnosticEvidence.replaceChildren();diagnosticEvidence.dataset.stage=failedKey??"";}
   if(runButton)runButton.disabled=running||!view.canExecute;
   if(finalizeButton)finalizeButton.disabled=running||status?.finalReportSaved===true;
  };
- diagnosticButton.onclick=async()=>{const key=diagnosticStage;if(!key)return;diagnosticButton.disabled=true;try{const result=await api('/api/jobs/'+job.id+'/groq-summary-stage-diagnostic?stage='+encodeURIComponent(key));if(current()&&diagnosticStage===key){const categories={EVIDENCE_ID:'근거 ID 범위',GROUP_COVERAGE:'장별 구간 근거',UNSUPPORTED_NUMBER:'근거 없는 수치',UNSUPPORTED_QUOTE:'근거 없는 직접 인용',SCHEMA:'보고서 형식',JSON_PARSE:'JSON 파싱',STORED_TEXT_UNAVAILABLE:'저장된 응답 없음',VALIDATION_PASS_ONLY:'현재 검증 통과'};diagnosticDetail.textContent=`${key} · ${categories[result.classification]??'분류 미확인'} · 원문 구간 ${result.firstId}–${result.lastId} (${result.segmentCount}개) · 불일치 ${result.mismatchCount??'미확인'}개${result.truncationPossible?' · 보존 텍스트 절단 가능':''} · 응답 완전성 미검증 · 제공자 호출 없음 · 복구 아님.`;}}catch(error){if(current()&&diagnosticStage===key)diagnosticDetail.textContent='무호출 진단을 확인할 수 없습니다. '+safeError(error);}finally{diagnosticButton.disabled=false;}};
+ const renderDiagnosticEvidence=result=>{
+  diagnosticEvidence.replaceChildren();
+  if(result.classification!=='UNSUPPORTED_NUMBER'||!Array.isArray(result.numberEvidence))return;
+  for(const item of result.numberEvidence.slice(0,8)){
+   const box=el('section',{className:'summary-progress'});
+   box.append(el('strong',{text:`${item.field}[${item.itemIndex}] · ${item.number}${item.numberTruncated?'…':''}${item.unit??''} · 원문 표기 ${item.reportedToken?.raw??''}${item.reportedToken?.rawTruncated?'…':''} · 근거 ID ${Array.isArray(item.evidenceIds)?item.evidenceIds.join(', '):''}${item.evidenceIdsTruncated?' …':''}`}));
+   box.append(el('pre',{text:`보고서: ${item.item?.text??''}${item.item?.truncated?' …':''}`}));
+   for(const source of Array.isArray(item.source)?item.source.slice(0,8):[]){
+    const status=source.numberPresence==='ABSENT'?'인용 원문에 동일 숫자 토큰 없음':source.numberPresence==='PRESENT_WITH_DIFFERENT_UNIT'?'동일 숫자는 있으나 단위가 다름':'동일 숫자 토큰 있음';
+    box.append(el('p',{text:`원문 ${source.id}: ${status}`}));
+    if(Array.isArray(source.numberContexts)&&source.numberContexts.length){
+     for(const context of source.numberContexts.slice(0,4))box.append(el('pre',{text:`숫자 문맥 ${context.raw}${context.rawTruncated?'…':''} (위치 ${context.position}): ${context.text}${context.truncated?' …':''}`}));
+    }else box.append(el('pre',{text:`원문 발췌: ${source.text??''}${source.truncated?' …':''}`}));
+    if(source.numberContextsTruncated)box.append(el('p',{text:'추가 원문 숫자 문맥은 표시 개수 제한으로 생략되었습니다.'}));
+   }
+   if(item.sourceTruncated)box.append(el('p',{text:'일부 근거 원문은 표시 길이 제한으로 생략되었습니다.'}));
+   diagnosticEvidence.append(box);
+  }
+  if(result.numberEvidenceTruncated)diagnosticEvidence.append(el('p',{text:'추가 불일치는 표시 개수 제한으로 생략되었습니다.'}));
+  if(result.responseTruncated)diagnosticEvidence.append(el('p',{text:'진단 응답은 표시 길이 또는 전체 크기 제한으로 일부 잘렸습니다.'}));
+  diagnosticEvidence.append(el('p',{text:'숫자 표기 불일치는 검토 단서이며 환각의 확정 증거가 아닙니다. 저장된 실패 상태는 그대로 유지됩니다.'}));
+ };
+ diagnosticButton.onclick=async()=>{const key=diagnosticStage;if(!key)return;diagnosticButton.disabled=true;try{const result=await api('/api/jobs/'+job.id+'/groq-summary-stage-diagnostic?stage='+encodeURIComponent(key));if(current()&&diagnosticStage===key){const categories={EVIDENCE_ID:'근거 ID 범위',GROUP_COVERAGE:'장별 구간 근거',UNSUPPORTED_NUMBER:'근거 ID 숫자 불일치',UNSUPPORTED_QUOTE:'근거 없는 직접 인용',SCHEMA:'보고서 형식',JSON_PARSE:'JSON 파싱',STORED_TEXT_UNAVAILABLE:'저장된 응답 없음',VALIDATION_PASS_ONLY:'현재 검증 통과'};diagnosticDetail.textContent=`${key} · ${categories[result.classification]??'분류 미확인'} · 원문 구간 ${result.firstId}–${result.lastId} (${result.segmentCount}개) · 불일치 ${result.mismatchCount??'미확인'}개${result.truncationPossible?' · 보존 텍스트 절단 가능':''} · 응답 완전성 미검증 · 제공자 호출 없음 · 복구 아님.`;renderDiagnosticEvidence(result);}}catch(error){if(current()&&diagnosticStage===key)diagnosticDetail.textContent='무호출 진단을 확인할 수 없습니다. '+safeError(error);}finally{diagnosticButton.disabled=false;}};
  correctionButton.onclick=()=>{if(current()){empty(target);showGroqCorrectionChoice(job,target,requestId);}};
  const setPhase=(next,nextReason=null,nextWait=null)=>{phase=next;reason=nextReason;waitUntil=nextWait;render();};
  const refreshStatus=async()=>{

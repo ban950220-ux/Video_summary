@@ -11,7 +11,7 @@ import {capacityIdentity} from '../src/observed-capacity.mjs';
 import {mergeAudioSegments} from '../src/audio.mjs';
 import {GROQ_SUMMARY_RESPONSE_FORMAT,groqSummaryRequestBody} from '../src/groq-summary-contract.mjs';
 import {validateAnalysis,markdownReport} from '../src/report.mjs';
-import {assertGrounding} from '../src/groq-summary.mjs';
+import {assertGrounding,limitNumberDiagnosticResponse} from '../src/groq-summary.mjs';
 import {completeCoverageManifest,evidenceNotes,synthesisTreeProgress,persistedSynthesisNode} from '../src/groq-complete-synthesis.mjs';
 
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
@@ -577,11 +577,12 @@ test('reviewed gap rejects an uncertain correction or a later 429 without anothe
  }finally{globalThis.fetch=oldFetch;f.db.close();}
 });
 
-test('owner-only raw:8 diagnostic classifies saved response without writes, provider calls or private text',async()=>{
+test('owner-only raw stage diagnostic returns bounded number evidence without writes, provider calls or keys',async()=>{
  const f=await fixture({large:true,sourceText:'가'.repeat(350)}),priorFetch=globalThis.fetch;let fetches=0;
  try{
   const jobRow=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),groups=partitionGroqTranscript(f.segments,promptAudit({audit:JSON.parse(jobRow.audit_json),duration_seconds:jobRow.duration_seconds})),group=groups[8],id=group[0].id,hash=f.plan.transcriptHash,stamp=new Date().toISOString();
   assert.ok(group&&groups.length>8);
+  f.env.GROQ_API_KEY='SENSITIVE_PROVIDER_KEY_SENTINEL';
   f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'STOPPED',?,?)").run(f.id+':groq-summary:approval:0',f.id,stamp,JSON.stringify({...f.approval,sequence:0}));
   for(let i=0;i<8;i++)f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'DONE',?,?)").run(f.id+':groq-summary:'+hash+':raw:'+i,f.id,stamp,JSON.stringify({hash,key:'raw:'+i,report:valid(groups[i][0].id)}));
   const failedId=f.id+':groq-summary:'+hash+':raw:8',url=f.path+'/groq-summary-stage-diagnostic?stage=raw%3A8';
@@ -596,16 +597,69 @@ test('owner-only raw:8 diagnostic classifies saved response without writes, prov
   ];
   globalThis.fetch=async()=>{fetches++;throw Error('MODEL_CALL_FORBIDDEN');};
   const denied=await handleSiteRequest(request(url),{...f.env,ACCESS_TEAM_DOMAIN:'https://owner.cloudflareaccess.com',ACCESS_AUD:'diagnostic-owner-audience',ACCESS_OWNER_EMAIL:'owner@example.com'});assert.equal(denied.status,401);
+  const spoofed=new Request('https://test.invalid'+url,{headers:{'Cf-Access-Authenticated-User-Email':'another@example.com'}});
+  const foreign=await handleSiteRequest(spoofed,{...f.env,ACCESS_TEAM_DOMAIN:'https://owner.cloudflareaccess.com',ACCESS_AUD:'diagnostic-owner-audience',ACCESS_OWNER_EMAIL:'owner@example.com'});assert.equal(foreign.status,401);
   for(const [classification,raw,count] of cases){
    const result=JSON.stringify({reviewResult:{partialText:raw,usage:{inputTokens:1152,outputTokens:987,totalTokens:2139}}});
    f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?) ON CONFLICT(id) DO UPDATE SET result_json=excluded.result_json").run(failedId,f.id,stamp,result);
    const before={...f.db.prepare('SELECT * FROM yta_operations WHERE id=?').get(failedId)},reply=await routeApi(request(url),f.env),body=await reply.json();
    assert.equal(reply.status,200,classification);assert.equal(body.classification,classification);assert.equal(body.mismatchCount,count);assert.equal(body.stage,'raw:8');assert.equal(body.firstId,group[0].id);assert.equal(body.lastId,group.at(-1).id);assert.equal(body.segmentCount,group.length);assert.equal(body.providerCalls,0);assert.equal(body.responseCompleteVerified,false);assert.equal(body.providerReceiptVerified,false);
-   assert.ok(!JSON.stringify(body).includes('PRIVATE_RESPONSE_CONTENT'));assert.deepEqual({...f.db.prepare('SELECT * FROM yta_operations WHERE id=?').get(failedId)},before);
+   if(classification==='UNSUPPORTED_NUMBER'){
+    assert.equal(body.numberEvidence.length,1);
+    assert.equal(body.numberEvidence[0].number,'999');
+    assert.deepEqual(body.numberEvidence[0].evidenceIds,[id]);
+    assert.match(body.numberEvidence[0].item.text,/999/);
+    assert.equal(body.numberEvidence[0].source[0].id,id);
+    assert.equal(body.numberEvidence[0].source[0].numberPresence,'ABSENT');
+    assert.deepEqual(body.numberEvidence[0].source[0].numberContexts,[]);
+    assert.ok(body.numberEvidence[0].item.text.length<=240);
+    assert.ok(body.numberEvidence[0].source[0].text.length<=240);
+   }else assert.equal(body.numberEvidence,undefined);
+   if(classification!=='UNSUPPORTED_NUMBER')assert.ok(!JSON.stringify(body).includes('PRIVATE_RESPONSE_CONTENT'));
+   assert.ok(!JSON.stringify(body).includes('SENSITIVE_PROVIDER_KEY_SENTINEL'));
+   assert.deepEqual({...f.db.prepare('SELECT * FROM yta_operations WHERE id=?').get(failedId)},before);
   }
   assert.equal(fetches,0);
+  const nextId=groups[9][0].id,nextRaw=JSON.stringify({...valid(nextId),summary:[{text:'PRIVATE_RESPONSE_CONTENT 999 and 888',evidenceIds:[nextId]}]});
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").run(f.id+':groq-summary:'+hash+':raw:9',f.id,stamp,JSON.stringify({reviewResult:{partialText:nextRaw}}));
+  const ninth=await routeApi(request(f.path+'/groq-summary-stage-diagnostic?stage=raw%3A9'),f.env),ninthBody=await ninth.json();
+  assert.equal(ninth.status,200);assert.equal(ninthBody.classification,'UNSUPPORTED_NUMBER');assert.equal(ninthBody.mismatchCount,2);assert.deepEqual(ninthBody.numberEvidence.map(item=>item.number),['999','888']);assert.deepEqual(ninthBody.numberEvidence[0].evidenceIds,[nextId]);
+  const originalDB=f.env.DB;
+  f.env.DB={prepare(sql){if(/^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b/i.test(sql))throw Error('WRITE_FORBIDDEN');return originalDB.prepare(sql);}};
+  const readOnly=await routeApi(request(url),f.env);assert.equal(readOnly.status,200);assert.equal(fetches,0);
+  f.env.DB=originalDB;
   const invalid=await routeApi(request(f.path+'/groq-summary-stage-diagnostic?stage=merge%3A0%3A0'),f.env);assert.equal(invalid.status,409);
  }finally{globalThis.fetch=priorFetch;f.db.close();}
+});
+
+test('stored number evidence retains comma, decimal, unit and late source token positions',async()=>{
+ const prefix='1개 2개 3개 4개 ',sourceText=prefix+'가'.repeat(300-prefix.length)+'900명 1.5% 5개 '+'8'.repeat(100)+'명'+'나'.repeat(100),f=await fixture({large:true,sourceText});
+ try{
+  const jobRow=f.db.prepare('SELECT audit_json,duration_seconds FROM jobs WHERE id=?').get(f.id),groups=partitionGroqTranscript(f.segments,promptAudit({audit:JSON.parse(jobRow.audit_json),duration_seconds:jobRow.duration_seconds})),group=groups[8],id=group[0].id,hash=f.plan.transcriptHash,stamp=new Date().toISOString();
+  assert.ok(group);
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,'groq-summary',6600,'STOPPED',?,?)").run(f.id+':groq-summary:approval:0',f.id,stamp,JSON.stringify({...f.approval,sequence:0}));
+  const saved=JSON.stringify({...valid(id),summary:[{text:'다'.repeat(300)+'1,000명',evidenceIds:[id]},{text:'1.50%',evidenceIds:[id]},{text:'5명',evidenceIds:[id]},{text:'8'.repeat(100)+'개',evidenceIds:[id]},{text:'8'.repeat(2000)+'개',evidenceIds:[id]}]});
+  f.db.prepare("INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,error_code,result_json) VALUES(?,?,'groq-summary',6600,'FAILED_UNCERTAIN',?,'SUMMARY_RESPONSE_INVALID',?)").run(f.id+':groq-summary:'+hash+':raw:8',f.id,stamp,JSON.stringify({reviewResult:{partialText:saved}}));
+  const result=await routeApi(request(f.path+'/groq-summary-stage-diagnostic?stage=raw%3A8'),f.env),body=await result.json();
+  assert.equal(result.status,200);assert.equal(body.classification,'UNSUPPORTED_NUMBER');assert.equal(body.mismatchCount,5);
+  const [comma,decimal,unit,sourceLong,long]=body.numberEvidence;
+  assert.equal(comma.reportedToken.position,300);assert.match(comma.reportedToken.raw,/1,000명/);assert.match(comma.item.text,/1,000명/);assert.ok(comma.item.text.length<=240);
+  assert.equal(comma.source[0].numberPresence,'ABSENT');assert.equal(comma.source[0].numberContexts[0].position,300);assert.match(comma.source[0].numberContexts[0].text,/900명/);assert.ok(comma.source[0].numberContexts[0].text.length<=240);
+  assert.equal(decimal.number,'1.50');assert.equal(decimal.source[0].numberPresence,'ABSENT');assert.ok(decimal.source[0].numberContexts.some(context=>context.raw.includes('1.5%')));
+  assert.equal(unit.number,'5');assert.equal(unit.source[0].numberPresence,'PRESENT_WITH_DIFFERENT_UNIT');assert.match(unit.source[0].text,/5개/);
+  assert.equal(sourceLong.source[0].numberPresence,'PRESENT_WITH_DIFFERENT_UNIT');assert.equal(sourceLong.source[0].numberContexts[0].raw.length,64);assert.equal(sourceLong.source[0].numberContexts[0].rawLength,101);assert.equal(sourceLong.source[0].numberContexts[0].rawTruncated,true);
+  assert.equal(long.number.length,64);assert.equal(long.numberLength,2000);assert.equal(long.numberTruncated,true);assert.equal(long.reportedToken.raw.length,64);assert.equal(long.reportedToken.rawLength,2001);assert.equal(long.reportedToken.rawTruncated,true);
+  assert.equal(long.source[0].numberPresence,'ABSENT');
+  assert.equal(body.responseTruncated,true);assert.ok(new TextEncoder().encode(JSON.stringify(body)).length<=body.responseByteLimit);
+ }finally{f.db.close();}
+});
+
+test('many number mismatches stay within the complete diagnostic byte ceiling',()=>{
+ const excerpt={text:'가'.repeat(240),start:0,fullLength:2000,truncated:true};
+ const numberEvidence=Array.from({length:8},(_,itemIndex)=>({field:'summary',itemIndex,number:'9'.repeat(64),numberLength:2000,numberTruncated:true,unit:'명',reportedToken:{raw:'9'.repeat(64),rawLength:2001,rawTruncated:true,position:300},item:{...excerpt},evidenceIds:Array.from({length:16},(_,i)=>i+1),evidenceIdsTruncated:true,source:Array.from({length:8},(_,id)=>({id:id+1,numberPresence:'ABSENT',...excerpt,numberContexts:Array.from({length:4},(_,position)=>({raw:'8'.repeat(64),rawLength:2001,rawTruncated:true,number:'8'.repeat(64),numberLength:2000,numberTruncated:true,unit:'개',position,...excerpt})),numberContextsTruncated:true})),sourceTruncated:true}));
+ const result=limitNumberDiagnosticResponse({stage:'raw:9',classification:'UNSUPPORTED_NUMBER',mismatchCount:8,numberEvidence,numberEvidenceTruncated:false});
+ assert.ok(result.numberEvidence.length>0);assert.equal(result.responseTruncated,true);assert.ok(new TextEncoder().encode(JSON.stringify(result)).length<=32768);assert.equal(result.responseByteLimit,32768);
+ assert.ok(result.numberEvidence.some(item=>item.source.some(source=>source.numberContextsTruncated)));
 });
 
 test('a separately approved free raw:8 correction preserves old ledgers and resumes at raw:9',async()=>{

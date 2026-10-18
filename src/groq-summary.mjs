@@ -244,18 +244,47 @@ async function guard(env,{id,hash,scope,operationId,sourceSnapshot,jobAuditSnaps
  const row=await env.DB.prepare(`${liveCte}SELECT 1 AS ok FROM yta_operations a JOIN yta_operations o ON o.job_id=a.job_id JOIN yta_sources s ON s.job_id=a.job_id JOIN jobs j ON j.id=a.job_id AND j.owner_id='owner'${liveJoin} WHERE a.id=? AND a.provider='groq-summary' AND a.state='APPROVED' AND a.result_json=? AND o.id=? AND o.provider='groq-summary' AND o.state='CLAIMED' AND s.raw=? AND s.segments_json=? AND j.audit_json=? AND json_extract(j.audit_json,'$.audioFileSha256')=? AND json_extract(j.audit_json,'$.audioProcessingCoverage')=1 AND NOT EXISTS (SELECT 1 FROM yta_operations d WHERE d.id=? AND d.provider='deletion' AND state='DELETING') AND ((?=0 AND NOT EXISTS(SELECT 1 FROM provider_credentials c WHERE c.owner_id='owner' AND c.provider='groq')) OR (?=1 AND EXISTS(SELECT 1 FROM provider_credentials c WHERE c.owner_id='owner' AND c.provider='groq' AND c.cipher_version=? AND c.iv_b64=? AND c.ciphertext_b64=? AND c.updated_at=?))) AND (?=0 OR (EXISTS(SELECT 1 FROM yta_operations f WHERE f.id=? AND f.job_id=j.id AND f.state='FAILED_UNCERTAIN' AND f.error_code='SUMMARY_RESPONSE_INVALID' AND f.result_json=?) AND EXISTS(SELECT 1 FROM yta_operations f WHERE f.id=? AND f.job_id=j.id AND f.state='FAILED_UNCERTAIN' AND f.error_code='SUMMARY_RESPONSE_INVALID' AND f.result_json=?) AND NOT EXISTS(SELECT 1 FROM yta_operations u WHERE u.provider='groq-summary' AND u.state IN ('CLAIMED','FAILED_UNCERTAIN') AND u.id NOT IN (SELECT value FROM json_each(?)))))${reviewSql}${recoverySql} AND ${synthesisRecoveryProofSql} AND ${rawRecoveryProofSql} AND ${groqSettlementProofSql}${liveCondition}`).bind(...(liveResolutionProofs.length?[JSON.stringify(liveResolutionProofs)]:[]),approvalId(id,scope.sequence),JSON.stringify({...scope,state:undefined}),operationId,source.raw,source.segments_json,JSON.stringify(job.audit),job.audit.audioFileSha256,id+':deleting',credential?1:0,credential?1:0,credential?.cipher_version??null,credential?.iv_b64??null,credential?.ciphertext_b64??null,credential?.updated_at??null,gapEvidence?1:0,gapEvidence?.excluded[0]??'',gapEvidence?.originalResultJson??'',gapEvidence?.excluded[1]??'',gapEvidence?.correctionResultJson??'',JSON.stringify([operationId,...(gapEvidence?.excluded??[]),...globalResolvedIds]),...reviewProofs.flatMap(item=>[item.contentId,item.contentProvider,item.contentJson,item.dispositionId,item.dispositionJson,item.failedId,item.failedJson]),JSON.stringify(recoveryProofs),JSON.stringify(globalSynthesisProofs),JSON.stringify(globalRawProofs),JSON.stringify(settlementProofs)).first();
  if(!row||Date.now()>=scope.expiresAt||env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')block();
 }
-function groundingMismatches(report,sourceSegments){
+function groundingMismatches(report,sourceSegments,{includeEvidence=false}={}){
  const byId=new Map(sourceSegments.map(part=>[part.id,part.text]));
- const numericTokens=value=>Array.from(value.matchAll(/(?<!\d)([+\-−]?\d+(?:,\d{3})*(?:\.\d+)?)(?:\s*(퍼센트포인트|퍼센트|만\s*명|억\s*원|만원|명|개|원|달러|시간|분|초|년|월|일|%))?(?!\d)/gu),match=>({number:match[1].replaceAll(',','').replace('−','-'),unit:(match[2]||'').replaceAll(' ','').replace('퍼센트','%')}));
+ const numericTokens=value=>Array.from(value.matchAll(/(?<!\d)([+\-−]?\d+(?:,\d{3})*(?:\.\d+)?)(?:\s*(퍼센트포인트|퍼센트|만\s*명|억\s*원|만원|명|개|원|달러|시간|분|초|년|월|일|%))?(?!\d)/gu),match=>({raw:match[0],start:match.index,number:match[1].replaceAll(',','').replace('−','-'),unit:(match[2]||'').replaceAll(' ','').replace('퍼센트','%')}));
  let first=null,unsupportedNumbers=0,unsupportedQuotes=0;
- const check=(text,refs)=>{
+ const mismatches=[];
+ const displayToken=value=>({text:value.slice(0,64),fullLength:value.length,truncated:value.length>64});
+ const excerpt=(value,anchor=0)=>{const start=value.length<=240?0:Math.max(0,Math.min(value.length-240,Math.max(0,anchor)-80));return {text:value.slice(start,start+240),start,fullLength:value.length,truncated:value.length>240};};
+ const sourceEvidence=(id,reported)=>{
+  const text=byId.get(id)??'',tokens=numericTokens(text),sameNumber=tokens.filter(token=>token.number===reported.number);
+  const distance=token=>{const a=Number(token.number),b=Number(reported.number);return Number.isFinite(a)&&Number.isFinite(b)?Math.abs(a-b):Infinity;};
+  const candidates=[...sameNumber,...tokens.filter(token=>token.number!==reported.number).sort((a,b)=>distance(a)-distance(b)||a.start-b.start)].slice(0,4);
+  const contexts=candidates.map(token=>{const raw=displayToken(token.raw),number=displayToken(token.number);return {raw:raw.text,rawLength:raw.fullLength,rawTruncated:raw.truncated,number:number.text,numberLength:number.fullLength,numberTruncated:number.truncated,unit:token.unit||null,position:token.start,...excerpt(text,token.start)};});
+  return {id,numberPresence:sameNumber.length?(reported.unit?'PRESENT_WITH_DIFFERENT_UNIT':'PRESENT'):'ABSENT',...excerpt(text,candidates[0]?.start??0),numberContexts:contexts,numberContextsTruncated:tokens.length>contexts.length};
+ };
+ const check=(text,refs,field,itemIndex)=>{
   const evidence=refs.map(id=>byId.get(id)).join(' ').replace(/\s+/g,' '),supported=numericTokens(evidence);
-  for(const numeric of numericTokens(text))if(!supported.some(item=>item.number===numeric.number&&(!numeric.unit||item.unit===numeric.unit))){first??='UNSUPPORTED_NUMBER';unsupportedNumbers++;}
+  for(const numeric of numericTokens(text))if(!supported.some(item=>item.number===numeric.number&&(!numeric.unit||item.unit===numeric.unit))){
+   first??='UNSUPPORTED_NUMBER';unsupportedNumbers++;
+   if(includeEvidence&&mismatches.length<8){const number=displayToken(numeric.number),raw=displayToken(numeric.raw);mismatches.push({field,itemIndex,number:number.text,numberLength:number.fullLength,numberTruncated:number.truncated,unit:numeric.unit||null,reportedToken:{raw:raw.text,rawLength:raw.fullLength,rawTruncated:raw.truncated,position:numeric.start},item:excerpt(text,numeric.start),evidenceIds:refs.slice(0,16),evidenceIdsTruncated:refs.length>16,source:refs.slice(0,8).map(id=>sourceEvidence(id,numeric)),sourceTruncated:refs.length>8});}
+  }
   for(const quote of text.matchAll(/[“"]([^”"]{3,})[”"]/g))if(!evidence.includes(quote[1].replace(/\s+/g,' '))){first??='UNSUPPORTED_QUOTE';unsupportedQuotes++;}
  };
- for(const name of ['summary','chapters','claims','numbers','critical'])for(const item of report[name])check(item.text,item.evidenceIds);
- check(report.conclusion,sourceSegments.map(part=>part.id));
- return {first,unsupportedNumbers,unsupportedQuotes};
+ for(const name of ['summary','chapters','claims','numbers','critical'])report[name].forEach((item,index)=>check(item.text,item.evidenceIds,name,index));
+ check(report.conclusion,sourceSegments.map(part=>part.id),'conclusion',0);
+ return {first,unsupportedNumbers,unsupportedQuotes,...(includeEvidence?{numberEvidence:mismatches,numberEvidenceTruncated:unsupportedNumbers>mismatches.length}:{})};
+}
+const NUMBER_DIAGNOSTIC_BYTE_LIMIT=32768;
+export function limitNumberDiagnosticResponse(result){
+ const items=result.numberEvidence??[];
+ result.responseByteLimit=NUMBER_DIAGNOSTIC_BYTE_LIMIT;
+ result.responseTruncated=Boolean(result.numberEvidenceTruncated||items.some(item=>item.numberTruncated||item.reportedToken?.rawTruncated||item.item?.truncated||item.evidenceIdsTruncated||item.sourceTruncated||item.source.some(source=>source.truncated||source.numberContextsTruncated||source.numberContexts.some(context=>context.rawTruncated||context.numberTruncated||context.truncated))));
+ const bytes=()=>new TextEncoder().encode(JSON.stringify(result)).byteLength;
+ while(bytes()>NUMBER_DIAGNOSTIC_BYTE_LIMIT){
+  let trimmed=false;
+  for(let i=items.length-1;i>=0&&!trimmed;i--)for(let j=items[i].source.length-1;j>=0&&!trimmed;j--){const source=items[i].source[j];if(source.numberContexts.length){source.numberContexts.pop();source.numberContextsTruncated=true;trimmed=true;}}
+  if(!trimmed)for(let i=items.length-1;i>=0&&!trimmed;i--)if(items[i].source.length){items[i].source.pop();items[i].sourceTruncated=true;trimmed=true;}
+  if(!trimmed&&items.length){items.pop();result.numberEvidenceTruncated=true;trimmed=true;}
+  if(!trimmed)break;
+  result.responseTruncated=true;
+ }
+ return result;
 }
 export function assertGrounding(report,sourceSegments){
  const result=groundingMismatches(report,sourceSegments);if(result.first)throw Error(result.first);
@@ -271,7 +300,7 @@ function checkedReport(raw,allowed,groups,{strictPayload=false}={}){
   if(strictPayload){const fields=['summary','chapters','claims','numbers','critical'],keys=[...fields,'conclusion'];if(!data||Array.isArray(data)||Object.keys(data).sort().join(',')!==keys.sort().join(','))throw Error('STRICT_SCHEMA_KEYS');for(const name of fields)if(!Array.isArray(data[name])||data[name].some(item=>!item||Array.isArray(item)||Object.keys(item).sort().join(',')!=='evidenceIds,text'))throw Error('STRICT_SCHEMA_ITEM');}
   const report=validateAnalysis(data,allowed,'groq');assertGroupCoverage(report,groups);assertGrounding(report,allowed);return {...report,evidenceValidation:'REFERENCES_COVERAGE_NUMBERS_QUOTES_ONLY'};}catch{stop('SUMMARY_RESPONSE_INVALID','요약 JSON·근거·인용 수치 검증에 실패했습니다. 요청 이력을 검토하세요.');}
 }
-async function readFailedRawStageDiagnostic(env,{id,job,source,transcriptHash},key,approvalOverride=null){
+async function readFailedRawStageDiagnostic(env,{id,job,source,transcriptHash},key,approvalOverride=null,{includeEvidence=false}={}){
  if(!/^raw:(0|[1-9][0-9]{0,2})$/.test(key??''))stop('SUMMARY_DIAGNOSTIC_NOT_FOUND','요약 실패 단계 범위를 확인하세요.');
  const groups=partitionGroqTranscript(source.segments,promptAudit(job)),index=Number(key.slice(4)),allowed=groups[index];
  if(!allowed)stop('SUMMARY_DIAGNOSTIC_NOT_FOUND','요약 실패 단계 범위를 확인하세요.');
@@ -292,13 +321,13 @@ async function readFailedRawStageDiagnostic(env,{id,job,source,transcriptHash},k
   return {...base,classification:invalid.length?'SCHEMA':'EVIDENCE_ID',mismatchCount:invalid.length||mismatchCount};
  }
  try{assertGroupCoverage(report,[{ids:allowed.map(part=>part.id)}]);}catch{return {...base,classification:'GROUP_COVERAGE',mismatchCount:1};}
- const grounding=groundingMismatches(report,allowed);
- if(grounding.first)return {...base,classification:grounding.first,mismatchCount:grounding.first==='UNSUPPORTED_NUMBER'?grounding.unsupportedNumbers:grounding.unsupportedQuotes};
+ const grounding=groundingMismatches(report,allowed,{includeEvidence});
+ if(grounding.first){const result={...base,classification:grounding.first,mismatchCount:grounding.first==='UNSUPPORTED_NUMBER'?grounding.unsupportedNumbers:grounding.unsupportedQuotes,...(includeEvidence&&grounding.first==='UNSUPPORTED_NUMBER'?{numberEvidence:grounding.numberEvidence,numberEvidenceTruncated:grounding.numberEvidenceTruncated}:{})};return includeEvidence&&grounding.first==='UNSUPPORTED_NUMBER'?limitNumberDiagnosticResponse(result):result;}
  return {...base,classification:'VALIDATION_PASS_ONLY',mismatchCount:0};
 }
 async function diagnoseFailedRawStage(env,context,request){
  if(request.method!=='GET')return json({error:{code:'METHOD_NOT_ALLOWED'}},405);
- return json(await readFailedRawStageDiagnostic(env,context,new URL(request.url).searchParams.get('stage')));
+ return json(await readFailedRawStageDiagnostic(env,context,new URL(request.url).searchParams.get('stage'),null,{includeEvidence:true}));
 }
 const CORRECTION_STAGE='raw:8';
 const correctionApprovalId=(id,hash)=>id+':groq-summary:correction:'+hash+':raw:8:approval';

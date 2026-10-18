@@ -34,6 +34,20 @@ function harness(fetcher,{setTimeoutFn=()=>0}={}){
  return {target,document,listeners,intervals,heading,panel,button,review:target.children[0],refresh:target.children[1].children[2]};
 }
 
+test('number evidence is displayed as bounded text through read-only owner diagnostic',async()=>{
+ const calls=[],injected='<img src=x onerror=alert(1)> 999';
+ const ui=harness(async(path,options)=>{
+  calls.push({path,method:options.method});
+  if(path.endsWith('/groq-summary-status'))return json({...ledger(),activeStage:{key:'raw:9',state:'FAILED_UNCERTAIN',errorCode:'SUMMARY_RESPONSE_INVALID'}});
+  if(path.includes('/groq-summary-stage-diagnostic'))return json({stage:'raw:9',classification:'UNSUPPORTED_NUMBER',firstId:166,lastId:179,segmentCount:14,mismatchCount:1,numberEvidence:[{field:'summary',itemIndex:0,number:'999',numberTruncated:true,unit:null,reportedToken:{raw:'999',rawTruncated:true},item:{text:injected,truncated:false},evidenceIds:[166,167],evidenceIdsTruncated:false,source:[{id:166,text:'source 15',truncated:false,numberPresence:'ABSENT',numberContexts:[],numberContextsTruncated:false},{id:167,text:'900명',truncated:false,numberPresence:'ABSENT',numberContexts:[{raw:'900명',rawTruncated:true,position:300,text:'900명',truncated:true}],numberContextsTruncated:false}],sourceTruncated:false}],numberEvidenceTruncated:false,responseTruncated:true});
+  throw Error('unexpected request '+path);
+ });
+ await pause();const statusBox=ui.target.children[1],button=statusBox.children[3],evidence=statusBox.children[5];
+ assert.equal(button.hidden,false);await button.onclick();
+ const item=evidence.children[0].children[1];assert.equal(item.tag,'pre');assert.match(item.textContent,/\<img src=x onerror=alert\(1\)\>/);assert.equal(item.innerHTML,undefined);assert.match(evidence.children[0].children[0].textContent,/999…/);assert.match(evidence.children[0].children[2].textContent,/동일 숫자 토큰 없음/);assert.match(evidence.children[0].children[5].textContent,/900명… \(위치 300\)/);assert.ok(evidence.children.some(child=>/일부 잘렸습니다/.test(child.textContent??'')));
+ assert.ok(calls.every(call=>call.method==='GET'));assert.equal(calls.at(-1).path.includes('stage=raw%3A9'),true);
+});
+
 test('scope-blocked status shows a read-only diagnostic while execution stays unavailable',async()=>{
  const calls=[];const ui=harness(async(path,options)=>{calls.push({path,method:options.method});if(path.endsWith('/groq-summary-status'))return failure('SUMMARY_RECOVERY_SCOPE_CHANGED');if(path.endsWith('/groq-summary-recovery-compat-review'))return failure('SUMMARY_RECOVERY_COMPAT_SCOPE_BLOCKED');if(path.endsWith('/groq-summary-recovery-diagnostic'))return json({kind:'GROQ_RECOVERY_SCOPE_DIAGNOSTIC_V1',providerCalls:0,writes:0,executionAllowed:false,sourceStatus:'STORED_SOURCE_VALID',records:[],credentialProjectBinding:'NOT_STORED_CANNOT_VERIFY'});throw Error('unexpected request');});
  await pause();const control=ui.target.children[1].children.find(item=>item.tag==='div'&&item.children.some(child=>child.textContent==='복구 스코프 무호출 진단'));assert.ok(control);assert.equal(control.hidden,false);assert.deepEqual(calls.map(item=>item.path.split('/').at(-1)),['groq-summary-status','groq-summary-recovery-compat-review']);await control.children[0].onclick();assert.equal(calls.length,3);assert.ok(calls.every(item=>item.method==='GET'));assert.equal(ui.panel(),undefined);assert.match(control.children[1].textContent,/복구·재호출·완료 처리는 하지 않았습니다/);
