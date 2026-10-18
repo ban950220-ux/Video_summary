@@ -79,3 +79,15 @@ establishes only script-content equality. The narrow pre-deploy guard path
 re-reads those exact versions and the prior annotation twice, while retaining
 the current settings, Access, D1, and assets-binding checks. The post-deploy
 guard still requires the new deployment's exact source annotation.
+
+
+Version runtime evidence fails closed when either `resources.script_runtime` is
+missing, null, an array, or incomplete. `runtimeMetadataComplete` requires a real
+calendar `compatibility_date` and a nonblank string `usage_model`; optional
+`compatibility_flags`, if present, must be an array of nonblank strings.
+`runtimeMetadataEqual` is true only for two complete, canonically equal objects.
+The deployment policy requires both booleans, so an older or incomplete report
+cannot authorize the source-annotation exception. Exact optional-field presence,
+unknown runtime fields, pinned script hashes, source provenance, prior bindings,
+and ASSETS counts remain checked. The version API still does not expose an asset
+set identifier; this change supplies no asset or binding verification waiver.
