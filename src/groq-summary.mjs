@@ -636,6 +636,7 @@ function inspectLegacyRecoveryScope(env){
 }
 const legacyRecoveryScope=env=>inspectLegacyRecoveryScope(env).scope;
 const legacyRecoveryReviewId=id=>id+':groq-summary-recovery-compat-review:v1';
+const successorRecoveryReviewId=(id,scopeHash)=>id+':groq-summary-recovery-compat-review:v2:'+scopeHash;
 const legacyOperationMetadata=row=>({provider:row.provider,state:row.state,errorCode:row.error_code,units:row.units,createdAt:row.created_at});
 const recoveryCanonical=value=>JSON.stringify(recoverySorted(value));
 function recoverySorted(value){if(Array.isArray(value))return value.map(recoverySorted);if(value&&typeof value==='object')return Object.fromEntries(Object.keys(value).sort().map(key=>[key,recoverySorted(value[key])]));return value;}
@@ -654,14 +655,23 @@ async function legacyRecoveryCandidate(env,{id,index,row,record,evidence,failed,
  const count=await env.DB.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE id=? AND job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY' AND unit='actual_total_tokens' AND provenance=? AND used_units=?").bind(usageRow.id,id,usageRow.provenance,evidence.confirmedUsage.totalTokens).first();
  const unique=await env.DB.prepare("SELECT COUNT(*) AS n FROM usage_events WHERE job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY' AND used_units=?").bind(id,evidence.confirmedUsage.totalTokens).first();
  if(count?.n!==1||unique?.n!==1)return null;
- const reviewRecord={contract:'groq-summary-legacy-recovery-review-v1',scopeApprovalSha256:await sha(JSON.stringify(scope)),jobId:id,owner:'owner',stage:'raw:0',recoveryOperationId:row.id,failedOperationId:evidence.failedOperationId,historicalEvidenceHash:historicalHash,currentEvidenceHash:record.evidenceHash,originalRecoverySha256:await sha(row.result_json),originalRecoveryCreatedAt:row.created_at,sourceSha256:record.sourceSha256,sourceProvenance:source.provenance,auditSha256:record.auditSha256,failedResultSha256:record.failedResultSha256,usageEventId:usageRow.id,usageProvenance:usageRow.provenance,legacyEvidenceSha256:await sha(JSON.stringify(legacyEvidence)),pilotReviewMetadata:legacyOperationMetadata(pilotReview),pilotApprovalMetadata:legacyOperationMetadata(pilotApproval),oldFailureMetadata:legacyOperationMetadata(old)};
- return {id:legacyRecoveryReviewId(id),resultJson:JSON.stringify(reviewRecord),historicalRecord,originalRecoveryJson:row.result_json,originalRecoveryAt:row.created_at,recoveryCreatedBefore:scope.recoveryCreatedBefore,failedResultJson:failed.result_json,failedAt:failed.created_at,failedUnits:failed.units,usageRow,pilotReview,pilotApproval,old,sourceRaw:source.raw,sourceProvenance:source.provenance,segmentsJson:source.segments_json,auditJson:JSON.stringify(job.audit)};
+ const scopeApprovalSha256=await sha(JSON.stringify(scope));
+ const currentScope=legacyRecoveryScope(env);
+ if(!currentScope||await sha(JSON.stringify(currentScope))!==scopeApprovalSha256)return null;
+ const reviewRecord={contract:'groq-summary-legacy-recovery-review-v1',scopeApprovalSha256,jobId:id,owner:'owner',stage:'raw:0',recoveryOperationId:row.id,failedOperationId:evidence.failedOperationId,historicalEvidenceHash:historicalHash,currentEvidenceHash:record.evidenceHash,originalRecoverySha256:await sha(row.result_json),originalRecoveryCreatedAt:row.created_at,sourceSha256:record.sourceSha256,sourceProvenance:source.provenance,auditSha256:record.auditSha256,failedResultSha256:record.failedResultSha256,usageEventId:usageRow.id,usageProvenance:usageRow.provenance,legacyEvidenceSha256:await sha(JSON.stringify(legacyEvidence)),pilotReviewMetadata:legacyOperationMetadata(pilotReview),pilotApprovalMetadata:legacyOperationMetadata(pilotApproval),oldFailureMetadata:legacyOperationMetadata(old)};
+ return {id:successorRecoveryReviewId(id,scopeApprovalSha256),legacyId:legacyRecoveryReviewId(id),scopeApprovalSha256,scopeExpiresAt:scope.expiresAt,resultJson:JSON.stringify(reviewRecord),historicalRecord,originalRecoveryJson:row.result_json,originalRecoveryAt:row.created_at,recoveryCreatedBefore:scope.recoveryCreatedBefore,failedResultJson:failed.result_json,failedAt:failed.created_at,failedUnits:failed.units,usageRow,pilotReview,pilotApproval,old,sourceRaw:source.raw,sourceProvenance:source.provenance,segmentsJson:source.segments_json,auditJson:JSON.stringify(job.audit)};
+}
+const reviewMatchesCandidate=(review,candidate)=>review?.state==='REVIEWED'&&review.units===0&&review.error_code===null&&typeof review.created_at==='string'&&review.result_json===JSON.stringify({...JSON.parse(candidate.resultJson),reviewCreatedAt:review.created_at});
+async function matchingLegacyReviewRows(env,id,candidate){
+ return (await env.DB.prepare("SELECT id,state,result_json,units,error_code,created_at FROM yta_operations WHERE id IN (?,?) AND job_id=? AND provider='groq-summary-recovery-compat-review' AND EXISTS(SELECT 1 FROM jobs j WHERE j.id=? AND j.owner_id='owner')").bind(candidate.id,candidate.legacyId,id,id).all()).results||[];
 }
 async function reviewedLegacyRecovery(env,id,candidate){
  if(!candidate)return false;
- const review=await env.DB.prepare("SELECT state,result_json,units,error_code,created_at FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery-compat-review'").bind(candidate.id,id).first();
- if(review?.state!=='REVIEWED'||review.units!==0||review.error_code!==null||typeof review.created_at!=='string')return false;
- return review.result_json===JSON.stringify({...JSON.parse(candidate.resultJson),reviewCreatedAt:review.created_at});
+ return (await matchingLegacyReviewRows(env,id,candidate)).some(review=>reviewMatchesCandidate(review,candidate));
+}
+async function activeCandidateScope(env,id,candidate){
+ const scope=legacyRecoveryScope(env);
+ return Boolean(scope&&scope.jobId===id&&await sha(JSON.stringify(scope))===candidate.scopeApprovalSha256&&Date.now()<Date.parse(candidate.scopeExpiresAt));
 }
 async function recoveryScopeDiagnostic(env,{id,job,sourceOf}){
  const inspectedScope=inspectLegacyRecoveryScope(env),legacyScopeStatus=inspectedScope.scope&&inspectedScope.scope.jobId!==id?'JOB_MISMATCH':inspectedScope.status;
@@ -679,9 +689,12 @@ async function recoveryScopeDiagnostic(env,{id,job,sourceOf}){
    // Inspection discovers a candidate without applying it or relaxing execution guards.
    const verified=await checkpointRecoveryContext(env,context,index,{savedRecoveryRow:row,legacyReviewInspection:true});
    if(verified.compatible){
-    const candidate=verified.legacyCandidate,review=await env.DB.prepare("SELECT state,result_json,units,error_code,created_at FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery-compat-review'").bind(candidate.id,id).first();
+    const candidate=verified.legacyCandidate,reviews=await matchingLegacyReviewRows(env,id,candidate);
+    const matched=reviews.find(review=>reviewMatchesCandidate(review,candidate));
+    const prefix=id+':groq-summary-recovery-compat-review:v2:';
+    const review=matched??reviews.find(review=>review.id===candidate.id)??reviews[0]??await env.DB.prepare("SELECT id,state,result_json,units,error_code,created_at FROM yta_operations WHERE job_id=? AND provider='groq-summary-recovery-compat-review' AND substr(id,1,length(?))=? ORDER BY created_at DESC LIMIT 1").bind(id,prefix,prefix).first();
     let stored;try{stored=JSON.parse(review?.result_json);}catch{}
-    const expected=JSON.parse(candidate.resultJson),matches=review?.state==='REVIEWED'&&review.units===0&&review.error_code===null&&typeof review.created_at==='string'&&review.result_json===JSON.stringify({...expected,reviewCreatedAt:review.created_at});
+    const expected=JSON.parse(candidate.resultJson),matches=Boolean(matched);
     const legacyCompatibility=matches?'REVIEW_MATCHES':!review?'REVIEW_MISSING':stored&&typeof stored.scopeApprovalSha256==='string'&&stored.scopeApprovalSha256!==expected.scopeApprovalSha256?'REVIEW_SCOPE_HASH_MISMATCH':'REVIEW_RECORD_MISMATCH';
     records.push({...item,legacyCompatibility,verification:matches?'MATCHES_REVIEWED_LEGACY_EVIDENCE':'BLOCKED',...(matches?{}:{reason:'SUMMARY_RECOVERY_SCOPE_CHANGED'}),executionAllowed:false});
    }else records.push({...item,legacyCompatibility:'NOT_REQUIRED',verification:'MATCHES_CURRENT_EVIDENCE',executionAllowed:false});
@@ -746,10 +759,12 @@ async function handleLegacyRecoveryReview(request,env,context){
  const inspected=await checkpointRecoveryContext(env,context,0,{legacyReviewInspection:true}),candidate=inspected.legacyCandidate;
  if(!candidate)stop('SUMMARY_RECOVERY_COMPAT_SCOPE_BLOCKED','This recovery does not require the one-time review.');
  const reviewed=await reviewedLegacyRecovery(env,context.id,candidate);
+ if(!await activeCandidateScope(env,context.id,candidate))stop('SUMMARY_RECOVERY_COMPAT_SCOPE_BLOCKED','The reviewed scope changed or expired.');
  if(request.method==='GET')return json({kind:'GROQ_LEGACY_RECOVERY_COMPAT_REVIEW_V1',eligible:true,reviewed,originalRecoveryPreserved:true,providerCalls:0,writes:0,automaticContinuation:false,credentialProjectBinding:'NOT_STORED_CANNOT_VERIFY'});
  let body;try{body=await request.json();}catch{throw new InputError('Compatibility review JSON is required.');}
  if(body?.step!=='record-compatibility-review'||body.confirmOriginalRecoveryPreserved!==true||body.confirmHistoricalAndCurrentEvidence!==true||body.confirmNoProviderCall!==true||body.confirmSeparateFreeKeyBinding!==true)throw new InputError('Explicit one-time compatibility review is required.');
- if(reviewed)stop('SUMMARY_RECOVERY_COMPAT_REVIEW_EXISTS','Compatibility review is already recorded.');
+ if(!await activeCandidateScope(env,context.id,candidate))stop('SUMMARY_RECOVERY_COMPAT_SCOPE_BLOCKED','The reviewed scope changed or expired.');
+ if(reviewed)return json({reviewed:true,alreadyRecorded:true,originalRecoveryPreserved:true,providerCalls:0,automaticContinuation:false,credentialProjectBinding:'NOT_STORED_CANNOT_VERIFY'});
  const reviewCreatedAt=nowIso(),sealedResultJson=JSON.stringify({...JSON.parse(candidate.resultJson),reviewCreatedAt});
  const inserted=await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json)
  SELECT ?,j.id,'groq-summary-recovery-compat-review',0,'REVIEWED',?,?
@@ -769,8 +784,13 @@ async function handleLegacyRecoveryReview(request,env,context){
  AND p.state='REVIEWED' AND p.result_json=? AND p.error_code IS ? AND p.units=? AND p.created_at=?
  AND a.state='APPROVED' AND a.result_json=? AND a.error_code IS ? AND a.units=? AND a.created_at=?
  AND o.state='FAILED_UNCERTAIN' AND o.error_code='SUMMARY_RESPONSE_INVALID' AND o.result_json=? AND o.units=? AND o.created_at=?
- AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=j.id||':deleting' AND d.provider='deletion' AND d.state='DELETING')`).bind(candidate.id,reviewCreatedAt,sealedResultJson,inspected.idForRecovery,inspected.failedId,candidate.usageRow.id,candidate.pilotReview.id,candidate.pilotApproval.id,candidate.old.id,context.id,candidate.auditJson,candidate.sourceRaw,candidate.segmentsJson,candidate.sourceProvenance,candidate.originalRecoveryJson,candidate.originalRecoveryAt,candidate.recoveryCreatedBefore,candidate.failedResultJson,candidate.failedAt,candidate.failedUnits,candidate.usageRow.provenance,inspected.evidence.confirmedUsage.totalTokens,inspected.evidence.confirmedUsage.totalTokens,candidate.pilotReview.result_json,candidate.pilotReview.error_code,candidate.pilotReview.units,candidate.pilotReview.created_at,candidate.pilotApproval.result_json,candidate.pilotApproval.error_code,candidate.pilotApproval.units,candidate.pilotApproval.created_at,candidate.old.result_json,candidate.old.units,candidate.old.created_at).run();
- if(inserted.meta?.changes!==1)stop('SUMMARY_RECOVERY_COMPAT_REVIEW_CHANGED','The source or recovery evidence changed before review was recorded.');
+ AND julianday('now') < julianday(?)
+ AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=j.id||':deleting' AND d.provider='deletion' AND d.state='DELETING')`).bind(candidate.id,reviewCreatedAt,sealedResultJson,inspected.idForRecovery,inspected.failedId,candidate.usageRow.id,candidate.pilotReview.id,candidate.pilotApproval.id,candidate.old.id,context.id,candidate.auditJson,candidate.sourceRaw,candidate.segmentsJson,candidate.sourceProvenance,candidate.originalRecoveryJson,candidate.originalRecoveryAt,candidate.recoveryCreatedBefore,candidate.failedResultJson,candidate.failedAt,candidate.failedUnits,candidate.usageRow.provenance,inspected.evidence.confirmedUsage.totalTokens,inspected.evidence.confirmedUsage.totalTokens,candidate.pilotReview.result_json,candidate.pilotReview.error_code,candidate.pilotReview.units,candidate.pilotReview.created_at,candidate.pilotApproval.result_json,candidate.pilotApproval.error_code,candidate.pilotApproval.units,candidate.pilotApproval.created_at,candidate.old.result_json,candidate.old.units,candidate.old.created_at,candidate.scopeExpiresAt).run();
+ if(inserted.meta?.changes!==1){
+  if(!await activeCandidateScope(env,context.id,candidate))stop('SUMMARY_RECOVERY_COMPAT_SCOPE_BLOCKED','The reviewed scope changed or expired.');
+  if(await reviewedLegacyRecovery(env,context.id,candidate))return json({reviewed:true,alreadyRecorded:true,originalRecoveryPreserved:true,providerCalls:0,automaticContinuation:false,credentialProjectBinding:'NOT_STORED_CANNOT_VERIFY'});
+  stop('SUMMARY_RECOVERY_COMPAT_REVIEW_CHANGED','The source or recovery evidence changed before review was recorded.');
+ }
  const verified=await checkpointRecoveryContext(env,context);
  if(!verified.compatible||!verified.recovered)stop('SUMMARY_RECOVERY_COMPAT_REVIEW_CHANGED','The compatibility review could not be verified.');
  return json({reviewed:true,originalRecoveryPreserved:true,providerCalls:0,automaticContinuation:false,credentialProjectBinding:'NOT_STORED_CANNOT_VERIFY'});
