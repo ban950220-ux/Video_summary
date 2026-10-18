@@ -61,24 +61,94 @@ Cloudflare also supports `versions upload` without immediate activation, then
 require a separate design and review of asset and secret preservation and a
 second state check before activation; this patch does not switch commands.
 
-Before authorizing one live replacement, operations must establish a single
-writer change window covering Workers Builds, Dashboard edits and other API
-deployments, with an independent record of who holds it and when it ends.
-A lock confined to one build runner is insufficient across these writers.
-The current wrapper narrows the read-to-upload interval and never retries an
-uncertain upload, but another actor can still change state after the final
-GET or during Wrangler. This race remains an explicit operational blocker
-unless a provider-supported conditional activation or enforceable global
-change lock is independently demonstrated and reviewed.
+### Single-run change window when a global lock is unavailable
+
+This is a proposed operational exception, not a global lock or authorization
+to deploy. It does not make the final read and Wrangler upload atomic. An
+independent reviewer must approve this procedure and its residual race for
+the exact deployment before any operational approval. If a provider-supported
+conditional activation or enforceable global lock is later demonstrated, it
+requires its own review; neither is assumed here.
+
+Before proposing the window, the Cloudflare owner and reviewer must record
+every known way to change this Worker: Git-connected Workers Builds (production
+and preview branches, retries and deploy hooks), Dashboard code/settings/
+variables/secrets edits and version promotions or rollbacks, Wrangler from
+local machines or external CI, direct Workers API calls, and every member,
+group, service identity and API token with corresponding write access. Record
+the actor, credential, trigger, authority and whether it can affect production.
+Inspect current Builds configuration, access grants, audit history and other
+deployment automation. An unknown writer, uninspected trigger, or incomplete
+inventory blocks the exception; a promise to avoid edits is not proof that a
+writer is excluded.
+
+For one short, named change window, obtain separate approval to pause every
+automatic trigger that can write to this Worker, using a Cloudflare-supported
+setting or credential control verified for this account. Record the prior
+setting and the applied state so it can be restored deliberately. Check the
+Workers Builds queue, running builds, retries, deploy hooks and other known
+pipelines for both queued and active work; do not begin until none can deploy.
+Do not treat disabling a Git push or locking one runner as covering Dashboard
+and API writers. Verify and document how one manually authorized invocation
+can run while automatic triggers stay paused; if this cannot be shown, stop.
+Name one operator and one exact build/commit as the only planned deployment,
+and record the window start, end and reviewer. Other known
+writers must be excluded by verified controls where possible and explicitly
+accounted for in the residual-risk review where exclusion is impossible.
+
+Immediately before that one invocation, independently refresh the active
+version, complete readable remote state and fingerprint, bindings, D1, Access,
+paid flags, recovery setting, source evidence, approved scope records, exact
+HEAD/build SHA and complete asset digest. Any change from the reviewed approval,
+missing evidence, expired approval or unexpected writer activity cancels the
+window. Keep all existing preflight and final-GET guards; this procedure does
+not relax them. Run the pinned wrapper once, then immediately inspect both
+postchecks and the resulting active version, settings and binding
+representations. Do not label an ambiguous upload or failed postcheck as a
+successful deployment, and do not issue a second upload to repair it.
+
+Classify the outcome before restoring any trigger:
+
+- **Verified success:** both postchecks confirm the new active version and
+  preserved settings and binding representations. Record the deployment
+  receipt and independently approve trigger restoration.
+- **Canceled before upload:** retain evidence that no upload was dispatched
+  and that the active version and settings remain unchanged. Independently
+  approve restoration; a later deployment needs fresh approval and a new
+  window.
+- **Uncertain upload, postcheck or concurrent activity:** leave automatic
+  triggers paused, stop further writes, preserve logs and receipts, and
+  investigate the remote state with the owner and reviewer. Do not restore
+  triggers until the outcome is classified. Never automatically retry; a new
+  attempt needs a fresh fingerprint, asset and scope evidence, approval and
+  window.
+
+Before any approved restoration, inspect builds, retries, deploy hooks and
+other pipelines that accumulated during the pause. Record their commit and
+target; cancel or exclude stale and unapproved work through an approved,
+verified control so an older commit cannot deploy on resume. If pending work
+cannot be inspected or safely handled, keep triggers paused. Restore only the
+reviewed trigger settings, then independently re-read the active version and
+preserved settings and bindings. Unexpected drift stops further deployment
+and requires investigation. Record the final state and window closure.
+
+Even with these controls, an account owner or another credential may change
+the Worker after the final GET or while Wrangler uploads. This race remains.
+No one may treat this exception as satisfied until the writer inventory,
+trigger pause, empty queue, one-operator plan, all preservation evidence and
+an explicit independent acceptance of that residual risk are documented for
+the exact target and commit. If any condition cannot be demonstrated, keep
+the deployment blocked and seek a separately reviewed design change.
 
 The code PR and merge require CI and independent review of the exact final
 diff and offline tests. Before any operational authorization or activation, a
 separate independent review must validate the two real scope evidence records
 without exposing their values, independently obtain the remote fingerprint,
 verify the final deployment commit and asset digest, and approve the exact new
-CI variable for one deployment. The concurrency blocker above must also be
-resolved before activation. Local mock success and code merge alone do not
-establish current production state or asset upload success.
+CI variable for one deployment. The concurrency decision above must also be
+independently reviewed and approved before activation. Local mock success and
+code merge alone do not establish current production state or asset upload
+success.
 
 ## Reproduce the PR19 base tree
 
