@@ -50,6 +50,8 @@ test('real pre-deploy guard consumes the encrypted-scope lineage evidence on bot
  };
  const result=await assertRemoteDeploymentBaseline({token:secret,baseline:b,ciMatchTag:'expected-tag',fetcher});
  assert.equal(result.activeVersions[0].id,b.activeVersionId);assert.equal(calls.length,22);assert.ok(calls.every(method=>method==='GET'));
+ current.resources.script_runtime={};
+ await assert.rejects(assertRemoteDeploymentBaseline({token:secret,baseline:b,ciMatchTag:'expected-tag',fetcher}),/SOURCE_COMMIT_MISMATCH/);
 });
 
 test('one encrypted Groq scope addition preserves exact code and all prior bindings',()=>{
@@ -93,3 +95,32 @@ test('missing credentials, denied API and changed active deployment fail closed 
  const wrong=async()=>({ok:true,json:async()=>({success:true,result:{deployments:[{versions:[{version_id:priorVersionId,percentage:100}]}]}})});assert.equal(await runWorkerVersionLineageDiagnostic({env:{...reviewEnv,WORKERS_CI:'true',CLOUDFLARE_API_TOKEN:secret},fetcher:wrong,write}),false);
  assert.ok(writes.every(value=>!value.includes(secret)));
 });
+
+ test('absent, empty and malformed runtime metadata never establishes lineage',()=>{
+ const invalid=[undefined,null,{},[],true,'runtime',{compatibility_date:'2026-10-10'},{usage_model:'standard'},
+ {compatibility_date:'',usage_model:'standard'},{compatibility_date:'2026-02-30',usage_model:'standard'},
+ {compatibility_date:'2026-10-10',usage_model:' '},{compatibility_date:'2026-10-10',usage_model:[]},
+ {compatibility_date:'2026-10-10',usage_model:'standard',compatibility_flags:null},
+ {compatibility_date:'2026-10-10',usage_model:'standard',compatibility_flags:[1]}];
+ for(const value of invalid){
+  for(const side of ['current','prior','both']){
+   const current=version(approvedRemoteBaseline.activeVersionId),prior=version(priorVersionId);
+   if(side!=='prior')current.resources.script_runtime=value;
+   if(side!=='current')prior.resources.script_runtime=value;
+   const report=safeWorkerLineageReport(deployments(),current,prior);
+   assert.equal(report.runtimeMetadataComplete,false);
+   assert.equal(report.runtimeMetadataEqual,false);
+   assert.equal(report.codeLineageEvidence,'UNVERIFIED');
+  }
+ }
+ });
+ test('complete runtime comparison preserves optional field presence and all settings',()=>{
+ const current=version(approvedRemoteBaseline.activeVersionId),prior=version(priorVersionId);
+ assert.equal(safeWorkerLineageReport(deployments(),current,prior).runtimeMetadataComplete,true);
+ current.resources.script_runtime.compatibility_flags=[];
+ assert.equal(safeWorkerLineageReport(deployments(),current,prior).runtimeMetadataEqual,false);
+ prior.resources.script_runtime.compatibility_flags=[];
+ assert.equal(safeWorkerLineageReport(deployments(),current,prior).runtimeMetadataEqual,true);
+ current.resources.script_runtime.extra_setting=false;
+ assert.equal(safeWorkerLineageReport(deployments(),current,prior).runtimeMetadataEqual,false);
+ });

@@ -9,6 +9,16 @@ const annotationKind=(value,message)=>value===message?'EXPECTED':value===undefin
 const safeEtag=value=>typeof value==='string'&&etag.test(value)?value.toLowerCase():null;
 const assetBindingCount=value=>Array.isArray(value)?value.filter(item=>item?.name==='ASSETS'&&item?.type==='assets').length:null;
 const sourceKind=value=>value==='dash'?'DASHBOARD':value==='wrangler'?'WRANGLER':'OTHER';
+// Equal absent or malformed metadata is not evidence of a verified runtime.
+function completeRuntime(value){
+ if(!value||typeof value!=='object'||Array.isArray(value))return false;
+ if(typeof value.compatibility_date!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value.compatibility_date))return false;
+ const date=new Date(value.compatibility_date);
+ if(!Number.isFinite(date.getTime())||date.toISOString().slice(0,10)!==value.compatibility_date)return false;
+ if(typeof value.usage_model!=='string'||!value.usage_model.trim())return false;
+ if(Object.hasOwn(value,'compatibility_flags')&&(!Array.isArray(value.compatibility_flags)||!value.compatibility_flags.every(flag=>typeof flag==='string'&&flag.trim().length>0)))return false;
+ return true;
+}
 function knownBindingAddition(current,prior){
  const present=current.resources?.bindings,original=prior.resources?.bindings;
  if(!Array.isArray(present)||!Array.isArray(original)||present.length!==original.length+1)return false;
@@ -29,7 +39,8 @@ export function safeWorkerLineageReport(deployments,current,prior,baseline=appro
  const currentEtag=safeEtag(current.resources?.script?.etag),priorEtag=safeEtag(prior.resources?.script?.etag);
  const currentAssets=assetBindingCount(current.resources?.bindings),priorAssets=assetBindingCount(prior.resources?.bindings);
  const priorAnnotation=oldDeployment?annotationKind(oldDeployment.annotations?.['workers/message'],message):'DEPLOYMENT_NOT_IN_PAGE';
- const runtimeMetadataEqual=Boolean(current.resources?.script_runtime&&prior.resources?.script_runtime&&sameCanonical(current.resources.script_runtime,prior.resources.script_runtime));
+ const runtimeMetadataComplete=completeRuntime(current.resources?.script_runtime)&&completeRuntime(prior.resources?.script_runtime);
+ const runtimeMetadataEqual=runtimeMetadataComplete&&sameCanonical(current.resources.script_runtime,prior.resources.script_runtime);
  const bindingAddition=knownBindingAddition(current,prior),pinnedEtag=Boolean(currentEtag&&priorEtag&&currentEtag===baseline.scriptEtag&&priorEtag===baseline.scriptEtag);
  const provenance=sourceKind(latest.source)==='DASHBOARD'&&sourceKind(oldDeployment?.source)==='WRANGLER';
  const sameKnownLineage=Boolean(pinnedEtag&&priorAnnotation==='EXPECTED'&&annotationKind(latest.annotations?.['workers/message'],message)==='OTHER'&&provenance&&runtimeMetadataEqual&&bindingAddition&&currentAssets===1&&priorAssets===1);
@@ -40,7 +51,7 @@ export function safeWorkerLineageReport(deployments,current,prior,baseline=appro
   priorDeploymentSourceAnnotation:priorAnnotation,activeDeploymentSource:sourceKind(latest.source),priorDeploymentSource:sourceKind(oldDeployment?.source),
   scriptEtagMatchesPinned:pinnedEtag,
   scriptContentEqual:currentEtag&&priorEtag?currentEtag===priorEtag:null,
-  runtimeMetadataEqual,knownBindingAddition:bindingAddition,
+  runtimeMetadataComplete,runtimeMetadataEqual,knownBindingAddition:bindingAddition,
   activeAssetsBindingCount:currentAssets,priorAssetsBindingCount:priorAssets,
   assetSetIdentifier:'NOT_EXPOSED_BY_VERSION_GET',
   codeLineageEvidence:sameKnownLineage?'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR':'UNVERIFIED',
