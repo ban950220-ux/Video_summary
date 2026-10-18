@@ -1,5 +1,6 @@
 import {assertRemoteState,legacyQuoteRecoveryBinding,legacyGroqRecoveryScopeBinding,protectedRemoteBaseline} from './remote-state-policy.mjs';
 import {readWorkerVersionLineage} from './worker-version-lineage-diagnostic.mjs';
+import {assertCurrentStateReplacementPreflight,currentStateReplacementApproval} from './current-state-replacement.mjs';
 
 
 export async function readRemoteState({token,fetcher=fetch,target,env=process.env}={}){
@@ -60,11 +61,19 @@ export async function assertRemoteDeploymentBaseline(options){
   for(let i=0;i<2;i++){
     state=await readRemoteState({...options,target:baseline});
     if(options.ciMatchTag!==undefined&&state.workerTag!==options.ciMatchTag)throw Error('Remote deployment guard: WORKER_TAG_MISMATCH');
-    try{assertRemoteState(state,baseline);}
-    catch(error){
-      if(error?.message!=='Remote deployment guard: SOURCE_COMMIT_MISMATCH'||options.baseline===undefined)throw error;
-      const evidence=await readWorkerVersionLineage({token:options.token,fetcher:options.fetcher,baseline});
-      assertRemoteState(state,baseline,{preDeployLineage:evidence});
+    if(baseline.replacement){
+      // Revalidate expiry after the asynchronous reads on both preflight rounds.
+      const fresh=currentStateReplacementApproval(options.env);
+      const evidence=await readWorkerVersionLineage({token:options.token,fetcher:options.fetcher,baseline:fresh});
+      currentStateReplacementApproval(options.env);
+      assertCurrentStateReplacementPreflight(state,fresh,evidence,{head:options.head,buildSha:options.buildSha,manifestDigest:options.manifestDigest});
+    }else{
+      try{assertRemoteState(state,baseline);}
+      catch(error){
+        if(error?.message!=='Remote deployment guard: SOURCE_COMMIT_MISMATCH'||options.baseline===undefined)throw error;
+        const evidence=await readWorkerVersionLineage({token:options.token,fetcher:options.fetcher,baseline});
+        assertRemoteState(state,baseline,{preDeployLineage:evidence});
+      }
     }
     const currentRecoverySetting=state.bindings.find(item=>item.name===legacyQuoteRecoveryBinding)?.text;
     const groqScopePresent=state.bindings.some(item=>item.name===legacyGroqRecoveryScopeBinding);
