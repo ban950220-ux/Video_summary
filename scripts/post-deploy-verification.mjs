@@ -1,6 +1,7 @@
 import {readRemoteState} from './read-remote-state.mjs';
 import {assertRemoteState,legacyQuoteRecoveryBinding,legacyGroqRecoveryScopeBinding,protectedRemoteBaseline} from './remote-state-policy.mjs';
 import {assertDeployedVersion,safeDeploymentReceipt} from './deployment-runtime.mjs';
+import {assertCurrentStateReplacementPostPreservation} from './current-state-replacement.mjs';
 
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const unverified=code=>Error(`Production deploy: DEPLOYED_UNVERIFIED: ${code}`);
@@ -30,6 +31,10 @@ export async function verifyPostDeploy({token,ciMatchTag,deployed,before,baselin
   catch{throw unverified('POST_DEPLOY_BASELINE_MISMATCH');}
   if(verified.bindings.find(item=>item.name===legacyQuoteRecoveryBinding)?.text!==recoverySetting)throw unverified('RECOVERY_SETTING_CHANGED');
   if(verified.bindings.some(item=>item.name===legacyGroqRecoveryScopeBinding)!==groqScopePresent)throw unverified('GROQ_SCOPE_BINDING_CHANGED');
+  if(baseline.replacement){
+   try{assertCurrentStateReplacementPostPreservation(before,verified);}
+   catch{throw unverified('POST_SETTINGS_OR_BINDINGS_CHANGED');}
+  }
  }
  try{return safeDeploymentReceipt(verified,deployed);}
  catch{throw unverified('POST_DEPLOY_RECEIPT_INVALID');}
