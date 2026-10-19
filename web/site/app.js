@@ -2,6 +2,7 @@ import {planMp3,prepareMp3Chunk} from '/audio.mjs';
 import {runAudioChunks,runSummaryStages,runApprovedFreeBatch,runApprovedGroqSummary,detailRequestIsCurrent,beginDetailAction} from '/audio-runner.mjs';
 import {audioProgressPlan,cleanedAudioComplete,fmtRetryDate} from '/audio-progress-plan.mjs';
 import {groqSummaryProgress,groqGapFailureText} from '/groq-summary-progress.mjs';
+import {validateContextReviewLayer} from '/context-review.mjs';
 // Private owner-only site, no third-party scripts and no API keys in browser storage.
 const $=(sel)=>document.querySelector(sel);
 const state={view:'analyze',mode:'url',page:0,hasMore:false,provider:null,connections:[]};
@@ -66,6 +67,32 @@ function audioPlanView(job,progress,target){
  choices.append(wait,later,estimate);target.append(choices,guidance);
 }
 function paidCostText(value){return value==='REVIEW_REQUIRED'?'보고서는 저장됐지만 제공자 비용 원장은 검토가 필요합니다. 실제 청구액은 UNKNOWN입니다.':value==='SETTLED_PRIOR'?'비용 원장에 정산 기록이 있습니다. 제공자 실제 청구액은 UNKNOWN입니다.':'비용 원장 상태를 확인할 수 없습니다. 제공자 실제 청구액은 UNKNOWN입니다.';}
+function showContextReviewImport(job,container){
+ const section=el('section',{className:'context-review'}),label=el('label',{text:'오프라인 전사 비교 후보 파일 (JSON)'}),input=el('input',{attrs:{type:'file',accept:'.json,application/json'}}),status=el('p',{className:'tip',text:'이 브라우저에서 파일을 읽고 현재 저장 전사와 대조합니다. 서버 저장·원문 교체·완료 처리는 하지 않습니다.'}),results=el('div');
+ const independentLabel=el('label',{text:'별도 오프라인 자동 전사 원문 (full-offline-segments.json)'}),independentInput=el('input',{attrs:{type:'file',accept:'.json,application/json'}});
+ label.append(input);independentLabel.append(independentInput);section.append(el('h3',{text:'원문과 분리된 검토 후보'}),label,independentLabel,status,results);container.append(section);
+ const load=async()=>{
+  const file=input.files?.[0],independentFile=independentInput.files?.[0];
+  if(!file||!independentFile){status.textContent='후보 파일과 별도 자동 전사 원문 파일을 모두 선택하세요. 독립 전사를 대조하기 전에는 근거를 표시하지 않습니다.';return;}
+  empty(results);status.textContent='저장 전사와 후보 파일을 대조하는 중입니다.';
+  try{
+   if(file.size>2_000_000||independentFile.size>5_000_000)throw Error('후보는 2MB, 별도 자동 전사 원문은 5MB 이하 JSON 파일을 선택하세요.');
+   const layer=JSON.parse(await file.text()),independent=JSON.parse(await independentFile.text()),data=await api('/api/jobs/'+encodeURIComponent(job.id)+'/source');
+   const review=await validateContextReviewLayer(layer,data.source,independent);
+   if(input.isConnected===false)return;
+   status.textContent=`미확정 후보 ${review.candidates.length}개 · 의미 검토 창 ${review.semantic.length}개. 별도 자동 전사는 사용자가 제공한 텍스트이며 원음 정확성은 검증되지 않았습니다. 자동 교정·완료 판정이 아닙니다.`;
+   for(const item of review.candidates){
+    const detail=el('details'),time=Array.isArray(item.time_ms)?Math.floor(item.time_ms[0]/1000)+'초':'시각 미확인';
+    detail.append(el('summary',{text:`${time} · ${item.category} · 미확정`}),el('p',{text:`저장 원문 표현: ${item.original_phrase}`}),el('p',{text:`작성자 검토 후보(미검증): ${item.proposed_phrase}`}),el('p',{text:`후보 파일의 근거 분류(해석 미검증): ${item.evidence_kind} · ${item.reason}`}),el('pre',{text:item.stored_context.map(s=>`#${s.id} [${Math.floor((data.source.segments.find(x=>x.id===s.id)?.startMs??0)/1000)}초] ${s.text}`).join('\n')}),el('pre',{text:item.offline_context.map(s=>`[${Math.floor(s.start_ms/1000)}초] ${s.text}`).join('\n')}));
+    results.append(detail);
+   }
+   const semantic=el('details');semantic.append(el('summary',{text:`부정·주체 표현 검토 창 ${review.semantic.length}개 · 모두 미확정`}));
+   for(const item of review.semantic)semantic.append(el('pre',{text:`[${Math.floor(item.start_ms/1000)}초] ${item.flags.join(', ')}\n원문: ${item.stored_text}\n독립 전사: ${item.offline_text}`}));
+   results.append(semantic);
+  }catch(error){if(input.isConnected===false)return;status.textContent='후보 파일을 표시하지 못했습니다: '+safeError(error);}
+ };
+ input.onchange=load;independentInput.onchange=load;
+}
 function showReport(job,container,persisted,costReconciliation){empty(container);
   resultLine(container,'상태',job.status??'NOT_RUN');if(job.id)resultLine(container,'분석 ID',job.id);
   resultLine(container,'저장 상태',persisted?'D1 저장':'미저장 / DB 미설정');
@@ -82,6 +109,7 @@ function showReport(job,container,persisted,costReconciliation){empty(container)
    for(const stage of report.appendix||[]){const detail=el('details'),summary=el('summary',{text:`raw:${stage.index} · ${stage.provenance}`});detail.append(summary,el('pre',{text:JSON.stringify(stage.excerpts??stage.report,null,2)}));container.append(detail);}
   }
   if(job.id){const tools=el('div',{className:'library-actions'});for(const format of ['md','txt'])tools.append(el('a',{className:'btn secondary small',text:format.toUpperCase()+' 내보내기',attrs:{href:'/api/jobs/'+job.id+'/export?format='+format}}));const source=el('button',{className:'btn secondary small',text:'원문·근거 보기'});source.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/source'),uncertain=new Set((data.audioBoundaryAmbiguities||[]).map(x=>x.segmentId)),warning=data.audioBoundaryAmbiguityCount?`겹침 경계 검토 필요: 서로 다른 전사 표현 ${data.audioBoundaryAmbiguityCount}개를 보존했습니다. 중복 여부와 정확한 표현은 독립 청취로 확인해야 합니다.\n\n`:'';const pre=el('pre',{text:data.source?.segments?.length?warning+(data.source.segments).map(x=>'#'+x.id+(uncertain.has(x.id)?' [겹침 경계·발언 확인 필요]':'')+' ['+(x.startMs===null?'시각 미확인':Math.floor(x.startMs/1000)+'초')+'] '+x.text).join('\n'):'저장된 전체 전사가 아직 없습니다.'});container.append(pre);source.disabled=true;}catch(e){toast(safeError(e));}};tools.append(source);if(!['GEMINI_EVIDENCE_LINKED','GROQ_EVIDENCE_LINKED','GEMINI_PAID_FULL_EVIDENCE_LINKED','GEMINI_TWO_PASS_REVIEWED'].includes(report?.kind)){const review=el('button',{className:'btn secondary small',text:'요약 부분 출력 검토'});review.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/summary-review');container.append(el('pre',{text:data.partialText}));review.disabled=true;}catch(error){toast(safeError(error));}};tools.append(review);}container.append(tools);}
+  if(job.id)showContextReviewImport(job,container);
   if(job.id&&report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED'){
    const cost=el('p',{className:'tip',text:paidCostText(costReconciliation)});container.append(cost);
    api('/api/jobs/'+job.id+'/paid-summary-status').then(status=>{cost.textContent=paidCostText(status.costReconciliation);}).catch(()=>{});
