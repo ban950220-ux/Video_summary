@@ -44,12 +44,21 @@ test('legacy grant rejects mismatched bindings or evidence before any provider c
 });
 
 test('legacy concurrent requests and failed count cannot reserve or dispatch twice',async()=>{
- const f=await fixture(legacyId);try{
-  await recoveryGrant(f);let models=0,counts=0;const p=f.env.GEMINI_TWO_PASS_TEST_PROVIDER,model=p.getModel;p.getModel=async(...args)=>{models++;return model(...args);};p.countTokens=async()=>{counts++;throw Error('simulated timeout');};
-  const responses=await Promise.all([f.call('quote','POST',quoteBody),f.call('quote','POST',quoteBody)]);assert.deepEqual(responses.map(r=>r.status),[500,409]);
-  assert.equal((await f.call('quote','POST',quoteBody)).status,409);assert.equal(models,1);assert.equal(counts,1);assert.equal(f.sends,0);
-  assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().state,'COUNT_SENT');
- }finally{f.db.close();}
+ for(const winnerIndex of [0,1]){
+  const f=await fixture(legacyId);let release;try{
+   await recoveryGrant(f);let models=0,counts=0;const p=f.env.GEMINI_TWO_PASS_TEST_PROVIDER,model=p.getModel;p.getModel=async(...args)=>{models++;return model(...args);};p.countTokens=async()=>{counts++;throw Error('simulated timeout');};
+   let paused;const atJson=new Promise(resolve=>{paused=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+   const requests=[0,1].map(()=>request(f.path+'/gemini-two-pass-quote','POST',quoteBody)),loser=requests[1-winnerIndex],readJson=loser.json.bind(loser);
+   loser.json=async()=>{paused();await gate;return readJson();};
+   const pending=requests.map(item=>routeApi(item,f.env));await atJson;
+   const winner=await pending[winnerIndex];release();
+   const responses=await Promise.all(pending);assert.equal(winner.status,500);assert.deepEqual(responses.map(r=>r.status),winnerIndex===0?[500,409]:[409,500]);
+   assert.equal((await f.call('quote','POST',quoteBody)).status,409);assert.equal(models,1);assert.equal(counts,1);assert.equal(f.sends,0);
+   assert.equal(f.db.prepare("SELECT count(*) n FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().n,1);
+   assert.equal(f.db.prepare('SELECT count(*) n FROM yta_gemini_two_pass_jobs').get().n,0);
+   assert.equal(f.db.prepare("SELECT state FROM yta_operations WHERE provider='gemini-two-pass-quote'").get().state,'COUNT_SENT');
+  }finally{release?.();f.db.close();}
+ }
 });
 
 test('legacy dispatch checks source, audit, key, cancellation and expiry at the SQL boundary',async()=>{
