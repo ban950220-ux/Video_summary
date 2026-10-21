@@ -78,7 +78,7 @@ async function listJobs(env,url){
   const rows=(await stmt.all()).results??[];
   return json({jobs:rows.map(({report_json,audit_json,...row})=>{
     const audit=JSON.parse(audit_json||'null');
-    return {...row,summary:JSON.parse(report_json||'null')?.summary??[],nativePollReady:row.source_type==='url'&&row.status==='NATIVE_PENDING'&&typeof audit?.providerJobId==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(audit.providerJobId),audioTranscriptComplete:row.source_type==='audio'&&audit?.audioProcessing==='ALL_PLANNED_CHUNKS_PROCESSED'&&audit.audioProcessingCoverage===1};
+    return {...row,summary:JSON.parse(report_json||'null')?.summary??[],nativePollReady:row.source_type==='url'&&row.status==='NATIVE_PENDING'&&typeof audit?.providerJobId==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(audit.providerJobId),freshTranscriptJob:row.source_type==='text'&&audit?.fullCoverageFresh?.contract==='FRESH_IMPORTED_TRANSCRIPT_V1',audioTranscriptComplete:row.source_type==='audio'&&audit?.audioProcessing==='ALL_PLANNED_CHUNKS_PROCESSED'&&audit.audioProcessingCoverage===1};
   }),limit,offset,hasMore:rows.length===limit,source:'D1'});
 }
 async function credentialEvent(env,provider,event){

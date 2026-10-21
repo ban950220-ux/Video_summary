@@ -1068,7 +1068,7 @@ async function completeStageContext(env,{id,job,source,transcriptHash,legacyTran
  const groups=partitionGroqTranscript(source.segments,promptAudit(job)),prefix=id+':groq-summary:'+transcriptHash+':';
  const rows=(await env.DB.prepare("SELECT id,state,error_code,result_json,units,created_at FROM yta_operations WHERE job_id=? AND provider='groq-summary' AND substr(id,1,length(?))=?").bind(id,prefix,prefix).all()).results||[];
  if(rows.some(row=>!/^raw:(0|[1-9][0-9]*)$/.test(row.id.slice(prefix.length))||Number(row.id.slice(prefix.length+4))>=groups.length))stop('SUMMARY_COMPLETE_OPERATION_REVIEW_REQUIRED','원시 단계 이외의 요약 작업을 먼저 검토하세요.');
- const recoveryRow=await env.DB.prepare("SELECT id,state,result_json,created_at FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(recoveryId(id,transcriptHash),id).first();
+  const recoveryRow=await env.DB.prepare("SELECT id,state,result_json,created_at,units,error_code FROM yta_operations WHERE id=? AND job_id=? AND provider='groq-summary-recovery'").bind(recoveryId(id,transcriptHash),id).first();
  const recovery=recoveryRow?await checkpointRecoveryContext(env,{id,job,source,transcriptHash,legacyTranscriptHash},0,{savedRecoveryRow:recoveryRow}):null;
  const failureUsageRows=(await env.DB.prepare("SELECT id,capability,unit,provenance,used_units FROM usage_events WHERE job_id=? AND owner_id='owner' AND provider='groq' AND capability='LIVE_FREE_SUMMARY'").bind(id).all()).results||[];
  const correctionRecoveredIds=[];
@@ -1114,7 +1114,19 @@ async function completeStageContext(env,{id,job,source,transcriptHash,legacyTran
   if(dispositionRow&&(dispositionRow.state!=='REVIEWED'||!disposition||dispositionRow.result_json!==JSON.stringify(disposition)))stop('SUMMARY_FAILURE_DISPOSITION_CHANGED','사용량·미확정 결과의 별도 검토 기록을 확인하세요.');
   failures.push({index,row,evidence,excerpt,registered,recordId,candidate,derivedRecord,derivedId,approvalEvidence:stageApprovalEvidence??approvalEvidence,contentId,contentProvider,content,disposition,dispositionId,dispositionReviewed:Boolean(dispositionRow)});
  }
- return {groups,rawRows:rows,checkpoints,failures,pending,latestApproval,approvalHistory,firstRecovery:recovery,persistedRecoveries,recoveredFailureIds:[...(recovery?.recovered?[recovery.failedId,...(recovery.legacyFailedId?[recovery.legacyFailedId]:[])]:[]),...[...persistedRecoveries.values()].map(item=>item.failedId),...correctionRecoveredIds],correctionRecoveredIds};
+  return {groups,rawRows:rows,recoveryRow,failureUsageRows,checkpoints,failures,pending,latestApproval,approvalHistory,firstRecovery:recovery,persistedRecoveries,recoveredFailureIds:[...(recovery?.recovered?[recovery.failedId,...(recovery.legacyFailedId?[recovery.legacyFailedId]:[])]:[]),...[...persistedRecoveries.values()].map(item=>item.failedId),...correctionRecoveredIds],correctionRecoveredIds};
+}
+// Read-only bridge for a separately reviewed full-source plan. The historical
+// raw:8 rows and usage events stay in place; this returns validated evidence,
+// never a license to retry those operation IDs.
+export async function reviewedFullCoverageLegacy(env,context){
+ const state=await completeStageContext(env,context);
+ if(state.groups.length<10||state.checkpoints.slice(0,8).some(item=>item?.provenance!=='AI_VALIDATED_RAW_CHECKPOINT')||state.checkpoints.slice(8).some(Boolean)||state.failures.length!==1||state.failures[0].index!==8||state.failures[0].evidence.length<1)stop('FULL_LEGACY_EVIDENCE_CHANGED','기존 저장 단계와 불확실 사용량의 검토가 필요합니다.');
+ const failure=state.failures[0];
+ if(failure.evidence.some(item=>!safeInt(item.usageTotalTokens)||!item.operationId||!item.usageEventId))stop('FULL_LEGACY_USAGE_UNVERIFIED','기존 불확실 요청의 사용량 근거가 필요합니다.');
+ const historicalOperationProofs=[...state.rawRows.filter(item=>state.groups.slice(0,8).some((_,index)=>item.id.endsWith(':raw:'+index))),...(state.recoveryRow?[state.recoveryRow]:[])].map(item=>({id:item.id,state:item.state,resultJson:item.result_json,units:item.units??null,errorCode:item.error_code??null}));
+  const historicalUsageProofs=state.failureUsageRows.map(item=>({id:item.id,capability:item.capability,unit:item.unit,provenance:item.provenance,usedUnits:item.used_units}));
+  return {groups:state.groups,savedReports:state.checkpoints.slice(0,8).map(item=>item.report),heldLegacyIndex:8,heldFailureEvidence:failure.evidence.map(item=>({operationId:item.operationId,usageEventId:item.usageEventId,actualTotalTokens:item.usageTotalTokens,resultSha256:item.resultSha256,responseSha256:item.responseSha256,resultJson:item.resultJson})),historicalOperationIds:state.rawRows.map(item=>item.id),historicalOperationProofs,historicalUsageProofs};
 }
 async function handleCompleteSummary(request,env,context,sourceOf,ownedJob){
  const {id,job,source,transcriptHash}=context;

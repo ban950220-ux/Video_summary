@@ -1,10 +1,28 @@
-import {test} from 'node:test';
+import {test,after} from 'node:test';
 import assert from 'node:assert/strict';
-import {resolve} from 'node:path';
+import {resolve,dirname} from 'node:path';
+import {mkdtempSync,mkdirSync,writeFileSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {execFileSync} from 'node:child_process';
 import {runCurrentStateReadonlyDiagnostic} from '../scripts/current-state-readonly-diagnostic.mjs';
 import {approvedRemoteBaseline} from '../scripts/remote-state-policy.mjs';
 
-const root=resolve(import.meta.dirname,'..'),token='TOKEN_DO_NOT_PRINT',secret='PRIVATE_VALUE_DO_NOT_PRINT';
+const sourceRoot=resolve(import.meta.dirname,'..'),token='TOKEN_DO_NOT_PRINT',secret='PRIVATE_VALUE_DO_NOT_PRINT';
+// The diagnostic intentionally rejects any changed worktree. Give the mocked
+// remote a clean committed-HEAD asset fixture; never use an uncommitted
+// candidate asset as evidence for the release being diagnosed.
+const root=mkdtempSync(resolve(tmpdir(),'video-diagnostic-assets-'));
+const assets=execFileSync('git',['ls-tree','-r','--name-only','HEAD','web/site'],{cwd:sourceRoot,encoding:'utf8'}).trim().split(/\r?\n/).filter(Boolean);
+for(const asset of assets){
+ const targetPath=resolve(root,asset);
+ mkdirSync(dirname(targetPath),{recursive:true});
+ writeFileSync(targetPath,execFileSync('git',['show',`HEAD:${asset}`],{cwd:sourceRoot}));
+}
+execFileSync('git',['init','-q'],{cwd:root});
+execFileSync('git',['config','core.autocrlf','false'],{cwd:root});
+execFileSync('git',['add','--','web/site'],{cwd:root});
+execFileSync('git',['-c','user.name=Diagnostic Fixture','-c','user.email=fixture@example.invalid','commit','-q','-m','pinned diagnostic assets'],{cwd:root});
+after(()=>rmSync(root,{recursive:true,force:true}));
 const target={accountId:'fe9d7e2a164274b1ff6cef150a75cb0b',workerName:'holy-rice-b914',databaseId:'d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34',active:'a1aa62cf-1ecb-4f51-9cd9-c8823f4e2167',prior:'283c647e-8618-4c9d-9c66-450deebee143',source:'60272937664175cb2c124999cd780f8a5237d9ab',etag:'281ae5cbbe50917708f3c6a81616c89e23f5c416651a88495c7b013438857b6f'};
 const bindings=()=>[
  ...Object.entries(approvedRemoteBaseline.runtimeFlags).map(([name,text])=>({name,type:'plain_text',text})),
