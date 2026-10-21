@@ -1,7 +1,8 @@
 import {InputError,videoIdOf,durationSec,parseCaptions,transcriptAudit,extractiveReport,estimateSource,PROVIDERS,DEFAULT_POLICY,usableFreeUnits} from './core.mjs';
-import {configuredMasterKey,encryptProviderKey,providerAllowed} from './vault.mjs';
+import {configuredMasterKey,decryptProviderKey,encryptProviderKey,providerAllowed} from './vault.mjs';
 import {routeLive,saveSource,ensureLiveSchema} from './live.mjs';
 import {ProviderError} from './adapters.mjs';
+import {capacityIdentityForCredentialSnapshot} from './observed-capacity.mjs';
 
 const JSON_HEADERS={'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer'};
 const json=(obj,status=200)=>new Response(JSON.stringify(obj),{status,headers:JSON_HEADERS});
@@ -91,6 +92,20 @@ async function listCredentialStatus(env){
   const mapped=new Map((result.results??[]).map(x=>[x.provider,x.updated_at]));
   return json({providers:['supadata','gemini','groq','assemblyai'].map(provider=>({provider,configured:mapped.has(provider),updatedAt:mapped.get(provider)??null,verification:'NOT_RUN',keyNeverReturned:true})),vaultRootConfigured:!!configuredMasterKey(env),apiCallsEnabled:env.ENABLE_LIVE_FREE==='true'});
 }
+async function groqBindingDiagnostic(env){
+ if(!env?.DB)return dbUnavailable();
+ const row=await env.DB.prepare('SELECT cipher_version,iv_b64,ciphertext_b64,updated_at FROM provider_credentials WHERE owner_id=? AND provider=?').bind('owner','groq').first();
+ const source=row?'ENCRYPTED_D1':typeof env.GROQ_API_KEY==='string'&&env.GROQ_API_KEY.length>=8?'WORKER_SECRET_FALLBACK':'NONE';
+ const identity=source==='NONE'?null:await capacityIdentityForCredentialSnapshot(env,'groq',row);
+ let keyFingerprintSha256=null;
+ if(row&&configuredMasterKey(env)){
+  try{
+   const key=await decryptProviderKey(configuredMasterKey(env),'groq',{version:row.cipher_version,ivB64:row.iv_b64,ciphertextB64:row.ciphertext_b64});
+   keyFingerprintSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(key)))).map(byte=>byte.toString(16).padStart(2,'0')).join('');
+  }catch{} // Do not claim a match if the vault key cannot decrypt the row.
+ }
+ return json({provider:'groq',source,identity,keyFingerprintSha256,updatedAt:row?.updated_at??null,organizationVerified:false,keyNeverReturned:true,kind:'APP_CREDENTIAL_SNAPSHOT_NOT_PROVIDER_ORG_PROOF'});
+}
 async function saveCredential(env,provider,req){
   if(!env?.DB)return dbUnavailable();
   const key=configuredMasterKey(env);
@@ -120,6 +135,7 @@ export async function routeApi(request,env){
       if(url.pathname==='/api/jobs'&&request.method==='GET')return await listJobs(env,url);
       if(url.pathname==='/api/usage'&&request.method==='GET')return await handleUsage(env);
       if(url.pathname==='/api/settings/providers'&&request.method==='GET')return await listCredentialStatus(env);
+      if(url.pathname==='/api/settings/providers/groq/binding-diagnostic'&&request.method==='GET')return await groqBindingDiagnostic(env);
       const secretMatch=url.pathname.match(/^\/api\/settings\/providers\/([a-z0-9-]+)\/secret$/);
       if(secretMatch){
         const provider=secretMatch[1];

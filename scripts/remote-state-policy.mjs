@@ -1,4 +1,5 @@
 // Offline policy prototype. Do not invoke deployment from this module.
+import {inspectFullCoverageConfig} from './full-coverage-config.mjs';
 const requiredObservability={
   'enabled':true,
   'head_sampling_rate':true,
@@ -27,13 +28,17 @@ const requiredBindingTypes=new Map([
   [legacyQuoteRecoveryBinding,'plain_text'],
 ]);
 
-export function inspectBindingSet(bindings,{expectAssets=false}={}){
+export function inspectBindingSet(bindings,{expectAssets=false,fullCoverageEnabled=false}={}){
   if(!Array.isArray(bindings))return {available:false,unique:false,complete:false};
   const names=bindings.map(binding=>binding?.name);
   const unique=names.every(name=>typeof name==='string')&&new Set(names).size===names.length;
   const actual=new Map(bindings.map(binding=>[binding?.name,binding?.type]));
   const expected=new Map(requiredBindingTypes);
   if(expectAssets)expected.set('ASSETS','assets');
+  if(fullCoverageEnabled){
+    expected.set('ENABLE_FULL_COVERAGE','plain_text');
+    expected.set('GROQ_FREE_ORG_BINDING_JSON','secret_text');
+  }
   if(actual.has(legacyGroqRecoveryScopeBinding))expected.set(legacyGroqRecoveryScopeBinding,'secret_text');
   return {available:true,unique,complete:unique&&actual.size===expected.size&&[...expected].every(([name,type])=>actual.get(name)===type)};
 }
@@ -75,12 +80,14 @@ export const approvedPreDeployLineage={
 export function protectedRemoteBaseline(env=process.env){
  let approval;try{approval=JSON.parse(env.GROQ_DEPLOYMENT_EVIDENCE_JSON);}catch{fail('DEPLOYMENT_EVIDENCE_UNAVAILABLE');}
  const keys=['kind','accountId','workerName','databaseId','activeVersionId','priorVersionId','scriptEtag','sourceCommit','reviewedAt','expiresAt'];
- if(!approval||typeof approval!=='object'||Array.isArray(approval)||Object.keys(approval).sort().join(',')!==keys.sort().join(','))fail('DEPLOYMENT_EVIDENCE_INVALID');
+ const fullCoverageEnabled=Object.hasOwn(approval??{},'fullCoverageEnabled');
+ if(fullCoverageEnabled)keys.push('fullCoverageEnabled');
+ if(!approval||typeof approval!=='object'||Array.isArray(approval)||Object.keys(approval).sort().join(',')!==keys.sort().join(',')||(fullCoverageEnabled&&approval.fullCoverageEnabled!==true))fail('DEPLOYMENT_EVIDENCE_INVALID');
  const uuid=/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i,hex32=/^[0-9a-f]{32}$/i,worker=/^[a-z0-9][a-z0-9-]{0,62}$/i,sha=/^[0-9a-f]{40}$/i,iso=/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
  if(approval.kind!=='REMOTE_DEPLOYMENT_REVIEW_V1'||!hex32.test(approval.accountId)||!worker.test(approval.workerName)||!uuid.test(approval.databaseId)||!uuid.test(approval.activeVersionId)||!uuid.test(approval.priorVersionId)||!(/^[0-9a-f]{64}$/i).test(approval.scriptEtag)||approval.priorVersionId===approval.activeVersionId||!sha.test(approval.sourceCommit)||!iso.test(approval.reviewedAt)||!iso.test(approval.expiresAt))fail('DEPLOYMENT_EVIDENCE_INVALID');
  const start=Date.parse(approval.reviewedAt),end=Date.parse(approval.expiresAt),now=Date.now();
  if(!Number.isFinite(start)||!Number.isFinite(end)||start>now||end<=now||end-start>24*60*60*1000)fail('DEPLOYMENT_EVIDENCE_EXPIRED');
- return {...approvedRemoteBaseline,accountId:approval.accountId,workerName:approval.workerName,databaseId:approval.databaseId,activeVersionId:approval.activeVersionId,priorVersionId:approval.priorVersionId,scriptEtag:approval.scriptEtag,sourceCommit:approval.sourceCommit};
+ return {...approvedRemoteBaseline,accountId:approval.accountId,workerName:approval.workerName,databaseId:approval.databaseId,activeVersionId:approval.activeVersionId,priorVersionId:approval.priorVersionId,scriptEtag:approval.scriptEtag,sourceCommit:approval.sourceCommit,fullCoverageEnabled};
 }
 
 export function assertProtectedDeployTarget(config,baseline,env={}){
@@ -90,6 +97,8 @@ export function assertProtectedDeployTarget(config,baseline,env={}){
  if(worker.length!==1||database.length!==1||worker[0][1]!==baseline?.workerName||database[0][1]!==baseline?.databaseId)fail('PROTECTED_DEPLOY_TARGET_MISMATCH');
  if(env.CLOUDFLARE_ACCOUNT_ID&&env.CLOUDFLARE_ACCOUNT_ID!==baseline.accountId)fail('PROTECTED_DEPLOY_TARGET_MISMATCH');
  if(env.WRANGLER_CI_OVERRIDE_NAME&&env.WRANGLER_CI_OVERRIDE_NAME!==baseline.workerName)fail('PROTECTED_DEPLOY_TARGET_MISMATCH');
+ let activation;try{activation=inspectFullCoverageConfig(config);}catch(error){fail(error.message);}
+ if(activation.enabled&&baseline.fullCoverageEnabled!==true)fail('FULL_COVERAGE_ACTIVATION_UNAPPROVED');
  return true;
 }
 
@@ -110,13 +119,13 @@ export function assertRemoteState(remote,baseline,{postDeploy=false,preDeployLin
   if(canonical(remote.observability)!==canonical(baseline.observability))fail('OBSERVABILITY_MISMATCH');
   for(const path of Object.keys(requiredObservability))if(valueAt(remote.scriptSettings.observability,path)===undefined||valueAt(baseline.scriptSettings.observability,path)===undefined)fail('SCRIPT_SETTINGS_OBSERVABILITY_INCOMPLETE');
   if(canonical(remote.scriptSettings.observability)!==canonical(baseline.scriptSettings.observability))fail('SCRIPT_SETTINGS_OBSERVABILITY_MISMATCH');
-  const shape=inspectBindingSet(remote.bindings,{expectAssets:postDeploy||baseline.assetsPresent});
+  const shape=inspectBindingSet(remote.bindings,{expectAssets:postDeploy||baseline.assetsPresent,fullCoverageEnabled:baseline.fullCoverageEnabled===true});
   if(!shape.available)fail('BINDINGS_UNAVAILABLE');
   if(!shape.unique||!shape.complete)fail('BINDINGS_UNEXPECTED');
   const bindings=new Map(remote.bindings.map(binding=>[binding.name,binding]));
   if(typeof bindings.get(legacyQuoteRecoveryBinding)?.text!=='string'||!bindings.get(legacyQuoteRecoveryBinding).text)fail('RECOVERY_SETTING_UNAVAILABLE');
   if(bindings.get('DB')?.id!==baseline.databaseId)fail('D1_MISMATCH');
-  const expectedFlags={...baseline.runtimeFlags,...(postDeploy?{ENABLE_LIVE_FREE:'true'}:{})};
+  const expectedFlags={...baseline.runtimeFlags,...(postDeploy?{ENABLE_LIVE_FREE:'true'}:{}),...(baseline.fullCoverageEnabled===true?{ENABLE_FULL_COVERAGE:'true'}:{})};
   if(!baseline.runtimeFlags||baseline.runtimeFlags.ALLOW_PAID_API!=='false'||baseline.runtimeFlags.SITE_DEPLOYED!=='true'||!['false','true'].includes(baseline.runtimeFlags.ENABLE_LIVE_FREE)||['ENABLE_PAID_SUMMARY','PAID_SUMMARY_EXECUTION_APPROVED','PAID_FIRST_GENERATION_TRIAL_ENABLED','PAID_FIRST_TRIAL_USD_COST_REVIEWED'].some(name=>baseline.runtimeFlags[name]!=='true'))fail('RUNTIME_FLAGS_BASELINE_INVALID');
   for(const [name,value] of Object.entries(expectedFlags)){
     if(bindings.get(name)?.text!==value)fail('RUNTIME_FLAGS_MISMATCH');

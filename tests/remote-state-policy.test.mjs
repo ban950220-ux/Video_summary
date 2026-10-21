@@ -1,10 +1,37 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {resolve} from 'node:path';
 import {approvedRemoteBaseline,approvedPreDeployLineage,assertRemoteState,assertProtectedDeployTarget,protectedRemoteBaseline} from '../scripts/remote-state-policy.mjs';
+import {assertProductionTarget} from '../scripts/guard-production-target.mjs';
+import {inspectFullCoverageConfig} from '../scripts/full-coverage-config.mjs';
 
 const observability=approvedRemoteBaseline.observability;
 const optionalScriptFields=approvedRemoteBaseline.optionalScriptFields;
 const baseline=approvedRemoteBaseline;
+test('production config permits only the exact optional flag and never embeds Free proof',()=>{
+ const config=readFileSync(resolve(import.meta.dirname,'../wrangler.toml'),'utf8');
+ assert.equal(assertProductionTarget(config),true);
+ for(const line of ['ENABLE_FULL_COVERAGE = "true"','  ENABLE_FULL_COVERAGE\t=\t"true"  # reviewed']){
+  const enabled=config.replace('ENABLE_LIVE_FREE = "true"',`ENABLE_LIVE_FREE = "true"\n${line}`);
+  assert.equal(inspectFullCoverageConfig(enabled).enabled,true);
+  assert.equal(assertProductionTarget(enabled),true);
+ }
+ assert.equal(inspectFullCoverageConfig(config+'\n# ENABLE_FULL_COVERAGE = "true"\n# GROQ_FREE_ORG_BINDING_JSON = "x"\n').enabled,false);
+ for(const altered of [
+  config.replace('ENABLE_LIVE_FREE = "true"','ENABLE_LIVE_FREE = "true"\nENABLE_FULL_COVERAGE = "false"'),
+  config.replace('ENABLE_LIVE_FREE = "true"','ENABLE_LIVE_FREE = "true"\nENABLE_FULL_COVERAGE = "true"\nENABLE_FULL_COVERAGE = "true"'),
+  config.replace('ENABLE_LIVE_FREE = "true"','ENABLE_LIVE_FREE = "true"\n"ENABLE_FULL_COVERAGE" = "true"'),
+  config.replace('ENABLE_LIVE_FREE = "true"','ENABLE_LIVE_FREE = "true"\nvars.ENABLE_FULL_COVERAGE = "true"'),
+  config.replace('ENABLE_LIVE_FREE = "true"','ENABLE_LIVE_FREE = "true"\n  ENABLE_FULL_COVERAGE = true'),
+  config.replace('ENABLE_LIVE_FREE = "true"','ENABLE_LIVE_FREE = "true"\n"ENABLE_FULL_COVERAG\\u0045" = "true"'),
+  config.replace('ENABLE_LIVE_FREE = "true"','ENABLE_LIVE_FREE = "true"\n"GROQ_FREE_ORG_BINDING_\\u004aSON" = "fake"'),
+  config+'\n[previews.vars]\nENABLE_FULL_COVERAGE = "true"\n',
+  config+'\n[vars]\nENABLE_FULL_COVERAGE = "true"\n',
+  config+'\nGROQ_FREE_ORG_BINDING_JSON = "fake"\n',
+  config+'\n"GROQ_FREE_ORG_BINDING_JSON" = "fake"\n',
+ ])assert.throws(()=>assertProductionTarget(altered),/FULL_COVERAGE_CONFIG_INVALID|FREE_ORG_BINDING_MUST_BE_SECRET/);
+});
 test('protected deployment identity must match Wrangler config and child account before upload',()=>{
  const config=`name = "${baseline.workerName}"\n[[d1_databases]]\ndatabase_id = "${baseline.databaseId}"\n`;
  assert.equal(assertProtectedDeployTarget(config,baseline,{CLOUDFLARE_ACCOUNT_ID:baseline.accountId,WRANGLER_CI_OVERRIDE_NAME:baseline.workerName}),true);
@@ -62,6 +89,33 @@ test('protected deployment identity is required, recent, exact, and still checke
  assert.throws(()=>assertRemoteState(state,protectedBaseline),/SOURCE_COMMIT_MISMATCH/);
  state.deploymentMessage=`source-commit:${approval.sourceCommit}`;
  assert.equal(assertRemoteState(state,protectedBaseline),true);
+});
+
+test('full coverage runtime bindings require an exact fresh opt-in and stay exact before and after deployment',()=>{
+ const reviewedAt=new Date(Date.now()-1000).toISOString(),expiresAt=new Date(Date.now()+3600000).toISOString();
+ const approval={kind:'REMOTE_DEPLOYMENT_REVIEW_V1',accountId:baseline.accountId,workerName:baseline.workerName,databaseId:baseline.databaseId,activeVersionId:baseline.activeVersionId,priorVersionId:baseline.priorVersionId,scriptEtag:baseline.scriptEtag,sourceCommit:baseline.sourceCommit,reviewedAt,expiresAt};
+ const old=protectedRemoteBaseline({GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify(approval)});
+ const approved=protectedRemoteBaseline({GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify({...approval,fullCoverageEnabled:true})});
+ assert.equal(approved.fullCoverageEnabled,true);
+ for(const value of [false,'true',null])assert.throws(()=>protectedRemoteBaseline({GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify({...approval,fullCoverageEnabled:value})}),/DEPLOYMENT_EVIDENCE_INVALID/);
+ const active=remote();active.bindings.push({name:'ASSETS',type:'assets'},{name:'ENABLE_FULL_COVERAGE',type:'plain_text',text:'true'},{name:'GROQ_FREE_ORG_BINDING_JSON',type:'secret_text'});
+ for(const postDeploy of [false,true]){
+  assert.equal(assertRemoteState(active,approved,{postDeploy}),true);
+  assert.throws(()=>assertRemoteState(active,old,{postDeploy}),/BINDINGS_UNEXPECTED/);
+  for(const change of [
+   state=>{state.bindings.find(x=>x.name==='ENABLE_FULL_COVERAGE').text='false';},
+   state=>{state.bindings.find(x=>x.name==='GROQ_FREE_ORG_BINDING_JSON').type='plain_text';},
+   state=>{state.bindings.splice(state.bindings.findIndex(x=>x.name==='GROQ_FREE_ORG_BINDING_JSON'),1);},
+   state=>{state.bindings.push({name:'UNREVIEWED',type:'secret_text'});},
+  ]){const changed=structuredClone(active);change(changed);assert.throws(()=>assertRemoteState(changed,approved,{postDeploy}),/BINDINGS_UNEXPECTED|RUNTIME_FLAGS_MISMATCH/);}
+ }
+ const config=`name = "${baseline.workerName}"\n[vars]\nENABLE_FULL_COVERAGE = "true"\n[[d1_databases]]\ndatabase_id = "${baseline.databaseId}"\n`;
+ assert.equal(assertProtectedDeployTarget(config,approved),true);
+ assert.equal(assertProtectedDeployTarget(config.replace('ENABLE_FULL_COVERAGE = "true"',' \tENABLE_FULL_COVERAGE = "true" # approved'),approved),true);
+ assert.throws(()=>assertProtectedDeployTarget(config,old),/FULL_COVERAGE_ACTIVATION_UNAPPROVED/);
+ assert.throws(()=>assertProtectedDeployTarget(config.replace('"true"','"false"'),approved),/FULL_COVERAGE_CONFIG_INVALID/);
+ assert.throws(()=>assertProtectedDeployTarget(config.replace('ENABLE_FULL_COVERAGE','"ENABLE_FULL_COVERAGE"'),old),/FULL_COVERAGE_CONFIG_INVALID/);
+ assert.throws(()=>assertProtectedDeployTarget(config+'GROQ_FREE_ORG_BINDING_JSON = "secret"\n',approved),/FREE_ORG_BINDING_MUST_BE_SECRET/);
 });
 
 test('the PR9 settings version requires the pinned predecessor and unchanged script and settings',()=>{

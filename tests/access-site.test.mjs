@@ -55,6 +55,11 @@ test('Groq summary ledger status stays behind owner Access',async()=>{
   assert.equal((await call(path,jwt({email:'intruder@example.com'}))).status,401);
  }
 });
+test('Groq credential binding diagnostic stays behind owner Access',async()=>{
+ const path='/api/settings/providers/groq/binding-diagnostic';
+ assert.equal((await call(path,'invalid')).status,401);
+ assert.equal((await call(path,jwt({email:'intruder@example.com'}))).status,401);
+});
 test('CSRF denies missing and foreign Origin for write APIs',async()=>{
   const payload={sourceType:'url',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:60};
   assert.equal(sameOriginMutation(request('/api/jobs',jwt(),{method:'POST',body:payload})),false);
