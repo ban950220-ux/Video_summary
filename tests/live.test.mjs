@@ -122,7 +122,7 @@ test('native job polling does not reserve another provider credit',async()=>{
   assert.deepEqual(Object.values(db.prepare('SELECT consumed,request_count FROM yta_quota WHERE provider=?').get('supadata')),[1,1]);
  }finally{globalThis.fetch=originalFetch;db.close();}
 });
-for(const mode of ['immediate','poll'])test('out-of-duration native '+mode+' result leaves existing source and status unchanged',async()=>{
+for(const mode of ['immediate','poll'])test('native '+mode+' rejects an existing transcript before any request',async()=>{
  const {db,env}=setup(),originalFetch=globalThis.fetch;
  try{
   const created=(await(await routeApi(request('/api/jobs','POST',{sourceType:'url',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:200}),env)).json()).job;
@@ -133,7 +133,7 @@ for(const mode of ['immediate','poll'])test('out-of-duration native '+mode+' res
   assert.equal((await routeApi(request('/api/live/quota','PUT',{provider:'supadata',allowance:1,requestLimit:2,billingDisabled:true,freeOnly:true}),env)).status,200);
   let calls=0;globalThis.fetch=async url=>{calls++;assert.equal(new URL(url).pathname,mode==='poll'?'/v1/transcript/native-123':'/v1/transcript');const content=[{text:'inside range',offset:0,duration:1000},{text:'out of range',offset:300000,duration:1000}];return Response.json(mode==='poll'?{status:'completed',result:{content}}:{content});};
   const response=await routeApi(request('/api/jobs/'+id+'/'+(mode==='poll'?'native-poll':'native'),'POST',{}),env);
-  assert.notEqual(response.status,200);assert.equal(calls,1);
+  assert.equal(response.status,409);assert.equal((await response.json()).error.code,'NATIVE_SOURCE_EXISTS');assert.equal(calls,0);
   assert.deepEqual({...db.prepare('SELECT status,audit_json,report_json FROM jobs WHERE id=?').get(id)},{...beforeJob});
   assert.deepEqual({...db.prepare('SELECT raw,segments_json,provenance FROM yta_sources WHERE job_id=?').get(id)},{...beforeSource});
  }finally{globalThis.fetch=originalFetch;db.close();}

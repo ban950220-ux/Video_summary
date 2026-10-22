@@ -1,3 +1,4 @@
+import {projectGeminiReport} from './gemini-source-assessment.mjs';
 import {InputError,videoIdOf,durationSec,parseCaptions,transcriptAudit,extractiveReport,estimateSource,PROVIDERS,DEFAULT_POLICY,usableFreeUnits} from './core.mjs';
 import {configuredMasterKey,decryptProviderKey,encryptProviderKey,providerAllowed} from './vault.mjs';
 import {routeLive,saveSource,ensureLiveSchema} from './live.mjs';
@@ -103,9 +104,24 @@ async function listJobs(env,url){
     ? env.DB.prepare("SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json FROM jobs WHERE owner_id = ? AND (title LIKE ? ESCAPE '\\' OR video_id LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ? OFFSET ?").bind('owner',pattern,pattern,limit,offset)
     : env.DB.prepare('SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json FROM jobs WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?').bind('owner',limit,offset);
   const rows=(await stmt.all()).results??[];
+  const geminiRows=rows.filter(row=>JSON.parse(row.report_json||'null')?.compositionMode==='gemini-two-pass-v1');
+  const geminiViews=new Map();
+  // Limit live source data to five rows; a page can contain 50 large transcripts.
+  for(let offset=0;offset<geminiRows.length;offset+=5){
+    const batch=geminiRows.slice(offset,offset+5),ids=batch.map(row=>row.id);
+    const result=await env.DB.prepare('SELECT * FROM yta_sources WHERE job_id IN ('+ids.map(()=>'?').join(',')+')').bind(...ids).all();
+    const sources=new Map((result.results??[]).map(source=>[source.job_id,source]));
+    for(const row of batch){
+      let audit;try{audit=JSON.parse(row.audit_json||'null');}catch{audit=null;}
+      const source=sources.get(row.id);let segments=[];try{segments=JSON.parse(source?.segments_json||'[]');}catch{}
+      const report=JSON.parse(row.report_json),projected=await projectGeminiReport(env,{...row,report,audit},source?{...source,segments}:null);
+      geminiViews.set(row.id,{status:projected.status,summary:report.summary??[],summaryCompletion:projected.summaryCompletion,sourceStatus:projected.sourceStatus,sourceBinding:projected.report.sourceBinding,audioProcessingComplete:audit?.audioProcessingCoverage===1,audioTranscriptComplete:false});
+    }
+  }
   return json({jobs:rows.map(({report_json,audit_json,...row})=>{
-    const audit=JSON.parse(audit_json||'null');
-    return {...row,summary:JSON.parse(report_json||'null')?.summary??[],nativePollReady:row.source_type==='url'&&row.status==='NATIVE_PENDING'&&typeof audit?.providerJobId==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(audit.providerJobId),freshTranscriptJob:row.source_type==='text'&&audit?.fullCoverageFresh?.contract==='FRESH_IMPORTED_TRANSCRIPT_V1',audioTranscriptComplete:row.source_type==='audio'&&audit?.audioProcessing==='ALL_PLANNED_CHUNKS_PROCESSED'&&audit.audioProcessingCoverage===1};
+    if(geminiViews.has(row.id))return {...row,...geminiViews.get(row.id)};
+    let audit;try{audit=JSON.parse(audit_json||'null');}catch{audit=null;}
+    return {...row,summary:JSON.parse(report_json||'null')?.summary??[],nativeTranscriptSummaryReady:row.source_type==='url'&&['TRANSCRIPT_UNVERIFIED','PARTIAL_TRANSCRIPT'].includes(row.status)&&audit?.providerCompleteness==='NOT_INDEPENDENTLY_VERIFIED',nativePollReady:row.source_type==='url'&&row.status==='NATIVE_PENDING'&&typeof audit?.providerJobId==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(audit.providerJobId),freshTranscriptJob:row.source_type==='text'&&audit?.fullCoverageFresh?.contract==='FRESH_IMPORTED_TRANSCRIPT_V1',audioTranscriptComplete:row.source_type==='audio'&&audit?.audioProcessing==='ALL_PLANNED_CHUNKS_PROCESSED'&&audit.audioProcessingCoverage===1};
   }),limit,offset,hasMore:rows.length===limit,source:'D1'});
 }
 async function credentialEvent(env,provider,event){
@@ -175,7 +191,9 @@ export async function routeApi(request,env){
         const id=jobMatch[1];
         if(request.method==='GET'){
           const row=await env.DB.prepare('SELECT * FROM jobs WHERE id = ? AND owner_id = ?').bind(id,'owner').first();
-          return row?json({job:{...row,report:JSON.parse(row.report_json||'null'),audit:JSON.parse(row.audit_json||'null')}}):json({error:{code:'NOT_FOUND'}},404);
+          if(!row)return json({error:{code:'NOT_FOUND'}},404);
+          let audit;try{audit=JSON.parse(row.audit_json||'null');}catch{audit=null;}
+          return json({job:await projectGeminiReport(env,{...row,report:JSON.parse(row.report_json||'null'),audit})});
         }
         if(request.method==='DELETE'){
           await env.DB.prepare('DELETE FROM jobs WHERE id = ? AND owner_id = ?').bind(id,'owner').run();

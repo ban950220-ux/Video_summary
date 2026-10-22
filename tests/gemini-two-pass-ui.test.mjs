@@ -3,7 +3,29 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 
+test('PASS review needs explicit caveat acknowledgement before a no-provider save',async()=>{
+ const node=tag=>({tag,children:[],dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-accept';
+ const calls=[],quote={sourceSha256:'a'.repeat(64),quoteSha256:'b'.repeat(64),expiresAt:Date.now()-1};
+ let status={state:'ISSUES',quote,sourceAssessmentSha256:'f'.repeat(64),auditSha256:'c'.repeat(64),reviewVerdict:'PASS',review:{verdict:'PASS',issues:[]},calls:[{phase:0,state:'SETTLED',responseSha256:'d'.repeat(64)},{phase:1,state:'SETTLED',responseSha256:'e'.repeat(64)}]};
+ const fetcher=async(path,options)=>{calls.push({path,method:options.method,body:options.body});if(path.endsWith('-accept'))status={...status,state:'COMPLETE'};return {ok:true,headers:{get:()=> 'application/json'},json:async()=>status};};
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showGeminiTwoPassChoice;globalThis.__state=state;');
+ const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout};runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__show({id:'job-accept'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
+ const host=target.children[0],button=host.children.find(item=>item.tag==='button'&&item.textContent==='Save source-based report with limitations');assert.ok(button);
+ await button.onclick();assert.equal(calls.filter(item=>item.method==='POST').length,0);
+ const checks=host.children.filter(item=>item.tag==='label'&&item.children?.[0]?.tag==='input'&&item.textContent?.startsWith('I ')||item.tag==='label'&&item.textContent?.startsWith('Accept this summary'));
+ assert.equal(checks.length,3);for(const check of checks)check.children[0].checked=true;
+ await button.onclick();assert.equal(calls.filter(item=>item.method==='POST').length,1);const submitted=JSON.parse(calls.find(item=>item.method==='POST').body);assert.equal(submitted.confirmNoProviderCall,true);assert.equal(submitted.sourceAssessmentSha256,'f'.repeat(64));assert.equal(submitted.reviewReceiptSha256,'e'.repeat(64));
+});
+
 const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+test('saved partial Gemini report renders the summary, source limits and stale warning',()=>{
+ const node=tag=>({tag,children:[],dataset:{},append(...items){this.children.push(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div');
+ const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showReport;');
+ const context={document:{createElement:node,querySelector:()=>null},window:{},location:{hash:''},setTimeout,clearTimeout};runInNewContext(source,context);
+ context.__show({status:'SOURCE_REVIEW_REQUIRED',report:{kind:'GEMINI_TWO_PASS_EVIDENCE_LINKED',compositionMode:'gemini-two-pass-v1',summaryCompletion:'COMPLETE',sourceBinding:'STALE_SOURCE',sourceAssessment:{status:'PARTIAL_TRANSCRIPT',provenance:'GROQ_OWNED_AUDIO',durationSeconds:10,range:{firstStartMs:0,lastEndMs:2000}},summary:[{text:'Saved summary',evidenceIds:[1]}]}},target,true);
+ const text=element=>[element.textContent??'',...(element.children??[]).map(text)].join(' '),rendered=text(target);
+ assert.match(rendered,/Saved summary/);assert.match(rendered,/PARTIAL_TRANSCRIPT/);assert.match(rendered,/GROQ_OWNED_AUDIO/);assert.match(rendered,/0–2000 ms/);assert.match(rendered,/STALE_SOURCE/);assert.match(rendered,/다시 검토/);assert.doesNotMatch(rendered,/AI 요약 아님/);
+});
 test('a Groq recovery warning leaves the Gemini choice reachable without a provider POST',async()=>{
  const node=tag=>({tag,children:[],hidden:false,dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-a';
  const choice={transcription:{complete:true},summary:{complete:false,savedRawStages:0,rawStages:79,remainingRawStages:79,recoveryReviewRequired:true},free:{model:'mock-free',inputTokensUpperPerCall:4800,outputTokensUpperPerCall:1800,eta:{reason:'UNKNOWN'}},paid:{executionEnabled:false,quoteIssueReady:false,reason:'별도 승인 필요',model:'gemini-3.1-flash-lite',priceVersion:'v1',maxRetries:0}};
