@@ -27,13 +27,13 @@ const routed=async(request,env)=>{
 test('full 1226 segment Workerd D1 flow stores fixture leaves, resumes, finalizes and exports TXT',async()=>{
  const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'full-coverage-local',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'full-coverage-local'}}]})),oldFetch=globalThis.fetch;
  try{
-  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
+  const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0017_audio_submission_idempotency.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
   const lockMigration=readFileSync(new URL('../migrations/0016_full_coverage_write_lock.sql',import.meta.url),'utf8').split('\n').filter(line=>!line.trim().startsWith('--')).join('\n');
   for(const body of lockMigration.split('END;').filter(text=>text.trim()))await DB.prepare(body+'END;').run();
   const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',ENABLE_FULL_COVERAGE:'true',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
-  const created=await parsed(await routed(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:5892.864,title:'Fixture full source'}),env),202),id=created.job.id,path='/api/jobs/'+id,now=new Date(Date.now()-2*86_400_000).toISOString();
+  const created=await parsed(await routed(request('/api/jobs','POST',{sourceType:'audio',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:5892.864,title:'Fixture full source',submissionId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',ownedAudioSha256:'a'.repeat(64)}),env),202),id=created.job.id,path='/api/jobs/'+id,now=new Date(Date.now()-2*86_400_000).toISOString();
   const segments=Array.from({length:1226},(_,i)=>({id:i+1,startMs:Math.floor(i*5892864/1226),endMs:Math.floor((i+1)*5892864/1226),text:[`논점 ${i+1}: ${i+1}% 늘었다`,`반론 ${i+1}: ${i+1}명이 줄었다`,`불확실 ${i+1}: 자료가 부족하다`,`미확인 ${i+1}: 그럴 수 있다`][(i+1)%4].padEnd(36,'가')+' '+(i+1)}));
-  const raw=segments.map(s=>s.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64),audioSegmentOrigins:[],audioBoundaryAmbiguities:Array.from({length:47},(_,i)=>({segmentId:2+i*25,chunkIndex:i+1,startMs:0,endMs:1}))};
+  const raw=segments.map(s=>s.text).join('\n'),audit={audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:'a'.repeat(64),ownedAudioSha256:'a'.repeat(64),urlAudioAssociation:'USER_ASSERTED_NOT_VERIFIED',audioSegmentOrigins:[],audioBoundaryAmbiguities:Array.from({length:47},(_,i)=>({segmentId:2+i*25,chunkIndex:i+1,startMs:0,endMs:1}))};
   await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(JSON.stringify(audit),id).run();
   await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(id,raw,JSON.stringify(segments),'GROQ_OWNED_AUDIO',now).run();
   const legacy=await parsed(await routed(request(path+'/groq-summary-plan'),env));
@@ -173,7 +173,7 @@ test('full 1226 segment Workerd D1 flow stores fixture leaves, resumes, finalize
   assert.equal(addedUsage,true);assert.notEqual(usageRace.status,200);assert.ok([null,'null'].includes((await DB.prepare('SELECT report_json FROM jobs WHERE id=?').bind(id).first()).report_json));
   await DB.prepare('DELETE FROM usage_events WHERE id=?').bind(addedSynthesisUsage).run();
   const finalized=await parsed(await routed(request(path+'/groq-full-coverage-global','POST',{step:'finalize',sourceHash:globalStatus.sourceHash,manifestSha256:globalStatus.manifestSha256,confirmNoProviderCall:true}),env));assert.equal(finalized.readBackVerified,true);assert.deepEqual(finalized.sourceCoverage,{segmentCount:1226,firstId:1,lastId:1226,missingSegmentIds:[]});
-  const saved=await parsed(await routed(request(path),env));assert.equal(saved.job.report.compositionMode,'groq-full-coverage-global-v1');assert.equal(saved.job.report.globalSynthesisStatus,'MODEL_ROOT_VALIDATED_HUMAN_UNREVIEWED');
+  const saved=await parsed(await routed(request(path),env));assert.equal(saved.job.report.compositionMode,'groq-full-coverage-global-v1');assert.equal(saved.job.report.globalSynthesisStatus,'MODEL_ROOT_VALIDATED_HUMAN_UNREVIEWED');assert.equal(saved.job.video_id,'2hUkTmwYm3A');assert.equal(saved.job.source_url,'https://www.youtube.com/watch?v=2hUkTmwYm3A');
   const text=await(await routed(request(path+'/export?format=txt'),env)).text();assert.match(text,/Full source coverage audit/);assert.match(text,/1226/);assert.match(text,/The old operation remains uncertain/);
   assert.deepEqual(await DB.prepare('SELECT state,result_json FROM yta_operations WHERE id=?').bind(failedId).first(),{state:'FAILED_UNCERTAIN',result_json:failedResult});
   assert.deepEqual(await DB.prepare('SELECT state,result_json FROM yta_operations WHERE id=?').bind(correctionId).first(),{state:'FAILED_UNCERTAIN',result_json:correctionResult});
@@ -181,22 +181,37 @@ test('full 1226 segment Workerd D1 flow stores fixture leaves, resumes, finalize
  }finally{globalThis.fetch=oldFetch;await mf.dispose();}
 });
 
-test('fresh imported transcript creates a separate idempotent job without old usage or transcription',async()=>{
- const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'fresh-transcript-local',modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'fresh-transcript-local'}}]}));
+for(const sourceKind of ['text','url'])test('fresh imported transcript '+sourceKind+' creates a separate idempotent job without old usage or transcription',async()=>{
+ const mf=new Miniflare(convertV4MiniflareOptions({workers:[{name:'fresh-transcript-'+sourceKind,modules:true,script:'export default {fetch(){return new Response("local")}}',d1Databases:{DB:'fresh-transcript-'+sourceKind}}]}));
  const oldFetch=globalThis.fetch;
  try{
   const DB=await mf.getD1Database('DB');for(const file of ['../schema.sql','../migrations/0002_live.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
   const lockMigration=readFileSync(new URL('../migrations/0016_full_coverage_write_lock.sql',import.meta.url),'utf8').split('\n').filter(line=>!line.trim().startsWith('--')).join('\n');for(const body of lockMigration.split('END;').filter(text=>text.trim()))await DB.prepare(body+'END;').run();
   const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',ENABLE_FULL_COVERAGE:'true',GROQ_API_KEY:'OFFLINE_TEST_ONLY_KEY',KEY_ENCRYPTION_KEY_B64:Buffer.alloc(32,7).toString('base64')};
-  const originalId=crypto.randomUUID(),now=new Date().toISOString(),originalAudit=JSON.stringify({status:'TRANSCRIPT_UNVERIFIED'}),segments=Array.from({length:120},(_,i)=>({id:i+1,startMs:i*800,endMs:(i+1)*800,text:`원문 ${i+1}: 저장된 전사 구간의 사실과 근거입니다.`})),srt='fixture SRT from owner upload';
-  await DB.prepare("INSERT INTO jobs(id,owner_id,title,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json) VALUES(?,'owner','Verified import','text','TRANSCRIPT_UNVERIFIED',97,?,?,?,?)").bind(originalId,now,now,JSON.stringify({kind:'EXTRACTIVE_ONLY_NOT_AI'}),originalAudit).run();
-  await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(originalId,srt,JSON.stringify(segments),'SRT',now).run();
+  const originalId=crypto.randomUUID(),now=new Date().toISOString(),originalStatus=sourceKind==='url'?'PARTIAL_TRANSCRIPT':'TRANSCRIPT_UNVERIFIED',originalAudit=JSON.stringify(sourceKind==='url'?{status:originalStatus,timelineRatio:.48,gaps:[{startMs:96000,endMs:200000}],providerCompleteness:'NOT_INDEPENDENTLY_VERIFIED'}:{status:originalStatus}),segments=Array.from({length:120},(_,i)=>({id:i+1,startMs:i*800,endMs:(i+1)*800,text:`원문 ${i+1}: 저장된 전사 구간의 사실과 근거입니다.`})),srt='fixture SRT from owner upload';
+  await DB.prepare("INSERT INTO jobs(id,owner_id,title,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json) VALUES(?,'owner','Verified import',?,?,?,?,?,?,?)").bind(originalId,sourceKind,originalStatus,sourceKind==='url'?200:97,now,now,JSON.stringify({kind:'EXTRACTIVE_ONLY_NOT_AI'}),originalAudit).run();
+  await DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(originalId,srt,JSON.stringify(segments),sourceKind==='url'?'SUPADATA_NATIVE':'SRT',now).run();
   const originalSnapshot=await DB.prepare('SELECT * FROM jobs WHERE id=?').bind(originalId).first(),sourceSha=await sha(srt),body={confirmSeparateNewJob:true,acknowledgeDuplicateSummaryTokens:true,confirmNoRetranscription:true,originalSourceSha256:sourceSha,expectedSegments:120};
+  if(sourceKind==='url'){
+   await DB.prepare("UPDATE yta_sources SET provenance='USER_TXT' WHERE job_id=?").bind(originalId).run();
+   assert.equal((await routed(request('/api/jobs/'+originalId+'/groq-full-coverage-fresh','POST',body),env)).status,409);
+   await DB.prepare("UPDATE yta_sources SET provenance='SUPADATA_NATIVE' WHERE job_id=?").bind(originalId).run();
+   await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(JSON.stringify({status:'TRANSCRIPT_UNVERIFIED',timelineRatio:.48,gaps:[{startMs:96000,endMs:200000}]}),originalId).run();
+   assert.equal((await routed(request('/api/jobs/'+originalId+'/groq-full-coverage-fresh','POST',body),env)).status,409);
+   await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(originalAudit,originalId).run();
+  }
   const first=await parsed(await routed(request('/api/jobs/'+originalId+'/groq-full-coverage-fresh','POST',body),env),201);
   const second=await parsed(await routed(request('/api/jobs/'+originalId+'/groq-full-coverage-fresh','POST',body),env),201);
   assert.equal(first.jobId,second.jobId);assert.equal(first.providerCalls,0);assert.equal(first.priorUsageCopied,false);assert.equal(first.transcriptionReused,true);
+  if(sourceKind==='url'){assert.equal(first.sourceScope.transcriptStatus,'PARTIAL_TRANSCRIPT');assert.equal(first.sourceScope.provenance,'SUPADATA_NATIVE');assert.equal(first.sourceScope.lastMs,96000);}
   assert.deepEqual(await DB.prepare('SELECT * FROM jobs WHERE id=?').bind(originalId).first(),originalSnapshot);
   assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM usage_events WHERE job_id=?').bind(first.jobId).first()).n,0);
+  if(sourceKind==='url'){
+   const copied=(await DB.prepare('SELECT audit_json FROM jobs WHERE id=?').bind(first.jobId).first()).audit_json;
+   await DB.prepare("UPDATE jobs SET audit_json=json_set(audit_json,'$.sourceScope.transcriptStatus','TRANSCRIPT_UNVERIFIED') WHERE id=?").bind(first.jobId).run();
+   assert.notEqual((await routed(request('/api/jobs/'+first.jobId+'/groq-full-coverage'),env)).status,200);
+   await DB.prepare('UPDATE jobs SET audit_json=? WHERE id=?').bind(copied,first.jobId).run();
+  }
   const freshStatus=await parsed(await routed(request('/api/jobs/'+first.jobId+'/groq-full-coverage'),env));
   assert.equal(freshStatus.freshTranscriptJob,true);assert.equal(freshStatus.reusedLegacy,0);assert.equal(freshStatus.heldLegacy,null);assert.equal(freshStatus.sourceSegments,120);
   assert.equal((await routed(request('/api/jobs/'+first.jobId+'/groq-full-coverage','POST',{step:'approve',planSha256:freshStatus.planSha256,maxRequests:1,confirmFreePlanAndBillingDisabled:true,acknowledgeAccountRemainingUnknown:true,noPaidFallback:true,noAutoRetry:true}),env)).status,409);
@@ -235,6 +250,7 @@ test('fresh imported transcript creates a separate idempotent job without old us
   const finalized=await parsed(await routed(request(freshPath+'/groq-full-coverage-global','POST',{step:'finalize',sourceHash:globalCursor.sourceHash,manifestSha256:globalCursor.manifestSha256,confirmNoProviderCall:true}),env));assert.equal(finalized.readBackVerified,true);
   const savedFresh=await parsed(await routed(request(freshPath),env));assert.equal(savedFresh.job.report.compositionMode,'groq-full-coverage-global-v1');assert.equal(savedFresh.job.report.sectionReports.sourceMode,'FRESH_IMPORTED_TRANSCRIPT');
   const text=await(await routed(request(freshPath+'/export?format=txt'),env)).text();assert.match(text,/Full source coverage audit/);assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM usage_events WHERE job_id=?').bind(originalId).first()).n,0);
+  if(sourceKind==='url'){assert.equal(savedFresh.job.audit.status,'PARTIAL_TRANSCRIPT');assert.equal(savedFresh.job.report.mediaCoverage.transcriptStatus,'PARTIAL_TRANSCRIPT');assert.equal(savedFresh.job.report.mediaCoverage.lastMs,96000);assert.match(text,/stored caption range 0-96000 ms of 200000 ms/);assert.match(text,/not necessarily the full video/);}
   const replay=await parsed(await routed(request('/api/jobs/'+originalId+'/groq-full-coverage-fresh','POST',body),env),201);assert.equal(replay.jobId,first.jobId);assert.equal(replay.alreadyCompleted,true);assert.equal(replay.providerCalls,0);
  }finally{globalThis.fetch=oldFetch;await mf.dispose();}
 });

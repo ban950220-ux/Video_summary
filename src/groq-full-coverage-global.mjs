@@ -78,10 +78,10 @@ export async function readFullCoverageGlobalNodes(env,id,context,segments){
  return {progress,unsettled,savedNodes,rows,recoveredFailureIds,recoveryProofs};
 }
 
-export async function fullCoverageGlobalReport({context,progress,segments,sections,semanticReview}){
+export async function fullCoverageGlobalReport({context,progress,segments,sections,semanticReview,sourceScope=null}){
  if(!progress.complete)fail('GLOBAL_TREE_INCOMPLETE');
  const report=await completedSynthesisReport({manifest:context.manifest,notes:context.notes,root:progress.root,checkpoints:context.checkpoints,excerpts:context.excerpts,segments,verifyGrounding:assertGrounding,semanticReview});
  const {reportSha256:baseReportSha256,...base}=report;
- const final={...base,baseReportSha256,compositionMode:'groq-full-coverage-global-v1',globalSynthesisStatus:'MODEL_ROOT_VALIDATED_HUMAN_UNREVIEWED',sectionReports:sections,sourceCoverage:{segmentCount:segments.length,firstId:1,lastId:segments.length,missingSegmentIds:[]}};
+ const final={...base,baseReportSha256,compositionMode:'groq-full-coverage-global-v1',globalSynthesisStatus:'MODEL_ROOT_VALIDATED_HUMAN_UNREVIEWED',sectionReports:sections,sourceCoverage:{segmentCount:segments.length,firstId:1,lastId:segments.length,missingSegmentIds:[]},...(sourceScope?{mediaCoverage:sourceScope}:{})};
  return {...final,reportSha256:await sha(final)};
 }

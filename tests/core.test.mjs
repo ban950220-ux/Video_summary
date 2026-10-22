@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {videoIdOf,InputError,parseCaptions,transcriptAudit,extractiveReport,estimateSource,usableFreeUnits,budgetDecision,failoverDecision,remainingDaysForecast,parseClock} from '../src/core.mjs';
+import {videoIdOf,InputError,parseCaptions,transcriptAudit,extractiveReport,estimateSource,planSupadataUrlGeneration,usableFreeUnits,budgetDecision,failoverDecision,remainingDaysForecast,parseClock} from '../src/core.mjs';
 const url='https://www.youtube.com/watch?v=2hUkTmwYm3A';
 const srt=(end='00:02:00,000')=>`1\n00:00:00,000 --> 00:00:02,000\n첫 문장입니다.\n\n2\n00:01:50,000 --> ${end}\n마지막 문장입니다.\n`;
 test('strict youtube URL validation',()=>{
@@ -40,6 +40,16 @@ test('URL source uses native-only 1 credit and blocks 240-credit auto ASR',()=>{
   assert.equal(q[1].creditsMax,240);
   assert.equal(q[1].available,'BLOCKED_BY_DEFAULT');
   assert.ok(q.find(p=>p.provider==='gemini'));
+});
+test('URL generation preflight reserves full minutes and blocks a 98-minute video on Free',()=>{
+  const durationSeconds=5892.888;
+  assert.equal(estimateSource({durationSeconds,sourceType:'url'})[1].creditsMax,198);
+  const approved={durationSeconds,rightsConfirmed:true,publicAccessConfirmed:true,freePlanConfirmed:true,billingDisabledConfirmed:true,explicitGenerationApproval:true,freeCreditsRemaining:100};
+  assert.deepEqual([planSupadataUrlGeneration(approved).creditsReserved,planSupadataUrlGeneration(approved).blockedReason],[198,'INSUFFICIENT_FREE_CREDITS']);
+  assert.equal(planSupadataUrlGeneration({...approved,freeCreditsRemaining:null}).blockedReason,'FREE_CREDITS_UNVERIFIED');
+  assert.equal(planSupadataUrlGeneration({...approved,freeCreditsRemaining:198,priorAttemptUncertain:true}).blockedReason,'PRIOR_ATTEMPT_UNCERTAIN');
+  assert.equal(planSupadataUrlGeneration({...approved,durationSeconds:60,freeCreditsRemaining:2}).allowed,true);
+  assert.equal(planSupadataUrlGeneration({...approved,durationSeconds:60,freeCreditsRemaining:2,explicitGenerationApproval:false}).blockedReason,'GENERATION_APPROVAL_REQUIRED');
 });
 test('app ledger never shown as provider exact remaining',()=>{
   const u=usableFreeUnits({limit:100,appUsed:50});

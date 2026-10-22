@@ -136,6 +136,11 @@ async function assertGroqBeforeDispatch(env,id,active){
  }catch(error){error.preDispatchBlocked=true;throw error;}
 }
 async function storeTranscriptResult(env,job,segments,provenance,extra={}){
+ if(provenance==='SUPADATA_NATIVE'){
+  const ceiling=job.duration_seconds*1000;
+  if(!Number.isFinite(ceiling)||ceiling<=0)throw new ProviderError('CAPTION_DURATION_UNVERIFIED','Declared video duration is unavailable; caption coverage cannot be checked.');
+  if(!Array.isArray(segments)||!segments.length||segments.some((s,i)=>!s||typeof s.text!=='string'||!s.text.trim()||!Number.isFinite(s.startMs)||!Number.isFinite(s.endMs)||s.startMs<0||s.endMs<=s.startMs||s.endMs>ceiling||(i>0&&s.startMs<segments[i-1].startMs)))throw new ProviderError('CAPTION_OUTSIDE_DECLARED_DURATION','Caption timestamps are invalid or outside the declared video duration.');
+ }
  const raw=segments.map(s=>s.text).join('\n'),clean=await saveSource(env,job.id,raw,segments,provenance);
  const audit={...transcriptAudit(clean,job.duration_seconds,false),...auditGaps(clean,job.duration_seconds),...extra};
  await updateJob(env,job.id,audit.status,null,audit);return {job:await ownedJob(env,job.id),source:{segments:clean,provenance},persisted:true};
@@ -143,7 +148,7 @@ async function storeTranscriptResult(env,job,segments,provenance,extra={}){
 async function storeAudioTranscriptOnce(env,job,merged){
  const raw=merged.segments.map(segment=>segment.text).join('\n'),clean=normalizeSegments(merged.segments);
  if(new TextEncoder().encode(raw+JSON.stringify(clean)).byteLength>1500000)throw new InputError('보관 원문 크기 제한');
- const audit={...transcriptAudit(clean,job.duration_seconds,false),...auditGaps(clean,job.duration_seconds),audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:merged.fileSha256,audioProviders:merged.providers,audioChunks:merged.chunkProvenance,audioSegmentOrigins:merged.segments.map((segment,index)=>({segmentId:index+1,chunkIndex:segment.chunk,startMs:segment.startMs,endMs:segment.endMs})),audioBoundaryReview:merged.boundaryAmbiguities.length?'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED':'NO_NONIDENTICAL_OVERLAP_TEXT',audioBoundaryAmbiguities:merged.boundaryAmbiguities,independentVerification:false};
+ const audit={...transcriptAudit(clean,job.duration_seconds,false),...auditGaps(clean,job.duration_seconds),urlAudioAssociation:job.audit?.urlAudioAssociation??null,ownedAudioSha256:job.audit?.ownedAudioSha256??null,audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:merged.fileSha256,audioProviders:merged.providers,audioChunks:merged.chunkProvenance,audioSegmentOrigins:merged.segments.map((segment,index)=>({segmentId:index+1,chunkIndex:segment.chunk,startMs:segment.startMs,endMs:segment.endMs})),audioBoundaryReview:merged.boundaryAmbiguities.length?'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED':'NO_NONIDENTICAL_OVERLAP_TEXT',audioBoundaryAmbiguities:merged.boundaryAmbiguities,independentVerification:false};
  // Commit the final audit before making the source visible to summary requests.
  // A stale second finisher cannot reset a report created after the first insert.
  await env.DB.prepare("UPDATE jobs SET status=?,audit_json=?,updated_at=? WHERE id=? AND owner_id=? AND (report_json IS NULL OR report_json='null') AND (audit_json IS NULL OR json_extract(audit_json,'$.audioProcessingCoverage') IS NULL)").bind(audit.status,JSON.stringify(audit),new Date().toISOString(),job.id,'owner').run();
@@ -402,10 +407,9 @@ export async function routeLive(request,env){
   if(action==='native-poll'&&request.method==='POST'){
    if(job.source_type!=='url'||job.status!=='NATIVE_PENDING'||typeof job.audit?.providerJobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(job.audit.providerJobId))throw new InputError('조회할 Supadata 자막 대기 작업이 없습니다.');
    const active=await grantEnv(env,'supadata');
-   const reserve=await env.DB.prepare('UPDATE yta_quota SET consumed=consumed+1,request_count=request_count+1 WHERE provider=? AND consumed+1<=allowance AND request_count<request_limit AND expires_at>?').bind('supadata',Date.now()).run();
-   if(reserve.meta?.changes!==1)throw new ProviderError('QUOTA_EXHAUSTED','조회용 무료 할당 부족');
+   // Provider job-status polling is free; the initial request already reserved its credit.
    const result=await runNativePoll({env:active,jobId:job.audit.providerJobId});
-   if(result.status==='TRANSCRIPT_AVAILABLE')return json(await storeTranscriptResult(env,job,result.segments,'SUPADATA_NATIVE'));
+   if(result.status==='TRANSCRIPT_AVAILABLE')return json(await storeTranscriptResult(env,job,result.segments,'SUPADATA_NATIVE',{providerCompleteness:'NOT_INDEPENDENTLY_VERIFIED'}));
    if(result.status==='NO_CAPTIONS')await updateJob(env,id,'NEED_UPLOAD',null,{...job.audit,status:'NO_CAPTIONS'});
    return json({job:await ownedJob(env,id),persisted:true},202);
   }
@@ -477,6 +481,7 @@ export async function routeLive(request,env){
    if(['GROQ_OWNED_AUDIO','GEMINI_OWNED_AUDIO','MIXED_OWNED_AUDIO'].includes((await sourceOf(env,id))?.provenance))throw new InputError('완료된 전사입니다. 저장된 TXT를 확인하세요.');
    const body=await readJson(request);if(body.rightsConfirmed!==true)throw new InputError('적법하게 보유한 파일 업로드 확인 필요');
    if(typeof body.fileSha256!=='string'||!/^[a-f0-9]{64}$/.test(body.fileSha256))throw new InputError('전체 음성 파일 SHA-256이 필요합니다.');
+   if(job.audit?.ownedAudioSha256&&body.fileSha256!==job.audit.ownedAudioSha256)throw new InputError('재시도 작업의 MP3 SHA-256이 등록된 원본과 다릅니다.');
    const chunks=body.chunks;if(!Array.isArray(chunks)||!chunks.length||chunks.length>160)throw new InputError('음성 조각 계획 오류');let edge=0;
    for(let i=0;i<chunks.length;i++){const c=chunks[i];if(c.index!==i||!Number.isFinite(c.start)||!Number.isFinite(c.end)||c.start<0||c.end<=c.start||c.end-c.start>601||c.start>edge+.1||c.start<Math.max(0,edge-5)||c.end>job.duration_seconds+2)throw new InputError('음성 시간축 불연속/범위 오류');edge=c.end;}
    if(Math.abs(edge-job.duration_seconds)>2)throw new InputError('전체 음성 범위를 포함하는 계획이어야 합니다.');

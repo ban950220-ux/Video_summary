@@ -28,24 +28,50 @@ async function saveJob(env,row){
     .bind(row.id,'owner',row.videoId??null,row.title??null,row.url??null,row.source,row.status,row.durationSeconds,row.createdAt,row.createdAt,JSON.stringify(row.report??null),JSON.stringify(row.audit??null)).run();
   return true;
 }
+async function saveBoundAudioJob(env,row,submissionHash){
+  if(!env?.DB)throw new InputError('중복 없는 음성 작업에는 D1 저장소가 필요합니다.');
+  const column=await env.DB.prepare("SELECT name FROM pragma_table_info('jobs') WHERE name='submission_hash'").first();
+  if(!column)throw new ProviderError('LIVE_SCHEMA_REQUIRED','음성 작업 중복 방지 마이그레이션이 필요합니다.');
+  await ensureLiveSchema(env);
+  const inserted=await env.DB.prepare("INSERT OR IGNORE INTO jobs(id,owner_id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json,submission_hash) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')")
+    .bind(row.id,'owner',row.videoId??null,row.title??null,row.url??null,row.source,row.status,row.durationSeconds,row.createdAt,row.createdAt,JSON.stringify(row.report??null),JSON.stringify(row.audit??null),submissionHash,row.id+':deleting').run();
+  const saved=await env.DB.prepare("SELECT jobs.*, EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING') AS deleting FROM jobs WHERE jobs.id = ? AND jobs.owner_id = ?").bind(row.id+':deleting',row.id,'owner').first();
+  if(!saved){
+    const deleted=await env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING'").bind(row.id+':deleting').first();
+    throw new ProviderError(deleted?'AUDIO_SUBMISSION_DELETED':'AUDIO_SUBMISSION_WRITE_UNCERTAIN',deleted?'이전 작업이 삭제되었습니다. 새 작업을 시작하려면 새 요청을 명시적으로 선택하세요.':'작업 저장 결과가 불확실합니다. 상태를 확인하세요.');
+  }
+  if(saved.deleting)throw new ProviderError('AUDIO_SUBMISSION_DELETED','이전 작업이 삭제되었습니다. 새 작업을 시작하려면 새 요청을 명시적으로 선택하세요.');
+  if(saved.submission_hash!==submissionHash)throw new InputError('요청 식별자가 다른 음성 작업에 이미 사용되었습니다.');
+  return {job:{id:saved.id,createdAt:saved.created_at,videoId:saved.video_id,source:saved.source_type,url:saved.source_url,durationSeconds:saved.duration_seconds,title:saved.title,status:saved.status,audit:JSON.parse(saved.audit_json||'null'),report:JSON.parse(saved.report_json||'null')},persisted:true,reused:inserted.meta?.changes===0};
+}
+async function audioSubmissionHash(quote,title,payload){
+  const id=payload.submissionId,sha=payload.ownedAudioSha256;
+  if(id===undefined&&sha===undefined)return null;
+  if(quote.sourceType!=='audio'||typeof id!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)||typeof sha!=='string'||!/^[a-f0-9]{64}$/.test(sha))throw new InputError('음성 작업 재시도 식별자 또는 MP3 SHA-256 형식이 잘못되었습니다.');
+  const binding=JSON.stringify({sourceType:'audio',videoId:quote.videoId??null,durationSeconds:quote.durationSeconds,title:title??null,ownedAudioSha256:sha});
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(binding)))).map(byte=>byte.toString(16).padStart(2,'0')).join('');
+}
 function preflight(payload){
   const durationSeconds=durationSec(payload.durationSeconds);
   const source=payload.sourceType;
   if(!['url','text','audio'].includes(source)) throw new InputError('지원하지 않는 입력 형식');
-  const videoId=source==='url'?videoIdOf(payload.url):null;
+  const videoId=source==='url'||(source==='audio'&&payload.url!=null)?videoIdOf(payload.url):null;
   return {videoId,sourceType:source,durationSeconds,budget:DEFAULT_POLICY,routes:estimateSource({durationSeconds,sourceType:source,hasCaptions:payload.hasCaptions===true?true:null,hasOwnedAudio:source==='audio'}),warning:'무료 잔여량은 API 키 및 계정 조회 전 UNKNOWN입니다. 실시간 무료 처리 가능을 보장하지 않습니다.'};
 }
 async function handleJob(env,payload){
   const quote=preflight(payload),ts=new Date().toISOString();
   const title=typeof payload.title==='string' ? payload.title.trim().slice(0,160) : null;
-  const job={id:crypto.randomUUID(),createdAt:ts,videoId:quote.videoId,source:quote.sourceType,durationSeconds:quote.durationSeconds,title};
+  const submissionHash=await audioSubmissionHash(quote,title,payload);
+  if(quote.sourceType==='audio'&&quote.videoId&&!submissionHash)throw new InputError('YouTube URL과 보유 MP3를 연결할 때 요청 식별자와 MP3 SHA-256이 필요합니다.');
+  if(submissionHash&&!env?.DB)return dbUnavailable();
+  const job={id:submissionHash?payload.submissionId:crypto.randomUUID(),createdAt:ts,videoId:quote.videoId,source:quote.sourceType,durationSeconds:quote.durationSeconds,title};
   if(quote.sourceType==='url'){
     const row={...job,url:`https://www.youtube.com/watch?v=${quote.videoId}`,status:'NEED_UPLOAD',audit:{status:'VIDEO_SUMMARY_ONLY_UNAVAILABLE',reason:'현재 데모에는 YouTube 직접 접근 API 키가 없으며 영상 내용을 추측하지 않습니다.'},report:null};
     return json({job:row,persisted:await saveJob(env,row),preflight:quote},202);
   }
   if(quote.sourceType==='audio'){
-    const row={...job,status:'NEED_AUDIO_UPLOAD',audit:{status:'NOT_RUN',reason:'보유 MP3 조각 계획과 무료 계정 할당 후 전사할 수 있습니다. 실환경 검증은 별도 필요합니다.'},report:null};
-    return json({job:row,persisted:await saveJob(env,row),preflight:quote},202);
+    const row={...job,url:quote.videoId?`https://www.youtube.com/watch?v=${quote.videoId}`:null,status:'NEED_AUDIO_UPLOAD',audit:{status:'NOT_RUN',ownedAudioSha256:submissionHash?payload.ownedAudioSha256:null,urlAudioAssociation:quote.videoId?'USER_ASSERTED_NOT_VERIFIED':null,reason:'보유 MP3 조각 계획과 무료 계정 할당 후 전사할 수 있습니다. 실환경 검증은 별도 필요합니다.'},report:null};
+    if(submissionHash){const bound=await saveBoundAudioJob(env,row,submissionHash);return json({...bound,preflight:quote},202);}return json({job:row,persisted:await saveJob(env,row),preflight:quote},202);
   }
   if(typeof payload.transcript!=='string'||!payload.transcript.trim()) throw new InputError('전사 텍스트가 필요합니다.');
   const parsed=parseCaptions(payload.transcript,payload.filename||'captions.txt');
@@ -159,7 +185,7 @@ export async function routeApi(request,env){
       return json({error:{code:'NOT_FOUND'}},404);
     }catch(e){
       if(e instanceof InputError) return json({error:{code:e.code,message:e.message}},400);
-      if(e instanceof ProviderError&&e.code==='LIVE_SCHEMA_REQUIRED')return json({error:{code:e.code,message:e.message}},409);
+      if(e instanceof ProviderError&&['LIVE_SCHEMA_REQUIRED','AUDIO_SUBMISSION_DELETED','AUDIO_SUBMISSION_WRITE_UNCERTAIN'].includes(e.code))return json({error:{code:e.code,message:e.message}},409);
       // Do not leak provider credentials, transcripts, or request bodies into logs.
       return json({error:{code:'INTERNAL_ERROR',message:'내부 처리 오류입니다.'}},500);
     }

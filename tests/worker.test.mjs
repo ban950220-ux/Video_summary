@@ -27,6 +27,23 @@ test('URL-only job explicitly needs upload and cannot invent video content',asyn
   assert.equal(j.job.report,null);
   assert.equal(j.persisted,false);
 });
+test('URL-associated audio requires a submission ID and file hash at the API boundary',async()=>{
+  const payload={sourceType:'audio',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:5892,title:'Owned recording'};
+  const quote=await (await worker.fetch(req('/api/preflight',payload),env)).json();
+  assert.equal(quote.videoId,'2hUkTmwYm3A');
+  for(const body of [payload,{...payload,submissionId:'cccccccc-cccc-4ccc-8ccc-cccccccccccc'},{...payload,ownedAudioSha256:'a'.repeat(64)}]){
+    assert.equal((await worker.fetch(req('/api/jobs',body),env)).status,400);
+  }
+  assert.equal((await worker.fetch(req('/api/jobs',{...payload,url:'https://example.com/watch?v=2hUkTmwYm3A'}),env)).status,400);
+  const pureAudio=await worker.fetch(req('/api/jobs',{sourceType:'audio',durationSeconds:5892,title:'Owned MP3'}),env);
+  assert.equal(pureAudio.status,202);
+  assert.equal((await pureAudio.json()).job.videoId,null);
+});
+test('idempotent owned-audio creation requires durable D1 before returning an ID',async()=>{
+  const response=await worker.fetch(req('/api/jobs',{sourceType:'audio',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:60,submissionId:'cccccccc-cccc-4ccc-8ccc-cccccccccccc',ownedAudioSha256:'a'.repeat(64)}),env);
+  assert.equal(response.status,503);
+  assert.equal((await response.json()).error.code,'PERSISTENCE_NOT_CONFIGURED');
+});
 test('SRT local import generates extractive report without false full verification',async()=>{
   const r=await worker.fetch(req('/api/jobs',{sourceType:'text',durationSeconds:120,filename:'demo.srt',transcript:'1\n00:00:00,000 --> 00:02:00,000\n시장 분석입니다.'}),env);
   assert.equal(r.status,201);

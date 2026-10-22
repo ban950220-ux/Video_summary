@@ -14,10 +14,78 @@ import {reportPrompt} from '../src/report.mjs';
 import {encryptProviderKey} from '../src/vault.mjs';
 import {capacityIdentity} from '../src/observed-capacity.mjs';
 const request=(path,method='GET',body)=>new Request('https://test.invalid'+path,{method,headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
-function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema){db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0003_observed_capacity.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0005_reviewed_free_recovery.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0006_unknown_groq_probe.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0007_bounded_free_batch.sql',import.meta.url),'utf8'));const now=Date.now();for(const [provider,model,remaining] of [['gemini','gemini-2.5-flash',{requestsMinute:1000,tokensMinute:1000000000,requestsDay:1000}],['groq','whisper-large-v3-turbo',{requestsMinute:1000,audioSecondsHour:100000,audioSecondsDay:100000}]])db.prepare('INSERT INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES(?,?,?,?,?,?,?,?,1)').run(provider,(model),({gemini:'AI_STUDIO_LIVE',groq:'GROQ_CONSOLE_LIVE'})[provider]+':'+createHash('sha256').update(provider+':NOT_REAL_TEST_KEY').digest('hex'),now,now+60000,JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,now+3600000]))),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,0]))));}const DB={prepare(sql){const make=args=>({sql,args,bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);},async batch(statements){db.exec('BEGIN');try{const results=statements.map(statement=>({meta:{changes:Number(db.prepare(statement.sql).run(...statement.args).changes)}}));db.exec('COMMIT');return results;}catch(error){db.exec('ROLLBACK');throw error;}}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',GROQ_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
+function setup({liveSchema=true}={}){const db=new DatabaseSync(':memory:');db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));if(liveSchema){db.exec(readFileSync(new URL('../migrations/0002_live.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0003_observed_capacity.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0005_reviewed_free_recovery.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0006_unknown_groq_probe.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0007_bounded_free_batch.sql',import.meta.url),'utf8'));db.exec(readFileSync(new URL('../migrations/0017_audio_submission_idempotency.sql',import.meta.url),'utf8'));const now=Date.now();for(const [provider,model,remaining] of [['gemini','gemini-2.5-flash',{requestsMinute:1000,tokensMinute:1000000000,requestsDay:1000}],['groq','whisper-large-v3-turbo',{requestsMinute:1000,audioSecondsHour:100000,audioSecondsDay:100000}]])db.prepare('INSERT INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES(?,?,?,?,?,?,?,?,1)').run(provider,(model),({gemini:'AI_STUDIO_LIVE',groq:'GROQ_CONSOLE_LIVE'})[provider]+':'+createHash('sha256').update(provider+':NOT_REAL_TEST_KEY').digest('hex'),now,now+60000,JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,now+3600000]))),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(Object.keys(remaining).map(key=>[key,0]))));}const DB={prepare(sql){const make=args=>({sql,args,bind(...a){return make(a);},async run(){const r=db.prepare(sql).run(...args);return {meta:{changes:Number(r.changes)}};},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}});return make([]);},async batch(statements){db.exec('BEGIN');try{const results=statements.map(statement=>({meta:{changes:Number(db.prepare(statement.sql).run(...statement.args).changes)}}));db.exec('COMMIT');return results;}catch(error){db.exec('ROLLBACK');throw error;}}};return {db,env:{DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',GEMINI_API_KEY:'NOT_REAL_TEST_KEY',GROQ_API_KEY:'NOT_REAL_TEST_KEY',SUPADATA_API_KEY:'NOT_REAL_TEST_KEY'}};}
 async function job(env){return (await(await routeApi(request('/api/jobs','POST',{sourceType:'text',title:'LOCAL MOCK TEST',filename:'x.srt',transcript:'1\n00:00:00,000 --> 00:01:00,000\n테스트 발언입니다.',durationSeconds:60,persistTranscript:true}),env)).json()).job;}
 async function grant(env,allowance=250000){const r=await routeApi(request('/api/live/quota','PUT',{provider:'gemini',allowance,requestLimit:5,billingDisabled:true,freeOnly:true}),env);assert.equal(r.status,200);}
 async function consent(env,id,sha){const r=await routeApi(request('/api/jobs/'+id+'/audio-consent','POST',{provider:'gemini',fileSha256:sha,consent:true}),env);assert.equal(r.status,200);}
+test('audio submission ID is atomic, replayable, and bound to the exact request',async()=>{
+ const {db,env}=setup();
+ try{
+  const payload={sourceType:'audio',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:600,title:'Owned recording',submissionId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',ownedAudioSha256:'a'.repeat(64)};
+  const create=async body=>{const response=await routeApi(request('/api/jobs','POST',body),env);return {status:response.status,body:await response.json()};};
+  const [first,parallel]=await Promise.all([create(payload),create(payload)]);
+  assert.equal(first.status,202);assert.equal(parallel.status,202);
+  assert.equal(first.body.job.id,payload.submissionId);assert.equal(parallel.body.job.id,payload.submissionId);
+  assert.deepEqual([first.body.reused,parallel.body.reused].sort(),[false,true]);
+  const replay=await create(payload);assert.equal(replay.status,202);assert.equal(replay.body.reused,true);
+  db.prepare('UPDATE jobs SET status=? WHERE id=?').run('NEED_REVIEW',payload.submissionId);
+  const later=await create(payload);assert.equal(later.body.reused,true);assert.equal(later.body.job.status,'NEED_REVIEW');
+  for(const change of [{title:'Different title'},{ownedAudioSha256:'b'.repeat(64)},{url:'https://youtu.be/abcdefghi12'},{durationSeconds:601}]){
+   const conflicting=await create({...payload,...change});assert.equal(conflicting.status,400);assert.equal(conflicting.body.error?.code,'INVALID_INPUT');
+  }
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM jobs').get().n,1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_audio').get().n,0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_operations').get().n,0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM usage_events').get().n,0);
+  const planned=await routeApi(request('/api/jobs/'+payload.submissionId+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:'b'.repeat(64),chunks:[{index:0,start:0,end:600}]}),env);
+  assert.equal(planned.status,400);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_audio').get().n,0);
+  assert.equal((await routeApi(request('/api/jobs/'+payload.submissionId,'DELETE'),env)).status,200);
+  const afterDelete=await create(payload);assert.equal(afterDelete.status,409);assert.equal(afterDelete.body.error?.code,'AUDIO_SUBMISSION_DELETED');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM jobs').get().n,0);
+  assert.equal(db.prepare("SELECT state FROM yta_operations WHERE id=?").get(payload.submissionId+':deleting').state,'DELETING');
+ }finally{db.close();}
+});
+test('local SQLite rejects URL-associated audio without idempotency fields before creating a job',async()=>{
+ const {db,env}=setup();
+ try{
+  db.exec('ALTER TABLE jobs DROP COLUMN submission_hash');
+  const body={sourceType:'audio',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:600};
+  for(let attempt=0;attempt<2;attempt++){
+   const response=await routeApi(request('/api/jobs','POST',body),env);
+   assert.equal(response.status,400);
+  }
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM jobs').get().n,0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_audio').get().n,0);
+  const first=await parsedAudio(routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600}),env));
+  const second=await parsedAudio(routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:600}),env));
+  assert.notEqual(first.job.id,second.job.id);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM jobs').get().n,2);
+ }finally{db.close();}
+});
+async function parsedAudio(promise){const response=await promise;assert.equal(response.status,202);return response.json();}
+test('concurrent conflicting audio submissions have one winner and no planned work',async()=>{
+ const {db,env}=setup();
+ try{
+  const common={sourceType:'audio',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:600,submissionId:'dddddddd-dddd-4ddd-8ddd-dddddddddddd'};
+  const [a,b]=await Promise.all(['a','b'].map(letter=>routeApi(request('/api/jobs','POST',{...common,ownedAudioSha256:letter.repeat(64)}),env)));
+  assert.deepEqual([a.status,b.status].sort(),[202,400]);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM jobs').get().n,1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_audio').get().n,0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_operations').get().n,0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM usage_events').get().n,0);
+ }finally{db.close();}
+});
+test('missing idempotency migration fails before an owned-audio job or operation is created',async()=>{
+ const {db,env}=setup();
+ try{
+  db.exec('ALTER TABLE jobs DROP COLUMN submission_hash');
+  const response=await routeApi(request('/api/jobs','POST',{sourceType:'audio',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:600,submissionId:'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',ownedAudioSha256:'a'.repeat(64)}),env);
+  assert.equal(response.status,409);
+  assert.equal((await response.json()).error.code,'LIVE_SCHEMA_REQUIRED');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM jobs').get().n,0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_operations').get().n,0);
+ }finally{db.close();}
+});
 const valid=()=>({summary:[{text:'테스트 발언',evidenceIds:[1]}],chapters:[{text:'시작 발언',evidenceIds:[1]}],claims:[],numbers:[],critical:[],conclusion:'외부 사실 미검증'});
 test('history exposes native polling only for a valid pending URL job and rejects other POSTs before quota',async()=>{
  const {db,env}=setup();
@@ -38,6 +106,50 @@ test('history exposes native polling only for a valid pending URL job and reject
   assert.equal((await routeApi(request('/api/jobs/'+url.id+'/native-poll','POST',{}),env)).status,400);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM yta_quota').get().n,0);
  }finally{db.close();}
+});
+test('native job polling does not reserve another provider credit',async()=>{
+ const {db,env}=setup(),originalFetch=globalThis.fetch;
+ try{
+  const job=(await(await routeApi(request('/api/jobs','POST',{sourceType:'url',url:'https://www.youtube.com/watch?v=2hUkTmwYm3A',durationSeconds:60}),env)).json()).job;
+  db.prepare('UPDATE jobs SET status=?,audit_json=? WHERE id=?').run('NATIVE_PENDING',JSON.stringify({providerJobId:'native-123'}),job.id);
+  assert.equal((await routeApi(request('/api/live/quota','PUT',{provider:'supadata',allowance:1,requestLimit:1,billingDisabled:true,freeOnly:true}),env)).status,200);
+  db.prepare('UPDATE yta_quota SET consumed=1,request_count=1 WHERE provider=?').run('supadata');
+  let requests=0;
+  globalThis.fetch=async url=>{requests++;assert.equal(new URL(url).pathname,'/v1/transcript/native-123');return new Response(JSON.stringify({status:'active'}),{status:200});};
+  const response=await routeApi(request('/api/jobs/'+job.id+'/native-poll','POST',{}),env);
+  assert.equal(response.status,202);
+  assert.equal(requests,1);
+  assert.deepEqual(Object.values(db.prepare('SELECT consumed,request_count FROM yta_quota WHERE provider=?').get('supadata')),[1,1]);
+ }finally{globalThis.fetch=originalFetch;db.close();}
+});
+for(const mode of ['immediate','poll'])test('out-of-duration native '+mode+' result leaves existing source and status unchanged',async()=>{
+ const {db,env}=setup(),originalFetch=globalThis.fetch;
+ try{
+  const created=(await(await routeApi(request('/api/jobs','POST',{sourceType:'url',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:200}),env)).json()).job;
+  const id=created.id,now=new Date().toISOString(),oldSegments=[{id:1,startMs:0,endMs:1000,text:'already stored'}],oldAudit=mode==='poll'?{status:'NATIVE_PENDING',providerJobId:'native-123'}:{status:'TRANSCRIPT_UNVERIFIED'};
+  db.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').run(id,'already stored',JSON.stringify(oldSegments),'SUPADATA_NATIVE',now);
+  db.prepare('UPDATE jobs SET status=?,audit_json=? WHERE id=?').run(mode==='poll'?'NATIVE_PENDING':'TRANSCRIPT_UNVERIFIED',JSON.stringify(oldAudit),id);
+  const beforeJob=db.prepare('SELECT status,audit_json,report_json FROM jobs WHERE id=?').get(id),beforeSource=db.prepare('SELECT raw,segments_json,provenance FROM yta_sources WHERE job_id=?').get(id);
+  assert.equal((await routeApi(request('/api/live/quota','PUT',{provider:'supadata',allowance:1,requestLimit:2,billingDisabled:true,freeOnly:true}),env)).status,200);
+  let calls=0;globalThis.fetch=async url=>{calls++;assert.equal(new URL(url).pathname,mode==='poll'?'/v1/transcript/native-123':'/v1/transcript');const content=[{text:'inside range',offset:0,duration:1000},{text:'out of range',offset:300000,duration:1000}];return Response.json(mode==='poll'?{status:'completed',result:{content}}:{content});};
+  const response=await routeApi(request('/api/jobs/'+id+'/'+(mode==='poll'?'native-poll':'native'),'POST',{}),env);
+  assert.notEqual(response.status,200);assert.equal(calls,1);
+  assert.deepEqual({...db.prepare('SELECT status,audit_json,report_json FROM jobs WHERE id=?').get(id)},{...beforeJob});
+  assert.deepEqual({...db.prepare('SELECT raw,segments_json,provenance FROM yta_sources WHERE job_id=?').get(id)},{...beforeSource});
+ }finally{globalThis.fetch=originalFetch;db.close();}
+});
+test('native captions inside declared duration persist with unverified audio coverage',async()=>{
+ const {db,env}=setup(),originalFetch=globalThis.fetch;
+ try{
+  const job=(await(await routeApi(request('/api/jobs','POST',{sourceType:'url',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:200}),env)).json()).job;
+  assert.equal((await routeApi(request('/api/live/quota','PUT',{provider:'supadata',allowance:1,requestLimit:1,billingDisabled:true,freeOnly:true}),env)).status,200);
+  globalThis.fetch=async()=>Response.json({content:[{text:'start',offset:0,duration:1000},{text:'end',offset:199000,duration:1000}]});
+  const result=await routeApi(request('/api/jobs/'+job.id+'/native','POST',{}),env);
+  assert.equal(result.status,200);
+  const saved=(await result.json()).job;
+  assert.equal(saved.audit.status,'TRANSCRIPT_UNVERIFIED');assert.equal(saved.audit.providerCompleteness,'NOT_INDEPENDENTLY_VERIFIED');
+  assert.equal(JSON.parse(db.prepare('SELECT segments_json FROM yta_sources WHERE job_id=?').get(job.id).segments_json).at(-1).endMs,200000);
+ }finally{globalThis.fetch=originalFetch;db.close();}
 });
 async function freeBatchFixture(){
  const {db,env}=setup(),bytes=new Uint8Array(383*417);for(let i=0;i<383;i++)bytes.set([255,251,144,0],i*417);
@@ -463,7 +575,7 @@ test('owner-reviewed Groq 429 recovery preserves failed history, completed chunk
  const upload=(path,index,confirmed=false,operationId=null)=>routeApi(new Request('https://test.invalid'+path+'/audio-chunk?index='+index+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream',...(confirmed?{'x-provider-log-429-no-output-confirmed':'true','x-provider-log-429-operation-id':operationId}:{})},body:bytes}),env);
  const grantGroq=()=>routeApi(request('/api/live/quota','PUT',{provider:'groq',allowance:100,requestLimit:5,billingDisabled:true,freeOnly:true}),env);
  try{
-  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',durationSeconds:seconds*2}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
+  const created=await(await routeApi(request('/api/jobs','POST',{sourceType:'audio',url:'https://youtu.be/2hUkTmwYm3A',durationSeconds:seconds*2,submissionId:'ffffffff-ffff-4fff-8fff-ffffffffffff',ownedAudioSha256:sha}),env)).json(),id=created.job.id,path='/api/jobs/'+id;
   assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:sha,chunks:[{index:0,start:0,end:seconds},{index:1,start:seconds,end:seconds*2}]}),env)).status,200);
   assert.equal((await grantGroq()).status,200);assert.equal((await upload(path,0)).status,200);
   const failed=await upload(path,1);assert.equal(failed.status,409);assert.equal((await failed.json()).error.code,'429');
@@ -477,7 +589,7 @@ test('owner-reviewed Groq 429 recovery preserves failed history, completed chunk
   assert.equal((await upload(path,1,true,progress.chunks[1].reviewOperationId)).status,200);assert.equal(calls,3);
   const original=db.prepare('SELECT state,error_code,result_json FROM yta_operations WHERE id=?').get(id+':audio:1');assert.equal(original.state,'FAILED_UNCERTAIN');assert.equal(original.error_code,'429');assert.equal(original.result_json,null);
   assert.equal(db.prepare('SELECT state FROM yta_operations WHERE id=?').get(id+':audio:1:reviewed429:1').state,'DONE');
-  const finished=await(await routeApi(request(path+'/audio-finish','POST',{}),env)).json();assert.equal(finished.persisted,true);assert.equal(finished.job.report,null);assert.match(await(await routeApi(request(path+'/export?format=txt'),env)).text(),/전사 1/);
+  const finished=await(await routeApi(request(path+'/audio-finish','POST',{}),env)).json();assert.equal(finished.persisted,true);assert.equal(finished.job.report,null);assert.equal(finished.job.audit.urlAudioAssociation,'USER_ASSERTED_NOT_VERIFIED');assert.equal(finished.job.source_url,'https://www.youtube.com/watch?v=2hUkTmwYm3A');assert.match(await(await routeApi(request(path+'/export?format=txt'),env)).text(),/전사 1/);
   const cleaned=await routeApi(request(path+'/audio-cleanup','POST',{confirmTemporaryTranscriptCleanup:true}),env);assert.equal(cleaned.status,200);assert.equal(db.prepare('SELECT state,error_code FROM yta_operations WHERE id=?').get(id+':audio:1').error_code,'429');
  }finally{globalThis.fetch=old;db.close();}
 });
