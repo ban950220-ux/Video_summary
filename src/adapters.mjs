@@ -58,9 +58,10 @@ export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,
   // This upload path is intentionally only a building block; the route must reserve quota BEFORE invoking it.
   const data=new FormData();data.append('file',new Blob([bytes],{type:mime||'application/octet-stream'}),name);
   data.append('model','whisper-large-v3-turbo');data.append('response_format','verbose_json');data.append('temperature','0');data.append('timestamp_granularities[]','segment');
+  const requestAudioSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(b=>b.toString(16).padStart(2,'0')).join('');
   await beforeFetch?.();
   const result=await requestJson('https://api.groq.com/openai/v1/audio/transcriptions',{method:'POST',headers:{Authorization:`Bearer ${env.GROQ_API_KEY}`},body:data},fetchFn);
-  return {provider:'groq',model:'whisper-large-v3-turbo',text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION',safeRateLimit:result.safeRateLimit};
+  return {provider:'groq',model:'whisper-large-v3-turbo',requestAudioSha256,text:result.text,segments:result.segments||[],durationSeconds,usageProvenance:'EXACT_APP_FILE_DURATION',safeRateLimit:result.safeRateLimit};
 }
 function safeGroqSummaryHeaders(headers){
  const integer=(name,max)=>{const value=headers.get(name);return value!==null&&/^\d{1,9}$/.test(value)&&Number(value)<=max?Number(value):null;};
