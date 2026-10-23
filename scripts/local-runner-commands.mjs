@@ -13,5 +13,7 @@ export async function conversionCommand({workDir,downloadedPath}){
  const root=await realpath(workDir),source=await realpath(downloadedPath),tail=relative(root,source);
  if(!tail||tail.startsWith('..')||isAbsolute(tail)||!['.m4a','.mp3','.webm','.ogg','.opus','.mp4'].includes(extname(source).toLowerCase())||!(await stat(source)).isFile())fail('RUNNER_SOURCE_PATH_INVALID');
  const output=join(root,'audio.mp3');try{await lstat(output);fail('RUNNER_OUTPUT_EXISTS');}catch(error){if(error.code!=='ENOENT')throw error;}
- return {executable:'ffmpeg',args:['-nostdin','-n','-i',source,'-vn','-ac','1','-ar','16000','-codec:a','libmp3lame','-f','mp3',output],output};
+ // Frame slices must be independently decodable. Disable cross-frame reservoir
+ // references and whole-file seek metadata; keep a bounded, explicit bitrate.
+ return {executable:'ffmpeg',args:['-nostdin','-n','-i',source,'-vn','-ac','1','-ar','16000','-codec:a','libmp3lame','-b:a','64k','-reservoir','0','-write_xing','0','-f','mp3',output],output};
 }
