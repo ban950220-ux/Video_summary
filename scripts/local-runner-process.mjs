@@ -5,10 +5,12 @@ import {realpath,stat} from 'node:fs/promises';
 import {dirname,isAbsolute,relative} from 'node:path';
 import {acquisitionCommands,canonicalYouTubeUrl} from '../src/local-runner-contract.mjs';
 import {conversionCommand} from './local-runner-commands.mjs';
+import {isBoundedAcquisitionCommand} from './local-acquisition-contract.mjs';
 
 const fail=code=>{throw Object.assign(new Error(code),{code});};
 const permitted=new Set(['yt-dlp','ffmpeg','ffprobe']);
 async function assertCommandTemplate(command,cwd){
+ if(isBoundedAcquisitionCommand(command,cwd))return;
  const args=command.args;
  if(command.executable==='yt-dlp'){
   const url=args.at(-1),canonical=canonicalYouTubeUrl(url);
@@ -25,7 +27,7 @@ async function assertCommandTemplate(command,cwd){
 }
 // Caller supplies an argv description made by local-runner-commands. There is
 // deliberately no shell, cookies, inherited config or token handling here.
-export async function runLocalCommand(command,{cwd,toolPaths,toolHashes,spawnImpl=spawn,timeoutMs=120000,maxOutputBytes=65536}={}){
+export async function runLocalCommand(command,{cwd,toolPaths,toolHashes,spawnImpl=spawn,timeoutMs=120000,maxOutputBytes=65536,beforeSpawn=()=>{},signal}={}){
  if(!permitted.has(command?.executable)||!Array.isArray(command.args)||!command.args.length||command.args.some(arg=>typeof arg!=='string'||/[\r\n\0]/.test(arg))||typeof cwd!=='string'||!cwd||!Number.isSafeInteger(timeoutMs)||timeoutMs<1000||timeoutMs>7200000||!Number.isSafeInteger(maxOutputBytes)||maxOutputBytes<1024||maxOutputBytes>65536)fail('RUNNER_COMMAND_INVALID');
  await assertCommandTemplate(command,cwd);
  const proposed=toolPaths?.[command.executable],expected=toolHashes?.[command.executable];
@@ -33,12 +35,17 @@ export async function runLocalCommand(command,{cwd,toolPaths,toolHashes,spawnImp
  const executable=await realpath(proposed);if(!(await stat(executable)).isFile())fail('RUNNER_TOOL_UNPINNED');
  const hash=createHash('sha256');for await(const block of createReadStream(executable))hash.update(block);
  if(hash.digest('hex')!==expected)fail('RUNNER_TOOL_CHANGED');
+ if(typeof beforeSpawn!=='function'||beforeSpawn()?.then)fail('RUNNER_COMMAND_GUARD_INVALID');
+ if(signal?.aborted)fail('RUNNER_COMMAND_ABORTED');
  const env={SystemRoot:process.env.SystemRoot,TEMP:process.env.TEMP,TMP:process.env.TMP,PATH:dirname(executable)};
  const child=spawnImpl(executable,command.args,{cwd,shell:false,windowsHide:true,stdio:['ignore','pipe','pipe'],env});
  let output='',error='',bytes=0,settled=false;
  return new Promise((resolve,reject)=>{
-  const timer=setTimeout(()=>{child.kill();finish(Object.assign(new Error('RUNNER_COMMAND_TIMEOUT'),{code:'RUNNER_COMMAND_TIMEOUT'}));},timeoutMs);
-  const finish=(failure,result)=>{if(settled)return;settled=true;clearTimeout(timer);if(failure)reject(failure);else resolve(result);};
+  let timer;
+  const abort=()=>{child.kill();finish(Object.assign(new Error('RUNNER_COMMAND_ABORTED'),{code:'RUNNER_COMMAND_ABORTED'}));};
+  const finish=(failure,result)=>{if(settled)return;settled=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);if(failure)reject(failure);else resolve(result);};
+  timer=setTimeout(()=>{child.kill();finish(Object.assign(new Error('RUNNER_COMMAND_TIMEOUT'),{code:'RUNNER_COMMAND_TIMEOUT'}));},timeoutMs);
+  signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();
   const append=(part,which)=>{bytes+=part.length;if(bytes>maxOutputBytes){child.kill();finish(Object.assign(new Error('RUNNER_OUTPUT_TOO_LARGE'),{code:'RUNNER_OUTPUT_TOO_LARGE'}));return;}if(which==='stdout')output+=part.toString('utf8');else error+=part.toString('utf8');};
   child.stdout.on('data',part=>append(part,'stdout'));child.stderr.on('data',part=>append(part,'stderr'));
   child.once('error',failure=>finish(failure));child.once('close',code=>code===0?finish(null,{stdout:output,stderr:error,code}):finish(Object.assign(new Error('RUNNER_COMMAND_FAILED'),{code:'RUNNER_COMMAND_FAILED',exitCode:code})));
