@@ -82,6 +82,12 @@ export function validateStoredBaseline(row,expected=source()){
   return exact(r,keys)&&r.kind==='REGISTERED_MANAGED_SCHEMA_BASELINE_V1'&&uuid(r.id)&&row.id===r.id&&row.database_id===target.databaseId&&r.accountId===target.accountId&&r.databaseId===target.databaseId&&r.historyClaim==='UNKNOWN_NO_HISTORICAL_APPLIED_ROWS'&&r.schemaFingerprint===expected.fingerprint&&r.catalogDigest===expected.catalogDigest&&['observationDigest','snapshotDigest','approvalDigest','controlsDigest','restoreBookmarkDigest'].every(k=>hash(r[k]))&&uuid(r.windowId)&&[r.approvedAt,r.expiresAt,r.windowStartsAt,r.windowEndsAt].every(v=>Number.isFinite(milliseconds(v)))&&row.registered_at_ms>=milliseconds(r.approvedAt)&&row.registered_at_ms<milliseconds(r.expiresAt)&&milliseconds(r.expiresAt)-milliseconds(r.approvedAt)<=300000&&milliseconds(r.windowStartsAt)<=milliseconds(r.approvedAt)&&milliseconds(r.expiresAt)<=milliseconds(r.windowEndsAt)&&milliseconds(r.windowEndsAt)-milliseconds(r.windowStartsAt)<=900000;
  }catch{return false;}
 }
+
+// Pure preflight for the interactive operator adapter. This performs the same
+// checks as registration but never authorizes a DB object or executes SQL.
+export function validateRegistrationRequest(input,{now=Date.now()}={}){
+ return requestRecord(input,source(),now);
+}
 export async function inspectRegisteredBaseline(db){
  const metadata=(await statement(db,metadataSelect).all()).results;
  if(!metadata?.length)return {state:'ABSENT',row:null};
