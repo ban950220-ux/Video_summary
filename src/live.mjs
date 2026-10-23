@@ -112,11 +112,13 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
   if(blocking)throw new ProviderError('RATE_LIMIT_PENDING','무료 요약 호출 간격을 지키기 위해 잠시 대기 중입니다. 약 13초 뒤 이력에서 요약 생성을 다시 누르세요.');
   throw new ProviderError('OPERATION_BUSY','중복 요청 차단');
  }
+ env.LOCAL_RUNNER_AUDIO_ACCOUNTING?.('QUOTA_PENDING');
  const reserve=await env.DB.prepare('UPDATE yta_quota SET consumed=consumed+?,request_count=request_count+1 WHERE provider=? AND consumed+?<=allowance AND request_count<request_limit AND expires_at>? AND billing_disabled=1').bind(units,provider,units,Date.now()).run();
- if(reserve.meta?.changes!==1){await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=? WHERE id=?').bind('BLOCKED','QUOTA_EXHAUSTED',id).run();throw new ProviderError('QUOTA_EXHAUSTED','무료 사용량 또는 요청 횟수 한도에 도달했습니다.');}
+ if(reserve.meta?.changes!==1){env.LOCAL_RUNNER_AUDIO_ACCOUNTING?.('QUOTA_ZERO');await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=? WHERE id=?').bind('BLOCKED','QUOTA_EXHAUSTED',id).run();throw new ProviderError('QUOTA_EXHAUSTED','무료 사용량 또는 요청 횟수 한도에 도달했습니다.');}
  let capacity;
  if(provider==='groq'||provider==='gemini'){
-  try{capacity=await reserveObservedCapacity(env,{provider,operationId:id,jobId:job,bounds:capacityBounds(provider,units)});}catch(error){await releaseUndispatchedGrant(env,id,provider,units,'CAPACITY_WAIT',active);throw error;}
+  env.LOCAL_RUNNER_AUDIO_ACCOUNTING?.('CAPACITY_PENDING');
+  try{capacity=await reserveObservedCapacity(env,{provider,operationId:id,jobId:job,bounds:capacityBounds(provider,units)});env.LOCAL_RUNNER_AUDIO_ACCOUNTING?.('CAPACITY_KNOWN');}catch(error){await releaseUndispatchedGrant(env,id,provider,units,'CAPACITY_WAIT',active);throw error;}
  }
  onNewCall?.();
  try{
@@ -134,7 +136,7 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
 }
 async function releaseUndispatchedGrant(env,id,provider,units,reason,active){
  const marked=await env.DB.prepare("UPDATE yta_operations SET state='BLOCKED',error_code=?,created_at=? WHERE id=? AND state='CLAIMED'").bind(reason,new Date().toISOString(),id).run();
- if(marked.meta?.changes===1)await env.DB.prepare('UPDATE yta_quota SET consumed=consumed-?,request_count=request_count-1 WHERE provider=? AND confirmed_at=? AND expires_at IN (?,0) AND consumed>=? AND request_count>0').bind(units,provider,active.quotaConfirmedAt,active.quotaExpiresAt,units).run();
+ if(marked.meta?.changes===1){const refunded=await env.DB.prepare('UPDATE yta_quota SET consumed=consumed-?,request_count=request_count-1 WHERE provider=? AND confirmed_at=? AND expires_at IN (?,0) AND consumed>=? AND request_count>0').bind(units,provider,active.quotaConfirmedAt,active.quotaExpiresAt,units).run();if(refunded.meta?.changes===1)env.LOCAL_RUNNER_AUDIO_ACCOUNTING?.('QUOTA_ZERO');}
 }
 async function assertCapacityBeforeDispatch(env,active,provider){
  await assertCurrentGrant(env,active,provider);
@@ -175,16 +177,18 @@ async function storeTranscriptResult(env,job,segments,provenance,extra={}){
  const audit={...transcriptAudit(clean,job.duration_seconds,false),...auditGaps(clean,job.duration_seconds),...extra};
  await commitNativeTranscript(env,job,audit.status,audit,{raw,segments:clean,provenance});return {job:await ownedJob(env,job.id),source:{segments:clean,provenance},persisted:true};
 }
-async function storeAudioTranscriptOnce(env,job,merged){
+async function storeAudioTranscriptOnce(env,job,merged,rows){
  const raw=merged.segments.map(segment=>segment.text).join('\n'),clean=normalizeSegments(merged.segments);
  if(new TextEncoder().encode(raw+JSON.stringify(clean)).byteLength>1500000)throw new InputError('보관 원문 크기 제한');
  const audit={...transcriptAudit(clean,job.duration_seconds,false),...auditGaps(clean,job.duration_seconds),urlAudioAssociation:job.audit?.urlAudioAssociation??null,ownedAudioSha256:job.audit?.ownedAudioSha256??null,audioProcessing:'ALL_PLANNED_CHUNKS_PROCESSED',audioProcessingCoverage:1,audioFileSha256:merged.fileSha256,audioProviders:merged.providers,audioChunks:merged.chunkProvenance,audioSegmentOrigins:merged.segments.map((segment,index)=>({segmentId:index+1,chunkIndex:segment.chunk,startMs:segment.startMs,endMs:segment.endMs})),audioBoundaryReview:merged.boundaryAmbiguities.length?'NONIDENTICAL_OVERLAP_TEXT_RETAINED_UNVERIFIED':'NO_NONIDENTICAL_OVERLAP_TEXT',audioBoundaryAmbiguities:merged.boundaryAmbiguities,independentVerification:false};
  // Commit the final audit before making the source visible to summary requests.
  // A stale second finisher cannot reset a report created after the first insert.
- await env.DB.prepare("UPDATE jobs SET status=?,audit_json=?,updated_at=? WHERE id=? AND owner_id=? AND (report_json IS NULL OR report_json='null') AND (audit_json IS NULL OR json_extract(audit_json,'$.audioProcessingCoverage') IS NULL)").bind(audit.status,JSON.stringify(audit),new Date().toISOString(),job.id,'owner').run();
- await env.DB.prepare('INSERT OR IGNORE INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?)').bind(job.id,raw,JSON.stringify(clean),audioProvenance(merged.providers),new Date().toISOString()).run();
+ const snapshot=JSON.stringify(rows.map(r=>({index:r.chunk_index,start:r.start_sec,end:r.end_sec,result:r.result_json}))),timestamp=new Date().toISOString();
+ const update=env.DB.prepare("UPDATE jobs SET status=?,audit_json=?,updated_at=? WHERE id=? AND owner_id='owner' AND source_type IS ? AND source_url IS ? AND duration_seconds IS ? AND audit_json IS ? AND report_json IS ? AND (report_json IS NULL OR report_json='null') AND NOT EXISTS(SELECT 1 FROM yta_sources WHERE job_id=jobs.id) AND NOT EXISTS(SELECT 1 FROM yta_operations WHERE id=jobs.id||':deleting' AND provider='deletion') AND (SELECT COUNT(*) FROM yta_audio WHERE job_id=jobs.id)=json_array_length(?) AND (SELECT COUNT(*) FROM yta_audio a JOIN json_each(?) s ON a.chunk_index=json_extract(s.value,'$.index') WHERE a.job_id=jobs.id AND a.state='DONE' AND a.start_sec=json_extract(s.value,'$.start') AND a.end_sec=json_extract(s.value,'$.end') AND a.result_json=json_extract(s.value,'$.result'))=json_array_length(?)").bind(audit.status,JSON.stringify(audit),timestamp,job.id,job.source_type,job.source_url,job.duration_seconds,job.audit_json,job.report_json,snapshot,snapshot,snapshot);
+ const insert=env.DB.prepare('INSERT OR IGNORE INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) SELECT ?,?,?,?,? WHERE changes()=1').bind(job.id,raw,JSON.stringify(clean),audioProvenance(merged.providers),timestamp);
+ await env.DB.batch([update,insert]);
  const source=await sourceOf(env,job.id),savedJob=await ownedJob(env,job.id);
- if(source?.provenance!==audioProvenance(merged.providers)||source.raw!==raw||JSON.stringify(source.segments)!==JSON.stringify(clean)||savedJob.audit?.audioFileSha256!==merged.fileSha256||savedJob.audit?.audioProcessingCoverage!==1)throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 전사 또는 완료 기록이 일치하지 않습니다.');
+ if(savedJob.source_type!==job.source_type||savedJob.source_url!==job.source_url||savedJob.duration_seconds!==job.duration_seconds||source?.provenance!==audioProvenance(merged.providers)||source.raw!==raw||JSON.stringify(source.segments)!==JSON.stringify(clean)||savedJob.audit?.audioFileSha256!==merged.fileSha256||savedJob.audit?.audioProcessingCoverage!==1)throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','저장된 전사 또는 완료 기록이 일치하지 않습니다.');
  return {job:savedJob,source:{segments:clean,provenance:audioProvenance(merged.providers)},persisted:true};
 }
 function completedAudio(rows,duration){
@@ -382,6 +386,14 @@ export async function routeLive(request,env){
   // Durable tombstone is written before any private content is cleared. Late provider responses must observe it in their own UPDATE statement.
   await env.DB.prepare("INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at) SELECT ?,?,'deletion',0,'DELETING',? WHERE EXISTS (SELECT 1 FROM jobs WHERE id=? AND owner_id=?)").bind(id+':deleting',id,new Date().toISOString(),id,'owner').run();
   const marker=await env.DB.prepare('SELECT provider,state FROM yta_operations WHERE id=? AND job_id=?').bind(id+':deleting',id).first();if(marker?.provider!=='deletion'||marker.state!=='DELETING')throw new ProviderError('DELETE_MARKER_INVALID','삭제 상태를 검토하세요.');
+  const runnerTables=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('yta_local_runner_outbox','yta_local_runner_batches','yta_local_runner_transfers','yta_local_runner_audio_attempts','yta_local_runner_audio_resumes')").bind().all()).results||[];
+  const scrubRunner=[];
+  if(runnerTables.some(row=>row.name==='yta_local_runner_outbox'))scrubRunner.push(env.DB.prepare("UPDATE yta_local_runner_outbox SET canonical_url='',source_url_snapshot='',video_id='',manifest_json=NULL,lease_owner=NULL,lease_nonce=NULL,lease_expires_at=NULL,state=CASE WHEN state='DISPATCH_UNCERTAIN' THEN state ELSE 'CANCELLED' END,revision=revision+1 WHERE job_id=? AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting'));
+  if(runnerTables.some(row=>row.name==='yta_local_runner_batches'))scrubRunner.push(env.DB.prepare("UPDATE yta_local_runner_batches SET approval_json='{}',state='CANCELLED' WHERE job_id=? AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting'));
+  if(runnerTables.some(row=>row.name==='yta_local_runner_transfers'))scrubRunner.push(env.DB.prepare("UPDATE yta_local_runner_transfers SET receipt_json=NULL WHERE job_id=? AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting'));
+  if(runnerTables.some(row=>row.name==='yta_local_runner_audio_attempts'))scrubRunner.push(env.DB.prepare("UPDATE yta_local_runner_audio_attempts SET evidence_json=NULL WHERE job_id=? AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting'));
+  if(runnerTables.some(row=>row.name==='yta_local_runner_audio_resumes'))scrubRunner.push(env.DB.prepare("UPDATE yta_local_runner_audio_resumes SET approval_json='{}',state='USED' WHERE job_id=? AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting'));
+  if(scrubRunner.length)await env.DB.batch(scrubRunner);
   const receiptTable=await env.DB.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='yta_paid_summary_receipts'").bind().first();
   if(receiptTable)await env.DB.prepare("UPDATE yta_paid_summary_receipts SET response_json=NULL,response_sha256=NULL,response_complete=0,state='SOURCE_DELETED',error_code='PAID_SOURCE_DELETED',updated_at=? WHERE job_id=? AND owner_id='owner'").bind(new Date().toISOString(),id).run();
   try{await persistGroqSettlementsForDeletion(env,id,job,settlements);}catch{} // A failed accounting seal must not retain private source content.
@@ -519,7 +531,9 @@ export async function routeLive(request,env){
    if(Math.abs(edge-job.duration_seconds)>2)throw new InputError('전체 음성 범위를 포함하는 계획이어야 합니다.');
    const exists=await env.DB.prepare('SELECT COUNT(*) AS n FROM yta_audio WHERE job_id=?').bind(id).first();
    if(exists.n>0){const prior=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results; if(prior.length!==chunks.length||prior.some((c,i)=>Math.abs(c.start_sec-chunks[i].start)>.01||Math.abs(c.end_sec-chunks[i].end)>.01||JSON.parse(c.result_json||'{}').fileSha256!==body.fileSha256))throw new InputError('기존 음성 파일 또는 계획과 다릅니다.');return json({planned:true,reused:true});}
-   for(const c of chunks)await env.DB.prepare('INSERT INTO yta_audio(job_id,chunk_index,start_sec,end_sec,state,result_json) VALUES(?,?,?,?,?,?)').bind(id,c.index,c.start,c.end,'PLANNED',JSON.stringify({fileSha256:body.fileSha256})).run();
+   const planned=chunks.map(c=>env.DB.prepare("INSERT INTO yta_audio(job_id,chunk_index,start_sec,end_sec,state,result_json) SELECT id,?,?,?,'PLANNED',? FROM jobs WHERE id=? AND owner_id='owner' AND source_type=? AND source_url IS ? AND duration_seconds=? AND audit_json IS ? AND report_json IS ? AND (report_json IS NULL OR report_json='null') AND NOT EXISTS(SELECT 1 FROM yta_sources WHERE job_id=jobs.id) AND NOT EXISTS(SELECT 1 FROM yta_operations WHERE id=jobs.id||':deleting' AND provider='deletion')").bind(c.index,c.start,c.end,JSON.stringify({fileSha256:body.fileSha256}),id,job.source_type,job.source_url,job.duration_seconds,job.audit_json,job.report_json));
+   try{const results=await env.DB.batch(planned);if(results.some(result=>result.meta?.changes!==1))throw new ProviderError('AUDIO_PLAN_STATE_CHANGED','Audio plan state changed before persistence.');}
+   catch(error){const saved=(await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? ORDER BY chunk_index').bind(id).all()).results||[];if(saved.length===chunks.length&&saved.every((c,i)=>c.start_sec===chunks[i].start&&c.end_sec===chunks[i].end&&JSON.parse(c.result_json||'{}').fileSha256===body.fileSha256))return json({planned:true,reused:true});throw error;}
    return json({planned:true,chunks:chunks.length,uploadSeconds:chunks.reduce((sum,c)=>sum+c.end-c.start,0)});
   }
   if(action==='audio-consent'&&request.method==='POST'){
@@ -613,6 +627,8 @@ export async function routeLive(request,env){
   }
   if(action==='audio-chunk'&&request.method==='POST'){
    const index=Number(url.searchParams.get('index')),provider=url.searchParams.get('provider')||'groq';if(!Number.isInteger(index)||index<0||!['groq','gemini'].includes(provider))throw new InputError('조각 번호 또는 전사 제공자 오류');
+   const runnerTable=await env.DB.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='yta_local_runner_audio_dispatches'").first();
+   if(runnerTable&&await env.DB.prepare('SELECT 1 AS ok FROM yta_local_runner_outbox WHERE job_id=? AND audio_link_manifest_sha256 IS NOT NULL').bind(id).first())if(provider!=='groq'||typeof env.LOCAL_RUNNER_AUDIO_GUARD!=='function'||typeof env.LOCAL_RUNNER_AUDIO_SEND_FENCE!=='function'||typeof env.LOCAL_RUNNER_AUDIO_ACCOUNTING!=='function')throw new ProviderError('RUNNER_RESUME_ROUTE_REQUIRED','This runner chunk requires its exact bounded runner contract.');
    const chunk=await env.DB.prepare('SELECT * FROM yta_audio WHERE job_id=? AND chunk_index=?').bind(id,index).first();if(!chunk)throw new InputError('음성 조각 계획부터 저장하세요.');
    if(chunk.state==='DONE')return json({index,state:'DONE',cached:true});
    const useProbe=request.headers.get('x-groq-free-unknown-probe')==='true';
@@ -670,7 +686,7 @@ export async function routeLive(request,env){
    try{
     const units=provider==='groq'?Math.max(10,Math.ceil(plannedDuration)):Math.ceil(duration*32)+8704;
     const result=probe?await executeGroqProbe(env,{jobId:id,index,operationId,units,probe,bytes}):batch?await executeFreeBatchChunk(env,{jobId:id,index,operationId,units,batch,bytes,duration}):await execute(env,{id:operationId,job:id,provider,units},active=>provider==='groq'?
-     runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:()=>assertGroqBeforeDispatch(env,operationId,active),beforeFetch:()=>assertCapacityAtFetch(active)}):
+     runOwnedAudioTranscription({env:active,bytes,name:'chunk.mp3',mime:'audio/mpeg',durationSeconds:duration,beforeDispatch:async()=>{await assertGroqBeforeDispatch(env,operationId,active);await env.LOCAL_RUNNER_AUDIO_GUARD?.();},beforeFetch:async()=>{await env.LOCAL_RUNNER_AUDIO_GUARD?.();assertCapacityAtFetch(active);await env.LOCAL_RUNNER_AUDIO_SEND_FENCE?.();assertCapacityAtFetch(active);}}):
      runOwnedGeminiAudio({env:active,bytes,durationSeconds:duration,beforeDispatch:()=>assertGeminiBeforeFetch(env,active),beforeFetch:()=>assertGeminiBeforeFetch(env,active)}));
     if(!Array.isArray(result.segments)||!result.segments.length)throw new ProviderError('EMPTY_AUDIO_TRANSCRIPT','음성 조각 전사가 비었습니다. 전체 전사로 처리하지 않습니다.');
     const updated=await env.DB.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=? AND state='CLAIMED'").bind(JSON.stringify({...result,operationId,fileSha256:JSON.parse(chunk.result_json).fileSha256}),id,index).run();
@@ -700,7 +716,7 @@ export async function routeLive(request,env){
     if(prior.provenance!==audioProvenance(merged.providers)||prior.raw!==merged.segments.map(segment=>segment.text).join('\n')||JSON.stringify(prior.segments)!==JSON.stringify(normalizeSegments(merged.segments))||current.audit?.audioFileSha256!==merged.fileSha256||current.audit?.audioProcessingCoverage!==1)throw new ProviderError('TRANSCRIPT_PERSISTENCE_UNVERIFIED','기존 전사와 음성 계획이 일치하지 않습니다.');
     return json({job:current,source:prior,persisted:true,cached:true});
    }
-   return json(await storeAudioTranscriptOnce(env,job,merged));
+   return json(await storeAudioTranscriptOnce(env,job,merged,rows));
   }
   if(action==='audio-boundary-reconcile'&&['GET','POST'].includes(request.method)){
    const source=await sourceOf(env,id),audit=job.audit,chunks=audit?.audioChunks,origins=audit?.audioSegmentOrigins;

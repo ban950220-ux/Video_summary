@@ -848,7 +848,7 @@ test('two stale audio finishes cannot overwrite a summary saved between them',as
   assert.equal((await routeApi(request(path+'/audio-plan','POST',{rightsConfirmed:true,fileSha256:sha,chunks}),env)).status,200);
   for(let i=0;i<2;i++)db.prepare("UPDATE yta_audio SET state='DONE',result_json=? WHERE job_id=? AND chunk_index=?").run(JSON.stringify({fileSha256:sha,segments:[{start:1,end:2,text:'말 '+i}]}),id,i);
   let reads=0,seenBoth,releaseSecond;const bothSeen=new Promise(resolve=>seenBoth=resolve),secondHeld=new Promise(resolve=>releaseSecond=resolve);
-  const racing={...env,DB:{prepare(sql){
+  const racing={...env,DB:{batch:statements=>env.DB.batch(statements),prepare(sql){
    const prepared=env.DB.prepare(sql);
    if(sql!=='SELECT * FROM yta_sources WHERE job_id=?')return prepared;
    return {bind(...args){
