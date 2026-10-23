@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,writeFileSync,copyFileSync,mkdirSync,mkdtempSync,readdirSync,rmSync,renameSync} from 'node:fs';
-import {join} from 'node:path';
+import {join,resolve,relative,isAbsolute} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
@@ -29,7 +29,8 @@ test('physical same-name SQL changes, extra/missing files and changes after init
  const folder=mkdtempSync(join(tmpdir(),'migration-catalog-fixture-'));
  try{
   mkdirSync(join(folder,'scripts'));mkdirSync(join(folder,'migrations'));
-  for(const name of ['full-coverage-migration-preflight.mjs','migration-source-catalog.mjs'])copyFileSync(new URL('../scripts/'+name,import.meta.url),join(folder,'scripts',name));
+  for(const name of ['full-coverage-migration-preflight.mjs','migration-source-catalog.mjs','schema-baseline-registration.mjs','schema-baseline-review.mjs'])copyFileSync(new URL('../scripts/'+name,import.meta.url),join(folder,'scripts',name));
+  copyFileSync(new URL('../schema.sql',import.meta.url),join(folder,'schema.sql'));
   for(const name of readdirSync(new URL('../migrations/',import.meta.url)))if(name.endsWith('.sql'))copyFileSync(new URL('../migrations/'+name,import.meta.url),join(folder,'migrations',name));
   const local=await import(pathToFileURL(join(folder,'scripts/full-coverage-migration-preflight.mjs')));
   const b=migrationBefore(),a=migrationAfter(b);assert.equal(local.assessFullCoverageMigration(b).readyForOperatorReview,true);
@@ -60,5 +61,5 @@ test('physical same-name SQL changes, extra/missing files and changes after init
   const target=join(folder,'migrations','0016_full_coverage_write_lock.sql');
   writeFileSync(target,readFileSync(target,'utf8').replace("'groq-full-coverage'","'GROQ-FULL-COVERAGE'"));
   assert.equal(local.assessFullCoverageMigration(crlf).readyForOperatorReview,false,'no semantic SQL normalization');
- }finally{rmSync(folder,{recursive:true,force:true});}
+ }finally{const full=resolve(folder),tail=relative(resolve(tmpdir()),full);if(!tail||tail.startsWith('..')||isAbsolute(tail)||!tail.startsWith('migration-catalog-fixture-'))throw Error('CLEANUP_SCOPE_INVALID');rmSync(full,{recursive:true,force:true});}
 });
