@@ -1,3 +1,4 @@
+import {geminiSourceAssessment,projectGeminiReport} from './gemini-source-assessment.mjs';
 import {ProviderError} from './adapters.mjs';
 import {configuredMasterKey,decryptProviderKey} from './vault.mjs';
 import {capacityIdentity,capacityIdentityForCredentialSnapshot} from './observed-capacity.mjs';
@@ -94,6 +95,31 @@ export function assertRemainingApprovalBudget(firstReceipt,nextInputCount,quote)
 function view(row,calls){
  const quote=row?JSON.parse(row.quote_json):null;
  return {state:row?.state??'NOT_STARTED',projectMode:row?.project_mode??null,quote:quote?{executionId:quote.executionId,model:quote.model,sourceSha256:quote.sourceSha256,firstRequestSha256:quote.firstRequestSha256,inputTokensCounted:quote.inputTokensCounted,inputTokensPerCallCap:quote.inputTokensPerCallCap,outputTokensPerCallCap:quote.outputTokensPerCallCap,maxCalls:2,maxRetries:0,maxMicroUsd:quote.maxMicroUsd,preTaxMicroUsd:quote.preTaxMicroUsd,costBufferMicroUsd:quote.costBufferMicroUsd,costBufferBps:quote.costBufferBps,approvalKind:quote.approvalKind,expiresAt:quote.expiresAt,quoteSha256:row.quote_sha256,priceVersion:quote.priceVersion}:null,firstReport:row?.first_report_json?JSON.parse(row.first_report_json):null,review:row?.review_json?JSON.parse(row.review_json):null,errorCode:row?.error_code??null,calls:calls.map(item=>({phase:item.phase,state:item.state,inputTokensCounted:item.input_tokens_counted,usage:item.usage_json?JSON.parse(item.usage_json):null,responseStored:item.response_complete===1,responseSha256:item.response_sha256,responseBytes:item.response_bytes,errorCode:item.error_code,tokenEstimateMicroUsd:item.token_estimate_micro_usd})),meaningReview:row?.state==='ISSUES'?'SOURCE_REVIEW_REQUIRED':'NOT_PASSED',reviewStage:row?.state==='ISSUES'?'REVIEW_REQUIRED':null,sourceReview:row?.state==='ISSUES'?'REQUIRED':'NOT_PERFORMED',externalFactCheck:'NOT_PERFORMED',audioAccuracy:'NOT_VERIFIED',providerInvoiceAmount:'UNKNOWN',actualTaxVerification:'NOT_VERIFIED',next:row?.state==='FIRST_READY'?(calls.some(item=>item.phase===0&&item.state==='SETTLED')?'RUN_REVIEW':'RECOVER_FIRST_RECEIPT'):row?.state==='ISSUES'?'REVIEW_STORED_SOURCE_OR_USE_GROQ':row?.state==='BLOCKED'?'INSPECT_STORED_RECEIPT_NO_AUTO_RETRY':null};
+}
+// Owner acceptance publishes an already stored, source-bound draft. It never dispatches a model.
+async function acceptedReport(env,id,row,job,sourceOf,calls){
+ const scope=await scoped(env,job,sourceOf);
+ scope.sourceAssessment=await geminiSourceAssessment(job,scope.source);
+ if(scope.sourceHash!==row.source_sha256||scope.auditHash!==row.audit_sha256||!row.first_report_json||!row.review_json||calls.length!==2||calls.some((call,index)=>call.phase!==index||call.state!=='SETTLED'||call.response_complete!==1||!call.response_json||!call.response_sha256||!call.usage_json||!Number.isSafeInteger(call.token_estimate_micro_usd)))fail('TWO_PASS_ACCEPT_SCOPE_CHANGED');
+ const quote=await activeQuote(row);
+ for(const call of calls){
+  let usage;try{usage=JSON.parse(call.usage_json);}catch{fail('TWO_PASS_ACCEPT_USAGE_CHANGED');}
+  const input=usage?.promptTokenCount,candidates=usage?.candidatesTokenCount,thoughts=usage?.thoughtsTokenCount??0,output=candidates+thoughts;
+  if(!Number.isSafeInteger(input)||input<1||input>quote.inputTokensPerCallCap||!Number.isSafeInteger(candidates)||candidates<0||!Number.isSafeInteger(thoughts)||thoughts<0||!Number.isSafeInteger(output)||output>TWO_PASS_OUTPUT_CAP||usage.totalTokenCount!=null&&usage.totalTokenCount!==input+output||call.token_estimate_micro_usd!==preTaxMicroUsd(input,output))fail('TWO_PASS_ACCEPT_USAGE_CHANGED');
+ }
+ for(const call of calls)if(await sha(call.response_json)!==call.response_sha256)fail('TWO_PASS_ACCEPT_RECEIPT_CHANGED');
+ let first,review;try{first=JSON.parse(row.first_report_json);review=JSON.parse(row.review_json);}catch{fail('TWO_PASS_ACCEPT_SCOPE_CHANGED');}
+ const outputs=[];
+ for(const call of calls){
+  let envelope;try{envelope=JSON.parse(call.response_json);}catch{fail('TWO_PASS_ACCEPT_RECEIPT_CHANGED');}
+  const candidate=envelope?.candidates?.[0],output=candidate?.content?.parts?.map(part=>part.text||'').join('');
+  if(call.http_status!==200||envelope?.candidates?.length!==1||candidate?.finishReason!=='STOP'||!output||JSON.stringify(envelope.usageMetadata)!==call.usage_json)fail('TWO_PASS_ACCEPT_RECEIPT_CHANGED');
+  outputs.push(output);
+ }
+ if(await digest(summaryRequest(scope.source,scope.audit))!==calls[0].request_sha256||await digest(reviewRequest(scope.source,scope.audit,first))!==calls[1].request_sha256||JSON.stringify(validateWindowedSummary(outputs[0],scope.source))!==row.first_report_json||JSON.stringify(validateReview(outputs[1],scope.source,first))!==row.review_json)fail('TWO_PASS_ACCEPT_RECEIPT_CHANGED');
+ if(review.verdict!=='PASS'||review.issues.length!==0)fail('TWO_PASS_REVIEW_NOT_PASSED');
+ if(!first.chapters.some(chapter=>chapter.kind==='CONTENT'))fail('TWO_PASS_INCOMPLETE_COVERAGE');
+ return {scope,report:{...first,kind:'GEMINI_TWO_PASS_EVIDENCE_LINKED',outputKind:'STORED_TRANSCRIPT_SUMMARY',summaryCompletion:'COMPLETE',sourceAssessment:scope.sourceAssessment,synthesisComplete:true,compositionMode:'gemini-two-pass-v1',sourceSha256:scope.sourceHash,auditSha256:scope.auditHash,sourceCoverage:{segmentCount:scope.source.segments.length,missingSegmentIds:[]},meaningReview:{status:'AUTO_CHECK_PASSED_HUMAN_UNREVIEWED',limitations:'A second model found no listed issues; human semantic review was not performed.'},sourceReview:'NOT_PERFORMED',audioAccuracy:'NOT_VERIFIED',externalFactCheck:'NOT_PERFORMED',reviewReceiptSha256:calls[1].response_sha256}};
 }
 async function allCalls(env,id){return (await env.DB.prepare('SELECT * FROM yta_gemini_two_pass_calls WHERE job_id=? ORDER BY phase').bind(id).all()).results||[];}
 const quoteAttemptId=id=>id+':gemini-two-pass-quote';
@@ -232,6 +258,13 @@ export async function handleGeminiTwoPassAction(request,env,{id,action,job,sourc
  let row=await saved(env,id);
  if(action==='gemini-two-pass-status'&&request.method==='GET'){
   const attempt=await quoteAttempt(env,id),status=view(row,row?await allCalls(env,id):[]);
+  status.auditSha256=row?.audit_sha256??null;
+  status.reviewVerdict=status.review?.verdict??null;
+  status.sourceAssessment=await geminiSourceAssessment(job,await sourceOf(env,id));
+  status.sourceAssessmentSha256=status.sourceAssessment.snapshotSha256;
+  status.finalReportSaved=job.report?.compositionMode==='gemini-two-pass-v1';
+  if(status.finalReportSaved){const projected=await projectGeminiReport(env,job);status.sourceBinding=projected.report.sourceBinding;status.summaryCompletion=projected.summaryCompletion;}
+  if(status.finalReportSaved){status.meaningReview='AUTO_CHECK_PASSED_HUMAN_UNREVIEWED';status.sourceReview='NOT_PERFORMED';status.next=status.sourceBinding==='STALE_SOURCE'?'REVIEW_CHANGED_SOURCE':'OPEN_SAVED_REPORT';}
   if(attempt){status.quoteAttempt={state:attempt.state,createdAt:attempt.created_at};if(attempt.state!=='QUOTE_SAVED'&&(!row||row.state==='CANCELLED'||row.expires_at<=Date.now()))status.state='QUOTE_PENDING';}
   if(id===LEGACY_UNCERTAIN_QUOTE_JOB_ID&&!row&&!attempt)status.state=legacyQuoteGrant(env,id)?'LEGACY_NEW_QUOTE_ONCE_READY':'QUOTE_UNCERTAIN_LEGACY';
   return json(status);
@@ -281,6 +314,23 @@ export async function handleGeminiTwoPassAction(request,env,{id,action,job,sourc
   return json({cancelled:true,alreadySentRequestsCannotBeRecalled:true,newQuoteAllowed:false});
  }
  if(!row)fail('TWO_PASS_QUOTE_REQUIRED');
+ if(action==='gemini-two-pass-accept'&&request.method==='POST'){
+  const body=await request.json();
+  if(body?.confirmNoProviderCall!==true||body?.confirmSourceBasedSummary!==true||body?.acknowledgeTranscriptionUnverified!==true||body?.acknowledgeSemanticReviewUnverified!==true||body?.sourceSha256!==row.source_sha256||body?.auditSha256!==row.audit_sha256||body?.quoteSha256!==row.quote_sha256)fail('TWO_PASS_ACCEPT_CONFIRMATION_REQUIRED');
+  if(!['ISSUES','COMPLETE'].includes(row.state))fail('TWO_PASS_ACCEPT_STATE_CHANGED');
+  await activeQuote(row);
+  const calls=await allCalls(env,id),{scope,report}=await acceptedReport(env,id,row,job,sourceOf,calls),reportJson=JSON.stringify(report);
+  if(body.sourceAssessmentSha256!==scope.sourceAssessment.snapshotSha256)fail('TWO_PASS_ACCEPT_SOURCE_ASSESSMENT_CHANGED');
+  if(body.reviewReceiptSha256!==calls[1].response_sha256)fail('TWO_PASS_ACCEPT_RECEIPT_CHANGED');
+  if(job.report&&JSON.stringify(job.report)!==reportJson)fail('SUMMARY_ALREADY_EXISTS');
+  if(!job.report){
+   const written=await env.DB.prepare("UPDATE jobs SET report_json=?,status=?,updated_at=? WHERE id=? AND owner_id='owner' AND (report_json IS NULL OR report_json='null') AND audit_json=? AND duration_seconds=? AND source_type=? AND EXISTS(SELECT 1 FROM yta_sources s WHERE s.job_id=jobs.id AND s.raw=? AND s.segments_json=? AND s.provenance=?) AND EXISTS(SELECT 1 FROM yta_gemini_two_pass_jobs t WHERE t.job_id=jobs.id AND t.owner_id='owner' AND t.state='ISSUES' AND t.source_sha256=? AND t.audit_sha256=? AND t.quote_sha256=? AND t.first_report_json=? AND t.review_json=?) AND (SELECT COUNT(*) FROM yta_gemini_two_pass_calls c WHERE c.job_id=jobs.id)=2 AND EXISTS(SELECT 1 FROM yta_gemini_two_pass_calls c WHERE c.job_id=jobs.id AND c.phase=0 AND c.state='SETTLED' AND c.response_complete=1 AND c.http_status=200 AND c.finish_reason='STOP' AND c.request_sha256=? AND c.response_sha256=? AND c.usage_json=? AND c.token_estimate_micro_usd=?) AND EXISTS(SELECT 1 FROM yta_gemini_two_pass_calls c WHERE c.job_id=jobs.id AND c.phase=1 AND c.state='SETTLED' AND c.response_complete=1 AND c.http_status=200 AND c.finish_reason='STOP' AND c.request_sha256=? AND c.response_sha256=? AND c.usage_json=? AND c.token_estimate_micro_usd=?) AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=jobs.id||':deleting' AND d.state='DELETING')").bind(reportJson,scope.sourceAssessment.status,now(),id,scope.auditJson,job.duration_seconds,job.source_type,scope.sourceRaw,scope.segmentsJson,scope.source.provenance,scope.sourceHash,scope.auditHash,row.quote_sha256,row.first_report_json,row.review_json,calls[0].request_sha256,calls[0].response_sha256,calls[0].usage_json,calls[0].token_estimate_micro_usd,calls[1].request_sha256,calls[1].response_sha256,calls[1].usage_json,calls[1].token_estimate_micro_usd).run();
+   if(written.meta?.changes!==1)fail('TWO_PASS_ACCEPT_SCOPE_CHANGED');
+  }
+  const completed=await env.DB.prepare("UPDATE yta_gemini_two_pass_jobs SET state='COMPLETE',updated_at=? WHERE job_id=? AND owner_id='owner' AND state='ISSUES' AND source_sha256=? AND audit_sha256=? AND quote_sha256=? AND first_report_json=? AND review_json=? AND EXISTS(SELECT 1 FROM jobs j WHERE j.id=job_id AND j.owner_id='owner' AND j.report_json=?)").bind(now(),id,scope.sourceHash,scope.auditHash,row.quote_sha256,row.first_report_json,row.review_json,reportJson).run();
+  if(completed.meta?.changes!==1&&row.state!=='COMPLETE')fail('TWO_PASS_ACCEPT_STATE_CHANGED');
+  return json({job:await projectGeminiReport(env,await ownedJob(env,id)),persisted:true,providerCalled:false,reviewVerdict:'PASS',audioAccuracy:'NOT_VERIFIED',semanticReview:'NOT_PERFORMED'});
+ }
  if(action==='gemini-two-pass-approve'&&request.method==='POST'){
   const body=await request.json(),quote=await activeQuote(row);
   if(body?.quoteSha256!==row.quote_sha256||body?.maxMicroUsd!==quote.maxMicroUsd||body?.maxCalls!==2||body?.confirmNoAutomaticRetry!==true||body?.confirmProjectMode!==row.project_mode||row.expires_at<=Date.now()||job.report)fail('TWO_PASS_APPROVAL_SCOPE_CHANGED');

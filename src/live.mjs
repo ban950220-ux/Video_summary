@@ -1,3 +1,4 @@
+import {projectGeminiReport} from './gemini-source-assessment.mjs';
 import {InputError,transcriptAudit} from './core.mjs';
 import {ProviderError} from './adapters.mjs';
 import {runNativeCaption,runNativePoll,runTranscriptSummary,runOwnedAudioTranscription,runOwnedGeminiAudio} from './provider-keys.mjs';
@@ -22,13 +23,34 @@ export async function ensureLiveSchema(env){
 const json=(x,status=200)=>Response.json(x,{status,headers:{'cache-control':'no-store'}});
 async function readJson(req){const text=await req.text();if(text.length>900000)throw new InputError('본문 90만자 제한');try{return JSON.parse(text);}catch{throw new InputError('JSON 오류');}}
 export async function saveSource(env,id,raw,segments,provenance){await ensureLiveSchema(env);const normalized=normalizeSegments(segments);if(new TextEncoder().encode(raw+JSON.stringify(normalized)).byteLength>1500000)throw new InputError('보관 원문 크기 제한');await env.DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET raw=excluded.raw,segments_json=excluded.segments_json,provenance=excluded.provenance,updated_at=excluded.updated_at').bind(id,raw,JSON.stringify(normalized),provenance,new Date().toISOString()).run();return normalized;}
-async function sourceOf(env,id){const row=await env.DB.prepare('SELECT * FROM yta_sources WHERE job_id=?').bind(id).first();return row?{...row,segments:JSON.parse(row.segments_json)}:null;}
+async function sourceOf(env,id){
+ const row=await env.DB.prepare('SELECT * FROM yta_sources WHERE job_id=?').bind(id).first();if(!row)return null;
+ let segments;try{segments=JSON.parse(row.segments_json);}catch{throw new ProviderError('SOURCE_STORAGE_INVALID','Stored transcript data is invalid; review the saved source before continuing.');}
+ if(!Array.isArray(segments)||segments.some(segment=>!segment||typeof segment!=='object'||Array.isArray(segment)))throw new ProviderError('SOURCE_STORAGE_INVALID','Stored transcript data is invalid; review the saved source before continuing.');
+ return {...row,segments};
+}
 function boundaryAuditView(audit){
  const markers=(Array.isArray(audit?.audioBoundaryAmbiguities)?audit.audioBoundaryAmbiguities:[]).filter(item=>Number.isSafeInteger(item?.segmentId)&&Number.isSafeInteger(item?.chunkIndex)&&Number.isFinite(item?.startMs)&&Number.isFinite(item?.endMs));
  return {audioBoundaryReview:audit?.audioBoundaryReview??null,audioBoundaryAmbiguityCount:markers.length,audioBoundaryAmbiguities:markers.slice(0,64).map(({segmentId,chunkIndex,startMs,endMs})=>({segmentId,chunkIndex,startMs,endMs})),audioBoundaryAmbiguitiesOmitted:Math.max(0,markers.length-64)};
 }
-async function ownedJob(env,id){const row=await env.DB.prepare("SELECT * FROM jobs WHERE id=? AND owner_id=? AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,'owner',id+':deleting').first();if(!row)throw new ProviderError('NOT_FOUND','분석 기록 없음');return {...row,report:JSON.parse(row.report_json||'null'),audit:JSON.parse(row.audit_json||'null')};}
-async function updateJob(env,id,status,report,audit){await env.DB.prepare('UPDATE jobs SET status=?,report_json=?,audit_json=?,updated_at=? WHERE id=? AND owner_id=?').bind(status,JSON.stringify(report),JSON.stringify(audit),new Date().toISOString(),id,'owner').run();}
+async function ownedJob(env,id){const row=await env.DB.prepare("SELECT * FROM jobs WHERE id=? AND owner_id=? AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,'owner',id+':deleting').first();if(!row)throw new ProviderError('NOT_FOUND','분석 기록 없음');let audit;try{audit=JSON.parse(row.audit_json||'null');}catch{audit=null;}return {...row,report:JSON.parse(row.report_json||'null'),audit};}
+async function admitNativeTranscript(env,job){
+ if(job.source_type!=='url'||!job.source_url)throw new InputError('URL 입력 작업만 자막 조회 가능');
+ if(job.report_json!=null&&job.report_json!=='null')throw new ProviderError('NATIVE_REPORT_EXISTS','A saved report is preserved. Create an explicit new job for a different transcript.');
+ if(await env.DB.prepare('SELECT 1 AS ok FROM yta_sources WHERE job_id=?').bind(job.id).first())throw new ProviderError('NATIVE_SOURCE_EXISTS','The stored transcript is preserved. Create an explicit new job to acquire another transcript.');
+}
+async function commitNativeTranscript(env,job,status,audit,source=null){
+ // One transaction: the source is inserted only if this exact snapshot still
+ // owns an empty source slot. Any insert failure rolls back the audit change.
+ const timestamp=new Date().toISOString();
+ const update=env.DB.prepare("UPDATE jobs SET status=?,audit_json=?,updated_at=? WHERE id=? AND owner_id='owner' AND source_type='url' AND source_url=? AND duration_seconds IS ? AND status=? AND report_json IS ? AND (report_json IS NULL OR report_json='null') AND audit_json IS ? AND updated_at=? AND NOT EXISTS(SELECT 1 FROM yta_sources WHERE job_id=jobs.id) AND NOT EXISTS(SELECT 1 FROM yta_operations WHERE id=jobs.id||':deleting' AND state='DELETING')")
+  .bind(status,JSON.stringify(audit),timestamp,job.id,job.source_url,job.duration_seconds,job.status,job.report_json,job.audit_json,job.updated_at);
+ if(source){
+  const insert=env.DB.prepare('INSERT INTO yta_sources(job_id,raw,segments_json,provenance,updated_at) SELECT ?,?,?,?,? WHERE changes()=1').bind(job.id,source.raw,JSON.stringify(source.segments),source.provenance,timestamp);
+  const results=await env.DB.batch([update,insert]);
+  if(results.some(result=>result.meta?.changes!==1))throw new ProviderError('NATIVE_STATE_CHANGED','Job, transcript, report or deletion state changed; inspect the saved result.');
+ }else if((await update.run()).meta?.changes!==1)throw new ProviderError('NATIVE_STATE_CHANGED','Job, transcript, report or deletion state changed; inspect the saved result.');
+}
 async function grantEnv(env,provider){
  if(env.ENABLE_LIVE_FREE!=='true'||env.ALLOW_PAID_API==='true')throw new ProviderError('LIVE_DISABLED','라이브 무료 호출을 아직 활성화하지 않았습니다.');
  const quota=await env.DB.prepare('SELECT * FROM yta_quota WHERE provider=?').bind(provider).first();
@@ -44,9 +66,16 @@ const GROQ_APP_HOURLY_CAP_SECONDS=6_500; // Below the observed 7,200-second prov
 const GROQ_APP_DAILY_CAP_SECONDS=26_000; // App-only cap below the published daily Free limit; not a provider balance.
 const groqPermit="NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider='groq' AND state='CLAIMED') AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider='groq' AND state='FAILED_UNCERTAIN' AND error_code='429' AND created_at>?) AND COALESCE((SELECT SUM(units) FROM yta_operations WHERE provider='groq' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?))),0)+?<=?";
 const groqProbePermit=groqPermit+" AND COALESCE((SELECT SUM(units) FROM yta_operations WHERE provider='groq' AND (state='CLAIMED' OR (state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?))),0)+?<=? AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE provider='groq' AND state IN ('DONE','FAILED_UNCERTAIN') AND created_at>?)";
+// Keep accounting/uncertainty metadata after deletion, but never resurrect body
+// content. The owner and tombstone checks run inside the result UPDATE itself.
+const operationContentScope="EXISTS(SELECT 1 FROM jobs j WHERE j.id=yta_operations.job_id AND j.owner_id='owner') AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=yta_operations.job_id||':deleting' AND d.state='DELETING')";
 async function execute(env,{id,job,provider,units},fn,onNewCall){
  const prior=await env.DB.prepare('SELECT * FROM yta_operations WHERE id=?').bind(id).first();
- if(prior?.state==='DONE')return JSON.parse(prior.result_json);
+ if(prior?.state==='DONE'){
+  const cached=await env.DB.prepare(`SELECT result_json FROM yta_operations WHERE id=? AND job_id=? AND provider=? AND state='DONE' AND ${operationContentScope}`).bind(id,job,provider).first();
+  if(!cached?.result_json)throw new ProviderError('OPERATION_RESULT_UNAVAILABLE','The operation result is no longer available; inspect the job state without retrying the provider.');
+  return JSON.parse(cached.result_json);
+ }
  if(prior&&!(prior.state==='BLOCKED'&&['QUOTA_EXHAUSTED','PRE_DISPATCH_BLOCKED','CAPACITY_WAIT'].includes(prior.error_code)))throw new ProviderError('OPERATION_REVIEW_REQUIRED','이미 요청했거나 결과가 불명확한 작업입니다. 사용량을 확인한 뒤 새 작업으로 진행하세요.');
  const active=await grantEnv(env,provider);
  // Atomic unique claim and atomic quota decrement: concurrent calls cannot overspend this app's grant.
@@ -94,11 +123,11 @@ async function execute(env,{id,job,provider,units},fn,onNewCall){
   const result=await fn({...active,capacityValidUntil:capacity?.validUntil,capacityVersion:capacity?.version});
   // Conservative accounting: reserved upper bound stays consumed even on provider timeout or mismatch.
   await env.DB.prepare('INSERT INTO usage_events(id,job_id,owner_id,provider,capability,unit,used_units,estimated_usd,actual_usd,provenance,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),job,'owner',provider,'LIVE_FREE',provider==='groq'?'audio_seconds':provider==='supadata'?'credits':'conservative_token_units',units,0,null,'APP_RESERVED_UPPER_BOUND',new Date().toISOString()).run();
-  await env.DB.prepare('UPDATE yta_operations SET state=?,result_json=?,created_at=? WHERE id=?').bind('DONE',JSON.stringify(result),new Date().toISOString(),id).run();return result;
+  await env.DB.prepare(`UPDATE yta_operations SET state=?,result_json=CASE WHEN ${operationContentScope} THEN ? ELSE NULL END,created_at=? WHERE id=? AND job_id=? AND provider=?`).bind('DONE',JSON.stringify(result),new Date().toISOString(),id,job,provider).run();return result;
  }catch(error){
   if(error.preDispatchBlocked&&error.code==='CAPACITY_WAIT')await persistWait(env,{operationId:id,jobId:job,provider,reason:'OBSERVATION_EXPIRED_BEFORE_DISPATCH',resetAt:null});
   if(error.preDispatchBlocked)await releaseUndispatchedGrant(env,id,provider,units,'PRE_DISPATCH_BLOCKED',active);
-  else await env.DB.prepare('UPDATE yta_operations SET state=?,error_code=?,created_at=?,result_json=? WHERE id=?').bind('FAILED_UNCERTAIN',String(error.code||'PROCESSING_FAILED'),new Date().toISOString(),error.reviewResult?JSON.stringify(error.reviewResult):null,id).run();
+  else await env.DB.prepare(`UPDATE yta_operations SET state=?,error_code=?,created_at=?,result_json=CASE WHEN ${operationContentScope} THEN ? ELSE NULL END WHERE id=? AND job_id=? AND provider=?`).bind('FAILED_UNCERTAIN',String(error.code||'PROCESSING_FAILED'),new Date().toISOString(),error.reviewResult?JSON.stringify(error.reviewResult):null,id,job,provider).run();
   if(['402','429','403'].includes(String(error.code)))await env.DB.prepare('UPDATE yta_quota SET expires_at=0 WHERE provider=?').bind(provider).run();
   throw error;
  }
@@ -141,9 +170,10 @@ async function storeTranscriptResult(env,job,segments,provenance,extra={}){
   if(!Number.isFinite(ceiling)||ceiling<=0)throw new ProviderError('CAPTION_DURATION_UNVERIFIED','Declared video duration is unavailable; caption coverage cannot be checked.');
   if(!Array.isArray(segments)||!segments.length||segments.some((s,i)=>!s||typeof s.text!=='string'||!s.text.trim()||!Number.isFinite(s.startMs)||!Number.isFinite(s.endMs)||s.startMs<0||s.endMs<=s.startMs||s.endMs>ceiling||(i>0&&s.startMs<segments[i-1].startMs)))throw new ProviderError('CAPTION_OUTSIDE_DECLARED_DURATION','Caption timestamps are invalid or outside the declared video duration.');
  }
- const raw=segments.map(s=>s.text).join('\n'),clean=await saveSource(env,job.id,raw,segments,provenance);
+ const raw=segments.map(s=>s.text).join('\n'),clean=normalizeSegments(segments);
+ if(new TextEncoder().encode(raw+JSON.stringify(clean)).byteLength>1500000)throw new InputError('보관 원문 크기 제한');
  const audit={...transcriptAudit(clean,job.duration_seconds,false),...auditGaps(clean,job.duration_seconds),...extra};
- await updateJob(env,job.id,audit.status,null,audit);return {job:await ownedJob(env,job.id),source:{segments:clean,provenance},persisted:true};
+ await commitNativeTranscript(env,job,audit.status,audit,{raw,segments:clean,provenance});return {job:await ownedJob(env,job.id),source:{segments:clean,provenance},persisted:true};
 }
 async function storeAudioTranscriptOnce(env,job,merged){
  const raw=merged.segments.map(segment=>segment.text).join('\n'),clean=normalizeSegments(merged.segments);
@@ -344,7 +374,7 @@ async function executeFreeBatchChunk(env,{jobId,index,operationId,units,batch,by
 }
 export async function routeLive(request,env){
  const url=new URL(request.url),path=url.pathname;
- if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|summary-choice|paid-summary-quote|paid-summary-approve|paid-summary-status|paid-summary-cancel|paid-summary-revalidate|paid-summary-execute|gemini-two-pass-status|gemini-two-pass-quote|gemini-two-pass-approve|gemini-two-pass-run|gemini-two-pass-recover|gemini-two-pass-cancel|groq-full-coverage|groq-full-coverage-global|groq-full-coverage-fresh|groq-summary|groq-summary-plan|groq-summary-approval|groq-summary-status|groq-summary-recovery-diagnostic|groq-summary-recovery-compat-review|groq-summary-failure-diagnostic|groq-summary-stage-diagnostic|groq-summary-correction|groq-summary-pilot|groq-summary-checkpoint-recovery|groq-summary-bundle|groq-summary-gap|groq-summary-gap-bundle|groq-summary-complete|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/.test(path))return null;
+ if(!(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path))&&!path.startsWith('/api/live/')&&!/\/(native|native-poll|summary|summary-plan|summary-review|summary-choice|paid-summary-quote|paid-summary-approve|paid-summary-status|paid-summary-cancel|paid-summary-revalidate|paid-summary-execute|gemini-two-pass-status|gemini-two-pass-quote|gemini-two-pass-approve|gemini-two-pass-run|gemini-two-pass-recover|gemini-two-pass-cancel|gemini-two-pass-accept|groq-full-coverage|groq-full-coverage-global|groq-full-coverage-fresh|groq-summary|groq-summary-plan|groq-summary-approval|groq-summary-status|groq-summary-recovery-diagnostic|groq-summary-recovery-compat-review|groq-summary-failure-diagnostic|groq-summary-stage-diagnostic|groq-summary-correction|groq-summary-pilot|groq-summary-checkpoint-recovery|groq-summary-bundle|groq-summary-gap|groq-summary-gap-bundle|groq-summary-complete|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/.test(path))return null;
  if(request.method==='POST'&&/\/(groq-summary|groq-summary-gap|groq-summary-complete|groq-summary-correction|groq-full-coverage-global)$/.test(path)&&env.DB){const budget=groqD1Budget(env.DB);env={...env,DB:budget.DB,GROQ_D1_BUDGET:budget};}
  try{
  if(request.method==='DELETE'&&/^\/api\/jobs\/[0-9a-f-]{36}$/i.test(path)){await ensureLiveSchema(env);const id=path.split('/').pop(),owner=await env.DB.prepare('SELECT 1 AS ok FROM jobs WHERE id=? AND owner_id=?').bind(id,'owner').first();if(!owner)throw new ProviderError('NOT_FOUND','분석 기록 없음');
@@ -371,7 +401,7 @@ export async function routeLive(request,env){
    if(renewed.meta?.changes!==1){const inserted=await env.DB.prepare('INSERT OR IGNORE INTO yta_quota(provider,allowance,consumed,request_limit,request_count,expires_at,confirmed_at,billing_disabled) VALUES(?,?,0,?,0,?,?,1)').bind(provider,body.allowance,body.requestLimit,now+3600000,now).run();if(inserted.meta?.changes!==1)throw new ProviderError('ACTIVE_GRANT_EXISTS','현재 할당이 유효합니다. 중복 설정으로 사용량을 초기화할 수 없습니다.');}
    return json({configured:true,provider,expiresInSeconds:3600,verification:'OWNER_ATTESTED_NOT_INDEPENDENTLY_VERIFIED'});
   }
-  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|summary-choice|paid-summary-quote|paid-summary-approve|paid-summary-status|paid-summary-cancel|paid-summary-revalidate|paid-summary-execute|gemini-two-pass-status|gemini-two-pass-quote|gemini-two-pass-approve|gemini-two-pass-run|gemini-two-pass-recover|gemini-two-pass-cancel|groq-full-coverage|groq-full-coverage-global|groq-full-coverage-fresh|groq-summary|groq-summary-plan|groq-summary-approval|groq-summary-status|groq-summary-recovery-diagnostic|groq-summary-recovery-compat-review|groq-summary-failure-diagnostic|groq-summary-stage-diagnostic|groq-summary-correction|groq-summary-pilot|groq-summary-checkpoint-recovery|groq-summary-bundle|groq-summary-gap|groq-summary-gap-bundle|groq-summary-complete|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
+  const match=path.match(/^\/api\/jobs\/([0-9a-f-]{36})\/(native|native-poll|summary|summary-plan|summary-review|summary-choice|paid-summary-quote|paid-summary-approve|paid-summary-status|paid-summary-cancel|paid-summary-revalidate|paid-summary-execute|gemini-two-pass-status|gemini-two-pass-quote|gemini-two-pass-approve|gemini-two-pass-run|gemini-two-pass-recover|gemini-two-pass-cancel|gemini-two-pass-accept|groq-full-coverage|groq-full-coverage-global|groq-full-coverage-fresh|groq-summary|groq-summary-plan|groq-summary-approval|groq-summary-status|groq-summary-recovery-diagnostic|groq-summary-recovery-compat-review|groq-summary-failure-diagnostic|groq-summary-stage-diagnostic|groq-summary-correction|groq-summary-pilot|groq-summary-checkpoint-recovery|groq-summary-bundle|groq-summary-gap|groq-summary-gap-bundle|groq-summary-complete|source|export|audio-plan|audio-consent|audio-progress|audio-review|audio-recovery|audio-free-probe|audio-free-batch|audio-chunk|audio-finish|audio-boundary-reconcile|audio-cleanup)$/i);if(!match)return json({error:{code:'NOT_FOUND'}},404);
   const id=match[1],action=match[2],job=await ownedJob(env,id);
   if(action==='groq-full-coverage')return await handleFullCoverageAction(request,env,{id,job,sourceOf,ownedJob});
   if(action==='groq-full-coverage-global')return await handleFullCoverageGlobalAction(request,env,{id,job,sourceOf,ownedJob});
@@ -396,21 +426,22 @@ export async function routeLive(request,env){
   }
   if(action==='source'&&request.method==='GET')return json({source:await sourceOf(env,id),...boundaryAuditView(job.audit)});
   if(action==='export'&&request.method==='GET'){
-   const source=await sourceOf(env,id),text=markdownReport(job,source);return new Response(text,{headers:{'content-type':'text/plain; charset=utf-8','cache-control':'no-store','content-disposition':'attachment; filename="analysis-'+id+(url.searchParams.get('format')==='txt'?'.txt':'.md')+'"'}});
+   const source=await sourceOf(env,id),text=markdownReport(await projectGeminiReport(env,job,source),source);return new Response(text,{headers:{'content-type':'text/plain; charset=utf-8','cache-control':'no-store','content-disposition':'attachment; filename="analysis-'+id+(url.searchParams.get('format')==='txt'?'.txt':'.md')+'"'}});
   }
   if(action==='native'&&request.method==='POST'){
-   if(!job.source_url)throw new InputError('URL 입력 작업만 자막 조회 가능');
+   await admitNativeTranscript(env,job);
    const response=await execute(env,{id:id+':native',job:id,provider:'supadata',units:1},active=>runNativeCaption({env:active,url:job.source_url}));
-   if(response.status!=='TRANSCRIPT_AVAILABLE'||!response.segments.length){await updateJob(env,id,response.status==='PENDING'?'NATIVE_PENDING':'NEED_UPLOAD',null,{status:response.status,reason:'기존 자막을 확보하지 못했습니다. 사용자가 보유한 음성/스크립트를 사용하세요.',providerJobId:response.jobId||null});return json({job:await ownedJob(env,id),persisted:true},202);}
+   if(response.status!=='TRANSCRIPT_AVAILABLE'||!response.segments.length){await commitNativeTranscript(env,job,response.status==='PENDING'?'NATIVE_PENDING':'NEED_UPLOAD',{...job.audit,status:response.status,reason:'기존 자막을 확보하지 못했습니다. 사용자가 보유한 음성/스크립트를 사용하세요.',providerJobId:response.jobId||null});return json({job:await ownedJob(env,id),persisted:true},202);}
    return json(await storeTranscriptResult(env,job,response.segments,'SUPADATA_NATIVE', {providerCompleteness:'NOT_INDEPENDENTLY_VERIFIED'}));
   }
   if(action==='native-poll'&&request.method==='POST'){
    if(job.source_type!=='url'||job.status!=='NATIVE_PENDING'||typeof job.audit?.providerJobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(job.audit.providerJobId))throw new InputError('조회할 Supadata 자막 대기 작업이 없습니다.');
+   await admitNativeTranscript(env,job);
    const active=await grantEnv(env,'supadata');
    // Provider job-status polling is free; the initial request already reserved its credit.
    const result=await runNativePoll({env:active,jobId:job.audit.providerJobId});
    if(result.status==='TRANSCRIPT_AVAILABLE')return json(await storeTranscriptResult(env,job,result.segments,'SUPADATA_NATIVE',{providerCompleteness:'NOT_INDEPENDENTLY_VERIFIED'}));
-   if(result.status==='NO_CAPTIONS')await updateJob(env,id,'NEED_UPLOAD',null,{...job.audit,status:'NO_CAPTIONS'});
+   if(result.status==='NO_CAPTIONS')await commitNativeTranscript(env,job,'NEED_UPLOAD',{...job.audit,status:'NO_CAPTIONS'});
    return json({job:await ownedJob(env,id),persisted:true},202);
   }
   if(action==='summary-plan'&&request.method==='GET'){
@@ -427,6 +458,7 @@ export async function routeLive(request,env){
   if(action==='summary'&&request.method==='POST'){
    const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
    if(job.report?.kind==='GEMINI_EVIDENCE_LINKED')return json({job,persisted:true,cached:true});
+   if(job.report&&job.report.kind!=='EXTRACTIVE_ONLY_NOT_AI')throw new ProviderError('SUMMARY_ALREADY_EXISTS','The saved summary is preserved. Start a separate summary job explicitly.');
    const auditJson=JSON.stringify(job.audit),summarySourceChanged=()=>{const error=new ProviderError('SUMMARY_INPUT_CHANGED','요약 원본·경계 검토 정보 또는 무료 허가가 변경됐습니다. 새로 검토하세요.');error.preDispatchBlocked=true;throw error;};
    const assertSummarySource=async(operationId,requireClaimed,active)=>{
     const admission=requireClaimed?" AND EXISTS (SELECT 1 FROM yta_quota q JOIN yta_capacity c ON c.provider=q.provider WHERE q.provider='gemini' AND q.billing_disabled=1 AND q.confirmed_at=? AND q.expires_at=? AND q.expires_at>? AND c.model='gemini-2.5-flash' AND c.billing_disabled=1 AND c.version=? AND c.valid_until=? AND c.valid_until>? AND c.source=? AND NOT EXISTS (SELECT 1 FROM provider_credentials p WHERE p.owner_id='owner' AND p.provider='gemini' AND (COALESCE(p.updated_at=strftime('%Y-%m-%dT%H:%M:%fZ',p.updated_at),0)=0 OR p.updated_at>strftime('%Y-%m-%dT%H:%M:%fZ',q.confirmed_at/1000.0,'unixepoch'))))":"";
