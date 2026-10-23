@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {syncBuiltinESMExports} from 'node:module';
-import {join,resolve} from 'node:path';
+import {join,resolve,relative,isAbsolute} from 'node:path';
 import {tmpdir} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {DatabaseSync} from 'node:sqlite';
@@ -11,11 +11,13 @@ import {migrationBefore,migrationAfter} from './fixtures/migration-review-snapsh
 function fixture(){
  const folder=fs.mkdtempSync(join(tmpdir(),'migration-import-buffer-'));
  fs.mkdirSync(join(folder,'scripts'));fs.mkdirSync(join(folder,'migrations'));
- for(const name of ['full-coverage-migration-preflight.mjs','migration-source-catalog.mjs'])fs.copyFileSync(new URL('../scripts/'+name,import.meta.url),join(folder,'scripts',name));
+ for(const name of ['full-coverage-migration-preflight.mjs','migration-source-catalog.mjs','schema-baseline-registration.mjs','schema-baseline-review.mjs'])fs.copyFileSync(new URL('../scripts/'+name,import.meta.url),join(folder,'scripts',name));
+ fs.copyFileSync(new URL('../schema.sql',import.meta.url),join(folder,'schema.sql'));
  for(const name of fs.readdirSync(new URL('../migrations/',import.meta.url)))if(name.endsWith('.sql'))fs.copyFileSync(new URL('../migrations/'+name,import.meta.url),join(folder,'migrations',name));
  const target=join(folder,'migrations','0016_full_coverage_write_lock.sql');
  return {folder,target,url:pathToFileURL(join(folder,'scripts','full-coverage-migration-preflight.mjs')).href};
 }
+function cleanup(folder){const full=resolve(folder),tail=relative(resolve(tmpdir()),full);if(!tail||tail.startsWith('..')||isAbsolute(tail)||!tail.startsWith('migration-import-buffer-'))throw Error('CLEANUP_SCOPE_INVALID');fs.rmSync(full,{recursive:true,force:true});}
 function installed(sql){
  const db=new DatabaseSync(':memory:');
  try{
@@ -48,7 +50,7 @@ test('P2: altered import then trusted-file restoration cannot authenticate cache
    assert.equal(clean.assessFullCoverageMigration(b).readyForOperatorReview,true);
    assert.equal(clean.verifyFullCoverageMigration(a,{before:b}).verified,false);
    a.triggers=safe.triggers;assert.equal(clean.verifyFullCoverageMigration(a,{before:b}).verified,true);
-  }finally{fs.rmSync(f.folder,{recursive:true,force:true});}
+  }finally{cleanup(f.folder);}
  }
 });
 
@@ -70,5 +72,5 @@ test('the exact buffer returned to the parser is authenticated even if disk is r
   assert.deepEqual(read(f.target),trusted);
   assert.equal(loaded===undefined,true);assert.equal(error?.message,'FULL_COVERAGE_MIGRATION_SOURCE_INVALID');
   assert.equal(reads,1,'hashing must not re-read a different file buffer');
- }finally{fs.readFileSync=read;syncBuiltinESMExports();fs.rmSync(f.folder,{recursive:true,force:true});}
+ }finally{fs.readFileSync=read;syncBuiltinESMExports();cleanup(f.folder);}
 });
