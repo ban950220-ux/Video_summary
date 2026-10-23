@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {reviewedMigrationSource,matchesReviewedMigrationSource} from './migration-source-catalog.mjs';
+import {validBaselineReadback} from './schema-baseline-registration.mjs';
 
 export const databaseId='d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34';
 export const migrationName='0016_full_coverage_write_lock.sql';
@@ -67,13 +68,21 @@ function singleFileScope(scope,pending){
 // this script. A pass is a review aid, not an authorization to apply a migration.
 export function assessFullCoverageMigration(snapshot,{now=Date.now()}={}){
  const blocks=[];
+ const adopted=snapshot?.schemaBaseline!==undefined;
+ const adoptionVerified=adopted&&validBaselineReadback(snapshot.schemaBaseline,{now});
  if(snapshot?.kind!=='FULL_COVERAGE_MIGRATION_READONLY_V2'||snapshot.databaseId!==databaseId)blocks.push('TARGET_UNVERIFIED');
  const at=isUtc(snapshot?.capturedAt)?Date.parse(snapshot.capturedAt):NaN;
  if(!Number.isFinite(at)||at>now||now-at>5*60_000)blocks.push('SNAPSHOT_STALE');
  if(!matchesReviewedMigrationSource(snapshot?.repositorySource))blocks.push('MIGRATION_SOURCE_UNVERIFIED');
- if(!same(snapshot?.pendingMigrations,[migrationName,...deferredMigrations]))blocks.push('PENDING_MIGRATIONS_UNEXPECTED');
+ // Adoption never invents the historical nine rows: a full-repository listing
+ // still reports those files pending. Only the isolated 0016 directory may run.
+ const expectedPending=adopted?source.files.map(file=>file.name):[migrationName,...deferredMigrations];
+ if(!same(snapshot?.pendingMigrations,expectedPending))blocks.push('PENDING_MIGRATIONS_UNEXPECTED');
  if(!singleFileScope(snapshot?.executionScope,[migrationName]))blocks.push('SINGLE_MIGRATION_SCOPE_UNVERIFIED');
- if(!same(snapshot?.appliedMigrations,prerequisiteMigrations))blocks.push('MIGRATION_HISTORY_UNVERIFIED');
+ if(adopted){
+  if(!adoptionVerified)blocks.push('SCHEMA_BASELINE_UNVERIFIED');
+  if(!same(snapshot?.appliedMigrations,[])||!['ABSENT','PRESENT_EMPTY'].includes(snapshot?.migrationHistoryTable))blocks.push('MIGRATION_HISTORY_UNVERIFIED');
+ }else if(!same(snapshot?.appliedMigrations,prerequisiteMigrations))blocks.push('MIGRATION_HISTORY_UNVERIFIED');
  if(!same(snapshot?.managedTriggerNames,[]))blocks.push('MANAGED_TRIGGERS_PRESENT');
  if(!Array.isArray(snapshot?.presentTables)||!requiredTables.every(table=>snapshot.presentTables.includes(table)))blocks.push('TABLES_MISSING');
  if(snapshot?.unsettledRelevantOperationCount!==0)blocks.push('OPERATIONS_IN_FLIGHT');
@@ -92,10 +101,13 @@ export function verifyFullCoverageMigration(after,{before,now=Date.now()}={}){
  // Re-read ALL source bytes after the operation as well. Same filenames do not
  // establish unchanged SQL, even though only 0016 may run in this stage.
  if(!matchesReviewedMigrationSource(after?.repositorySource))return {verified:false,reason:'MIGRATION_SOURCE_UNVERIFIED'};
+ const adopted=before.schemaBaseline!==undefined;
+ if(adopted&&(!validBaselineReadback(after?.schemaBaseline,{now,phase:'after'})||!same(after.schemaBaseline.row,before.schemaBaseline.row)||after.migrationHistoryTable!=='PRESENT'))return {verified:false,reason:'SCHEMA_BASELINE_POSTCHECK_UNVERIFIED'};
  if(after?.databaseId!==databaseId||!fresh(after?.capturedAt,now)||Date.parse(after.capturedAt)<Date.parse(before.capturedAt)
   ||!singleFileScope(after?.executionScope,[])||!same(after.executionScope.files,before.executionScope.files)
-  ||!same(after?.appliedMigrations,[...prerequisiteMigrations,migrationName]))return {verified:false,reason:'POST_MIGRATION_SCOPE_UNVERIFIED'};
- if(!same(after?.pendingMigrations,deferredMigrations))return {verified:false,reason:'POST_MIGRATION_SHAPE_UNVERIFIED'};
+  ||!same(after?.appliedMigrations,adopted?[migrationName]:[...prerequisiteMigrations,migrationName]))return {verified:false,reason:'POST_MIGRATION_SCOPE_UNVERIFIED'};
+ const pendingAfter=adopted?source.files.filter(file=>file.name!==migrationName).map(file=>file.name):deferredMigrations;
+ if(!same(after?.pendingMigrations,pendingAfter))return {verified:false,reason:'POST_MIGRATION_SHAPE_UNVERIFIED'};
  return verifyFullCoverageTriggerDefinitions(after?.triggers);
 }
 
