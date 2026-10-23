@@ -3,6 +3,7 @@ import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {readRemoteState} from './read-remote-state.mjs';
 import {approvedRemoteBaseline,protectedRemoteBaseline,assertRemoteState,inspectBindingSet,sameCanonical} from './remote-state-policy.mjs';
+import {expectedRuntimeFlags} from './gemini-paid-activation.mjs';
 
 // Report shape without ever copying a remote string or object into build logs.
 const field=(parent,key,valid,project=value=>value)=>{
@@ -40,10 +41,10 @@ export function safeRemoteBaselineReport(remote,env={}){
   const bindings=Array.isArray(remote?.bindings)?remote.bindings:[];
   const binding=name=>bindings.find(item=>item?.name===name);
   const expected=env.GROQ_DEPLOYMENT_EVIDENCE_JSON?protectedRemoteBaseline(env):approvedRemoteBaseline;
-  const flags=expected.runtimeFlags;
+  const flags=expectedRuntimeFlags(expected);
   const report={
     kind:'REMOTE_BASELINE_PREFLIGHT',readOnly:true,diagnosticReadSucceeded:true,
-    bindings:inspectBindingSet(remote?.bindings,{expectAssets:expected.assetsPresent}),
+    bindings:inspectBindingSet(remote?.bindings,{expectAssets:expected.assetsPresent,fullCoverageEnabled:expected.fullCoverageEnabled===true,geminiTwoPassPaidEnabled:expected.geminiTwoPassPaidEnabled===true}),
     target:{workerMatched:remote?.workerName===expected.workerName,productionEnvironment:remote?.environment==='production',buildTagMatched:env.WRANGLER_CI_MATCH_TAG?remote?.workerTag===env.WRANGLER_CI_MATCH_TAG:'NOT_SUPPLIED',activeVersionMatchesExpected:Boolean(remote?.activeVersions?.length===1&&remote.activeVersions[0]?.id===expected.activeVersionId&&remote.activeVersions[0]?.percentage===100),d1MatchesExpected:Boolean(binding('DB')?.type==='d1'&&binding('DB')?.id===expected.databaseId),accessBindingsPresent:Boolean(binding('ACCESS_AUD')?.type==='plain_text'&&binding('ACCESS_TEAM_DOMAIN')?.type==='plain_text'&&binding('ACCESS_OWNER_EMAIL')?.type==='secret_text'&&binding('KEY_ENCRYPTION_KEY_B64')?.type==='secret_text'),accessVarsValid:typeof binding('ACCESS_AUD')?.text==='string'&&binding('ACCESS_AUD').text.length>=12&&/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(binding('ACCESS_TEAM_DOMAIN')?.text??''),runtimeFlagsMatch:Object.entries(flags).every(([name,value])=>binding(name)?.type==='plain_text'&&binding(name)?.text===value)},
     exposure:{workersDev:boolean(remote,'workersDev'),previewUrls:boolean(remote,'previewUrls'),routeCount:count(remote,'routes'),domainCount:count(remote,'domains')},
     metadata:{compatibilityDateMatchesExpected:remote?.compatibilityDate===expected.compatibilityDate,compatibilityFlags:{kind:remote?.compatibilityFlagsPresent===false?'OMITTED':field(remote,'compatibilityFlags',Array.isArray,()=> 'ARRAY'),count:remote?.compatibilityFlagsPresent===false?'OMITTED':count(remote,'compatibilityFlags')},compatibilityFlagsMatchExpected:remote?.compatibilityFlagsPresent===expected.compatibilityFlagsPresent&&sameCanonical(remote?.compatibilityFlags,expected.compatibilityFlags),observability:safeObservability(remote?.observability),observabilityMatchesProposed:sameCanonical(remote?.observability,expected.observability),limits:safeOptional(remote?.optionalScriptFields?.limits,'limits'),placementMode:safeOptional(remote?.optionalScriptFields?.placement_mode,'placement'),streamingTailConsumers:safeOptional(remote?.optionalScriptFields?.streaming_tail_consumers,'consumers'),optionalFieldsMatchProposed:sameCanonical(remote?.optionalScriptFields,expected.optionalScriptFields)},

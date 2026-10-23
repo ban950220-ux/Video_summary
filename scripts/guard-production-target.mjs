@@ -2,6 +2,7 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {inspectFullCoverageConfig} from './full-coverage-config.mjs';
+import {assertGeminiPaidConfig} from './gemini-paid-activation.mjs';
 
 const configPath=resolve(import.meta.dirname,'../wrangler.toml');
 
@@ -39,7 +40,7 @@ export function assertProductionTarget(config,env={}){
   for(const [key,value] of Object.entries({ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',SITE_DEPLOYED:'true'})){
     if(!new RegExp(`^${key}\\s*=\\s*"${value}"\\s*$`,'m').test(productionVars))throw Error(`Deployment target guard: invalid ${key}`);
   }
-  try{inspectFullCoverageConfig(config);}
+  try{inspectFullCoverageConfig(config);assertGeminiPaidConfig(config);}
   catch(error){throw Error(`Deployment target guard: ${error.message}`);}
   if(/^\s*(ACCESS_AUD|ACCESS_TEAM_DOMAIN|ACCESS_OWNER_EMAIL|KEY_ENCRYPTION_KEY_B64|GROQ_FREE_ORG_BINDING_JSON)\s*=/m.test(config)){
     throw Error('Deployment target guard: private Access or encryption values must stay out of config');

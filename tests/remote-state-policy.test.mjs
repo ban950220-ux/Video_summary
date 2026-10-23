@@ -5,10 +5,14 @@ import {resolve} from 'node:path';
 import {approvedRemoteBaseline,approvedPreDeployLineage,assertRemoteState,assertProtectedDeployTarget,protectedRemoteBaseline} from '../scripts/remote-state-policy.mjs';
 import {assertProductionTarget} from '../scripts/guard-production-target.mjs';
 import {inspectFullCoverageConfig} from '../scripts/full-coverage-config.mjs';
+import {geminiPaidFlagNames} from '../scripts/gemini-paid-activation.mjs';
+import {safeRemoteBaselineReport} from '../scripts/remote-baseline-preflight.mjs';
 
 const observability=approvedRemoteBaseline.observability;
 const optionalScriptFields=approvedRemoteBaseline.optionalScriptFields;
 const baseline=approvedRemoteBaseline;
+const paidReview=(extra={})=>({kind:'REMOTE_DEPLOYMENT_REVIEW_V1',accountId:baseline.accountId,workerName:baseline.workerName,databaseId:baseline.databaseId,activeVersionId:baseline.activeVersionId,priorVersionId:baseline.priorVersionId,scriptEtag:baseline.scriptEtag,sourceCommit:baseline.sourceCommit,reviewedAt:new Date(Date.now()-1000).toISOString(),expiresAt:new Date(Date.now()+3600000).toISOString(),...extra});
+const reviewEnv=review=>({GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify(review)});
 test('production config permits only the exact optional flag and never embeds Free proof',()=>{
  const config=readFileSync(resolve(import.meta.dirname,'../wrangler.toml'),'utf8');
  assert.equal(assertProductionTarget(config),true);
@@ -193,4 +197,88 @@ test('offline remote policy fails closed on active version, DB, Access, preview 
   ]){const state=remote();state.bindings.push({name:'ASSETS',type:'assets'});mutate(state);assert.throws(()=>assertRemoteState(state,baseline),/Remote deployment guard/,mutate.toString());}
   const incomplete=remote();incomplete.bindings.push({name:'ASSETS',type:'assets'});delete incomplete.observability.logs.invocation_logs;
   assert.throws(()=>assertRemoteState(incomplete,baseline),/OBSERVABILITY_INCOMPLETE/);
+});
+
+test('Gemini paid deployment opt-in is exact and never grants unknown binding names',()=>{
+ const approval=paidReview({geminiTwoPassPaidEnabled:true}),approved=protectedRemoteBaseline(reviewEnv(approval));
+ assert.equal(approved.geminiTwoPassPaidEnabled,true);
+ assert.equal(approved.deploymentEvidenceExpiresAt,approval.expiresAt);
+ for(const value of [false,'true',null,0,1,[],{}])assert.throws(()=>protectedRemoteBaseline(reviewEnv({...approval,geminiTwoPassPaidEnabled:value})),/DEPLOYMENT_EVIDENCE_INVALID/);
+ assert.throws(()=>protectedRemoteBaseline(reviewEnv({...approval,allowAnyPaidBinding:true})),/DEPLOYMENT_EVIDENCE_INVALID/);
+ const old=protectedRemoteBaseline(reviewEnv(paidReview())),state=remote();state.bindings.push({name:'ASSETS',type:'assets'});
+ assert.equal(assertRemoteState(state,old),true);
+ state.bindings.push(...geminiPaidFlagNames.map(name=>({name,type:'plain_text',text:'true'})));
+ for(const postDeploy of [false,true]){
+  assert.equal(assertRemoteState(state,approved,{postDeploy}),true);
+  assert.throws(()=>assertRemoteState(state,old,{postDeploy}),/BINDINGS_UNEXPECTED/);
+  for(let mask=0;mask<7;mask++){
+   const missing=structuredClone(state);
+   missing.bindings=missing.bindings.filter(x=>!geminiPaidFlagNames.includes(x.name)||(mask&(1<<geminiPaidFlagNames.indexOf(x.name))));
+   assert.throws(()=>assertRemoteState(missing,approved,{postDeploy}),/BINDINGS_UNEXPECTED/,`subset ${mask}`);
+  }
+  for(const name of geminiPaidFlagNames){
+   for(const mutate of [
+    x=>{x.bindings.find(b=>b.name===name).type='secret_text';},
+    x=>{x.bindings.find(b=>b.name===name).text='false';},
+    x=>{x.bindings.find(b=>b.name===name).text=true;},
+    x=>{x.bindings.push({...x.bindings.find(b=>b.name===name)});},
+   ]){const altered=structuredClone(state);mutate(altered);assert.throws(()=>assertRemoteState(altered,approved,{postDeploy}),/BINDINGS_UNEXPECTED|RUNTIME_FLAGS_MISMATCH/);}
+  }
+  const unknown=structuredClone(state);unknown.bindings.push({name:'PAID_OTHER',type:'plain_text',text:'true'});
+  assert.throws(()=>assertRemoteState(unknown,approved,{postDeploy}),/BINDINGS_UNEXPECTED/);
+  const broad=structuredClone(state);broad.bindings.find(x=>x.name==='ALLOW_PAID_API').text='true';
+  assert.throws(()=>assertRemoteState(broad,approved,{postDeploy}),/RUNTIME_FLAGS_MISMATCH/);
+ }
+});
+
+test('all Gemini paid flags stay out of TOML in every supported key spelling and environment',()=>{
+ const config=readFileSync(resolve(import.meta.dirname,'../wrangler.toml'),'utf8');
+ const targetConfig=`name = "${baseline.workerName}"\n[[d1_databases]]\ndatabase_id = "${baseline.databaseId}"\n`;
+ const approved=protectedRemoteBaseline(reviewEnv(paidReview({geminiTwoPassPaidEnabled:true})));
+ for(const name of geminiPaidFlagNames){
+  for(const statement of [
+   `[vars]\n${name} = "true"`, `[vars]\n \t${name}\t=\t"true" # active`,
+   `[vars]\n"${name}" = "true"`, `[vars]\n'${name}' = 'true'`,
+   `vars.${name} = "true"`, `vars = { ${name} = "true" }`,
+   `[previews.vars]\n${name} = "true"`, `[env.preview.vars]\n${name} = "true"`,
+   `[vars]\n${name} = true`, `[vars]\n${name} = "false"`,
+   `[vars]\n"${name.slice(0,-1)}\\u0044" = "true"`,
+  ]){
+   assert.throws(()=>assertProductionTarget(config+'\n'+statement+'\n'),/GEMINI_PAID|FULL_COVERAGE_CONFIG_INVALID/);
+   assert.throws(()=>assertProtectedDeployTarget(targetConfig+statement+'\n',approved),/GEMINI_PAID|FULL_COVERAGE_CONFIG_INVALID/);
+  }
+  const comment=`\n # ${name} = "true"\n`;
+  assert.equal(assertProductionTarget(config+comment),true);
+  assert.equal(assertProtectedDeployTarget(targetConfig+comment,approved),true);
+ }
+});
+
+test('paid opt-in expires during a remote await and cannot pass preflight or postcheck',async t=>{
+ const now=Date.UTC(2026,9,23,12);
+ t.mock.timers.enable({apis:['Date'],now});
+ const approval=paidReview({geminiTwoPassPaidEnabled:true,reviewedAt:new Date(now-1000).toISOString(),expiresAt:new Date(now+1000).toISOString()});
+ const approved=protectedRemoteBaseline(reviewEnv(approval)),state=remote();
+ state.bindings.push({name:'ASSETS',type:'assets'},...geminiPaidFlagNames.map(name=>({name,type:'plain_text',text:'true'})));
+ assert.equal(assertRemoteState(state,approved),true);
+ await Promise.resolve();t.mock.timers.setTime(now+1000);
+ for(const postDeploy of [false,true])assert.throws(()=>assertRemoteState(state,approved,{postDeploy}),/DEPLOYMENT_EVIDENCE_EXPIRED/);
+ const targetConfig=`name = "${baseline.workerName}"\n[[d1_databases]]\ndatabase_id = "${baseline.databaseId}"\n`;
+ assert.throws(()=>assertProtectedDeployTarget(targetConfig,approved),/DEPLOYMENT_EVIDENCE_EXPIRED/);
+ assert.throws(()=>assertRemoteState(state,{...approved,deploymentEvidenceExpiresAt:null}),/DEPLOYMENT_EVIDENCE_EXPIRED/);
+});
+
+test('sanitized diagnostics check all three paid values and compose with the existing Free opt-in',()=>{
+ for(const fullCoverageEnabled of [false,true]){
+  const env=reviewEnv(paidReview({geminiTwoPassPaidEnabled:true,...(fullCoverageEnabled?{fullCoverageEnabled:true}:{})}));
+  const state=remote();state.bindings.push({name:'ASSETS',type:'assets'},...geminiPaidFlagNames.map(name=>({name,type:'plain_text',text:'true'})));
+  if(fullCoverageEnabled)state.bindings.push({name:'ENABLE_FULL_COVERAGE',type:'plain_text',text:'true'},{name:'GROQ_FREE_ORG_BINDING_JSON',type:'secret_text'});
+  const report=safeRemoteBaselineReport(state,env);
+  assert.equal(report.bindings.complete,true);assert.equal(report.target.runtimeFlagsMatch,true);assert.equal(report.matchesProposedBaseline,true);
+  for(const name of geminiPaidFlagNames){
+   const changed=structuredClone(state);changed.bindings.find(x=>x.name===name).text='PRIVATE_VALUE_NEVER_LOG';
+   const invalid=safeRemoteBaselineReport(changed,env);
+   assert.equal(invalid.target.runtimeFlagsMatch,false);assert.equal(invalid.matchesProposedBaseline,false);assert.equal(invalid.mismatchCode,'RUNTIME_FLAGS_MISMATCH');
+   assert.equal(JSON.stringify(invalid).includes('PRIVATE_VALUE_NEVER_LOG'),false);
+  }
+ }
 });
