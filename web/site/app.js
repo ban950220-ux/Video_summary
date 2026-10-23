@@ -44,7 +44,12 @@ function switchView(view){
   if(view==='usage')loadUsage().catch(e=>toast(safeError(e)));
   if(view==='settings'){loadQuota().catch(e=>toast(safeError(e)));loadCapacity().catch(e=>toast(safeError(e)));}if(view==='settings')loadConnections().catch(e=>toast(safeError(e)));
 }
-function setInputMode(mode){state.mode=mode;$('#file-fields').hidden=mode!=='text';$('#url-fields').hidden=mode!=='url';$('#audio-fields').hidden=mode!=='audio';document.querySelectorAll('[data-input-mode]').forEach(b=>{const active=b.dataset.inputMode===mode;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));});}
+function setInputMode(mode){state.mode=mode;$('#file-fields').hidden=mode!=='text';$('#url-fields').hidden=mode!=='url';$('#audio-fields').hidden=mode!=='audio'&&mode!=='url';document.querySelectorAll('[data-input-mode]').forEach(b=>{const active=b.dataset.inputMode===mode;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));});}
+function startNewUrlAudioSubmission(){
+ if(!confirm('이전 작업이 삭제된 것을 확인한 경우에만 새 작업을 시작하세요. 응답이 유실되었을 뿐이라면 새 요청은 중복 전사와 토큰 사용을 만들 수 있습니다. 새 작업을 시작할까요?'))return false;
+ try{window.sessionStorage.removeItem('url-owned-audio-submission-v1');}catch{toast('브라우저 임시 저장소를 확인할 수 없습니다. 새 작업을 시작하지 않았습니다.');return false;}
+ $('#resume-job').value='';$('#new-url-audio-job').hidden=true;$('#analysis-progress').textContent='새 작업을 선택했습니다. 제출 전 URL과 MP3를 다시 확인하세요.';return true;
+}
 function resultLine(container,label,value){const div=el('div',{className:'line'});div.append(el('span',{text:label}),el('strong',{text:value}));container.append(div);}
 function audioPlanView(job,progress,target){
  if(progress?.temporaryResultsCleaned){target.append(el('p',{className:'tip',text:cleanedAudioComplete(progress,job)?'임시 조각은 정리됐습니다. 저장된 전체 전사 완료 기록이 있으며 TXT와 리포트에서 결과를 확인하세요.':'임시 조각 정보가 없습니다. 저장된 완료 기록을 확인할 수 없어 진행률과 견적을 표시하지 않습니다.'}));return;}
@@ -115,6 +120,7 @@ function showReport(job,container,persisted,costReconciliation){empty(container)
   }
   if(report?.compositionMode==='groq-full-coverage-global-v1'){
    container.append(el('p',{className:'tip',text:'The global summary is a separate AI synthesis of the evidence-linked section reports. Automatic citation, number and quote checks passed; human meaning review and external fact checking remain pending.'}));
+   if(report.mediaCoverage?.provenance==='SUPADATA_NATIVE')container.append(el('p',{className:'tip',text:'Stored native captions only: '+report.mediaCoverage.transcriptStatus+'; '+report.mediaCoverage.firstMs+'-'+report.mediaCoverage.lastMs+' ms of '+report.mediaCoverage.expectedDurationMs+' ms. Audio accuracy and uncaptained speech are unverified.'}));
    resultLine(container,'Full source range',`${report.sourceCoverage?.firstId??'?'}-${report.sourceCoverage?.lastId??'?'} / ${report.sourceCoverage?.segmentCount??'?'}`);
    container.append(el('p',{className:'tip',text:report.sectionReports?.sourceMode==='FRESH_IMPORTED_TRANSCRIPT'?'This is a separate summary job from the stored transcript. Original work and usage remain unchanged; summary tokens may be duplicated. Transcript accuracy has not been independently verified.':'The old raw:8 request and its usage remain uncertain. The new held-source call has a separate approval and receipt.'}));
   }
@@ -125,24 +131,25 @@ function showReport(job,container,persisted,costReconciliation){empty(container)
    api('/api/jobs/'+job.id+'/paid-summary-status').then(status=>{cost.textContent=paidCostText(status.costReconciliation);}).catch(()=>{});
   }
 }
-async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button'),progress=$('#analysis-progress');let data,bytes,plan;
+async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button'),progress=$('#analysis-progress');let data,bytes,plan,fileSha256,submissionBinding;
  const mode=state.mode,execution=Object.freeze({batch:$('#audio-free-batch-run').checked,provider:$('#audio-provider').value,geminiConsent:$('#audio-gemini-confirm').checked,resume:$('#resume-job').value.trim(),file:$('#audio-file').files[0],rights:$('#audio-rights').checked});
- const live=$('#live-analysis').checked;const title=$('#video-title').value.trim();const duration=Number($('#duration-min').value);
+ const live=$('#live-analysis').checked;const title=$('#video-title').value.trim();const duration=Number($('#duration-min').value);const ownedAudio=mode==='audio'||(mode==='url'&&Boolean(execution.file));
  if(!Number.isInteger(duration)||duration<1||duration>120){toast('영상 길이는 1~120분입니다.');return;}
  button.disabled=true;
  try{
   if(execution.batch&&(mode!=='audio'||!live||!execution.resume||execution.provider!=='groq'||execution.geminiConsent))throw Error('제한 배치는 기존 분석 ID와 Groq만 사용하며 Gemini 동의는 선택하지 마세요.');
   const submittedScope=execution.batch?await api('/api/jobs/'+encodeURIComponent(execution.resume)+'/audio-free-batch'):null;
   if(execution.batch&&(!submittedScope?.approved||submittedScope.jobId!==execution.resume||submittedScope.state!=='APPROVED'))throw Error('제출 시점의 유효한 Groq Free 배치 승인을 확인하세요.');
-  if(mode==='url')data={sourceType:'url',url:$('#youtube-url').value.trim(),durationSeconds:duration*60,title};
+  if(mode==='url'&&!ownedAudio)data={sourceType:'url',url:$('#youtube-url').value.trim(),durationSeconds:duration*60,title};
   else if(mode==='text'){const file=$('#caption-file').files[0];if(!file||!/\.(srt|vtt|txt)$/i.test(file.name)||file.size>2000000)throw Error('2MB 이하 SRT/VTT/TXT를 선택하세요.');data={sourceType:'text',filename:file.name,transcript:await file.text(),durationSeconds:duration*60,title:title||file.name,persistTranscript:true};}
-  else{const file=execution.file;if(!file||!/\.mp3$/i.test(file.name)||file.size>200000000)throw Error('200MB 이하 MP3를 선택하세요.');if(!live||!execution.rights)throw Error('무료 API 처리와 적법한 보유 음성 업로드 동의가 필요합니다.');progress.textContent='MP3 시간축 및 조각 계획 확인 중…';bytes=new Uint8Array(await file.arrayBuffer());plan=planMp3(bytes);data={sourceType:'audio',durationSeconds:plan.durationSeconds,title:title||file.name};}
-  await api('/api/preflight',{method:'POST',body:data});progress.textContent='분석 기록 생성 중…';let result;const resume=mode==='audio'?execution.resume:'';if(resume){result=await api('/api/jobs/'+encodeURIComponent(resume));if(result.job.source_type!=='audio'||Math.abs(result.job.duration_seconds-plan.durationSeconds)>1)throw Error('선택한 음성과 이전 분석이 다릅니다.');result.persisted=true;}else result=await api('/api/jobs',{method:'POST',body:data});const id=result.job.id;
-  $('#result-panel').hidden=false;showReport(result.job,$('#result-content'),result.persisted);
+  else{const file=execution.file;if(!file||!/\.mp3$/i.test(file.name)||file.size>200000000)throw Error('200MB 이하 MP3를 선택하세요.');if(!live||!execution.rights)throw Error('무료 API 처리와 적법한 보유 음성 업로드 동의가 필요합니다.');progress.textContent='MP3 시간축 및 조각 계획 확인 중…';bytes=new Uint8Array(await file.arrayBuffer());plan=planMp3(bytes);data={sourceType:'audio',...(mode==='url'?{url:$('#youtube-url').value.trim()}:{}),durationSeconds:plan.durationSeconds,title:title||file.name};if(mode==='url'){fileSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');if(!execution.resume){submissionBinding=JSON.stringify([data.url,data.durationSeconds,data.title,fileSha256]);let previous;try{previous=JSON.parse(window.sessionStorage.getItem('url-owned-audio-submission-v1')||'null');}catch{throw Error('브라우저의 임시 저장소를 사용할 수 없어 중복 없는 작업 생성을 보장할 수 없습니다.');}const submissionId=previous?.binding===submissionBinding&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(previous.id)?previous.id:crypto.randomUUID();try{window.sessionStorage.setItem('url-owned-audio-submission-v1',JSON.stringify({binding:submissionBinding,id:submissionId}));}catch{throw Error('브라우저의 임시 저장소를 사용할 수 없어 중복 없는 작업 생성을 보장할 수 없습니다.');}data.submissionId=submissionId;data.ownedAudioSha256=fileSha256;}}}
+  const quote=await api('/api/preflight',{method:'POST',body:data});progress.textContent='분석 기록 생성 중…';let result;const resume=ownedAudio?execution.resume:'';if(resume){result=await api('/api/jobs/'+encodeURIComponent(resume));if(result.job.source_type!=='audio'||Math.abs(result.job.duration_seconds-plan.durationSeconds)>1||(mode==='url'&&(result.job.video_id!==quote.videoId||result.job.source_url!==`https://www.youtube.com/watch?v=${quote.videoId}`)))throw Error('선택한 음성과 이전 분석이 다릅니다.');result.persisted=true;}else result=await api('/api/jobs',{method:'POST',body:data});const id=result.job.id;
+  if(mode==='url'&&ownedAudio)$('#new-url-audio-job').hidden=true;$('#result-panel').hidden=false;showReport(result.job,$('#result-content'),result.persisted);
+  if(mode==='url'&&ownedAudio&&result.job.audit?.audioProcessingCoverage===1){progress.textContent='기존 작업의 전사가 이미 저장되어 있습니다. 라이브러리에서 전체 요약을 확인하세요.';return;}
   if(live){
-   if(mode==='url'){progress.textContent='기존 자막 조회 중…';result=await api('/api/jobs/'+id+'/native',{method:'POST',body:{}});if(['NEED_UPLOAD','NATIVE_PENDING'].includes(result.job.status)){showReport(result.job,$('#result-content'),true);throw Error(result.job.status==='NATIVE_PENDING'?'제공자 처리 대기: 이력의 Supadata 자막 처리 상태 조회를 사용하세요. 이는 Supadata API 요청이며 무료 할당을 예약합니다.':'기존 자막이 없습니다. 보유 음성/자막을 사용하세요.');}}
-   if(mode==='audio'){
-    const fileSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
+   if(mode==='url'&&!ownedAudio){progress.textContent='기존 자막 조회 중…';result=await api('/api/jobs/'+id+'/native',{method:'POST',body:{}});if(['NEED_UPLOAD','NATIVE_PENDING'].includes(result.job.status)){showReport(result.job,$('#result-content'),true);throw Error(result.job.status==='NATIVE_PENDING'?'제공자 처리 대기: 이력의 Supadata 자막 처리 상태 조회를 사용하세요. 이는 Supadata API 요청이며 무료 할당을 예약합니다.':'기존 자막이 없습니다. 보유 음성/자막을 사용하세요.');}}
+   if(ownedAudio){
+    fileSha256??=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
     if(execution.batch&&submittedScope.fileSha256!==fileSha256)throw Error('제출 시점에 승인된 MP3와 선택한 파일이 다릅니다.');
     await api('/api/jobs/'+id+'/audio-plan',{method:'POST',body:{rightsConfirmed:true,fileSha256,chunks:plan.chunks.map(({index,start,end})=>({index,start,end}))}});
     if(execution.batch){
@@ -159,7 +166,7 @@ async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button
      onUpdate:status=>{progress.textContent=status.waitingUntil?'제공자 호출 간격 대기 중 · '+fmtDate(status.waitingUntil):'음성 전사 '+(status.index+1)+' / '+plan.chunks.length+' · 기록 '+id;},
      sendChunk:async(c,provider,reviewedId,options)=>{const prepared=prepareMp3Chunk(bytes.subarray(c.byteStart,c.byteEnd));const response=await fetch('/api/jobs/'+id+'/audio-chunk?index='+c.index+'&provider='+provider+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream',...(reviewedId?{'x-provider-log-429-no-output-confirmed':'true','x-provider-log-429-operation-id':reviewedId}:{}),...(options?.unknownCapacityProbe?{'x-groq-free-unknown-probe':'true'}:{})},credentials:'same-origin',body:prepared.bytes});const result=await response.json();return response.ok?result:{code:result.error?.code||'AUDIO_SEND_FAILED'};}});
     if(!run.complete)throw Error('음성 전사를 일시 중단했습니다: '+run.reason+' · 조각 '+((run.index??0)+1)+' · 기록 '+id+'. 제공자 관측치와 이력을 확인한 뒤 같은 파일로 재개하세요.');
-    result=await api('/api/jobs/'+id+'/audio-finish',{method:'POST',body:{}});showReport(result.job,$('#result-content'),true);
+    result=await api('/api/jobs/'+id+'/audio-finish',{method:'POST',body:{}});showReport(result.job,$('#result-content'),true);if(mode==='url'){progress.textContent='전사가 저장되었습니다. 라이브러리에서 전체 요약 계획을 확인하고 별도로 승인하세요.';return;}
    }
    const summaryPlan=await api('/api/jobs/'+id+'/summary-plan');
    progress.textContent='원문 근거 연결 요약 '+summaryPlan.stages+'개 구간 작성 중… 첫 단계 예약 상한 '+summaryPlan.firstPassUnits+' 단위. 할당이 부족하면 완료 단계만 보관하고 중단합니다.';
@@ -169,7 +176,7 @@ async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button
    result=summary.result;
   }
   showReport(result.job,$('#result-content'),result.persisted);progress.textContent='처리 결과를 저장했습니다. 완전 전사·외부 사실 검증 상태는 리포트를 확인하세요.';toast('분석 결과 저장 완료');
- }catch(e){progress.textContent=safeError(e)+' — 완료된 원문과 조각은 이력에 보관됩니다. 불명확한 API 요청은 자동 재시도하지 않습니다.';toast(safeError(e));}finally{button.disabled=false;}
+ }catch(e){if(e?.code==='AUDIO_SUBMISSION_DELETED'&&mode==='url')$('#new-url-audio-job').hidden=false;progress.textContent=safeError(e)+' — 완료된 원문과 조각은 이력에 보관됩니다. 불명확한 API 요청은 자동 재시도하지 않습니다.';toast(safeError(e));}finally{button.disabled=false;}
 }
 function detailCurrent(jobId,requestId,target){return detailRequestIsCurrent({expectedRequestId:requestId,currentRequestId:libraryDetailRequest,expectedJobId:jobId,visibleJobId:target.dataset.jobId,view:state.view,hidden:target.hidden});}
 function showFreeBatchChoice(job,target,requestId){
@@ -859,7 +866,7 @@ function libraryCard(job){
    whole.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showFullCoverageChoice(job,target,detailRequest);};
    actions.append(whole);
   }
-  if(job.source_type==='text'&&job.status==='TRANSCRIPT_UNVERIFIED'&&job.freshTranscriptJob!==true){
+  if(((job.source_type==='text'&&job.status==='TRANSCRIPT_UNVERIFIED')||(job.source_type==='url'&&['TRANSCRIPT_UNVERIFIED','PARTIAL_TRANSCRIPT'].includes(job.status)&&job.audit?.providerCompleteness==='NOT_INDEPENDENTLY_VERIFIED'))&&job.freshTranscriptJob!==true){
    const fresh=el('button',{className:'btn secondary small',text:'전사로 별도 전체 AI 요약 작업 만들기'});
    fresh.onclick=async()=>{fresh.disabled=true;try{
     if(!confirm('저장된 전사를 재사용해 새 요약 작업을 만듭니다. 원본 작업과 사용량은 그대로 남고, 새 요약 호출에는 중복 토큰 사용이 생길 수 있습니다. 음성 재전사는 하지 않습니다. 계속할까요?'))return;
@@ -965,6 +972,7 @@ function init(){
   $('#quota-form').onsubmit=async ev=>{ev.preventDefault();try{await api('/api/live/quota',{method:'PUT',body:{provider:$('#quota-provider').value,allowance:Number($('#quota-allowance').value),requestLimit:Number($('#quota-requests').value),billingDisabled:$('#quota-confirm').checked,freeOnly:$('#quota-confirm').checked}});await loadQuota();toast('본인 확인 기반 무료 할당을 저장했습니다.');}catch(e){toast(safeError(e));}};
   $('#capacity-form').onsubmit=async ev=>{ev.preventDefault();try{await api('/api/live/capacity',{method:'PUT',body:capacityPayload()});await loadCapacity();toast('공급자 잔여량 관측을 저장했습니다. 60초 뒤 다시 확인해야 합니다.');}catch(e){toast(safeError(e));}};
   $('#analyze-form').addEventListener('submit',handleAnalyze);
+  $('#new-url-audio-job').onclick=startNewUrlAudioSubmission;
   $('#library-search').addEventListener('input',()=>{clearTimeout(init.searchTimer);init.searchTimer=setTimeout(()=>{state.page=0;loadLibrary().catch(e=>toast(safeError(e)));},320);});
   $('#reload-library').onclick=()=>loadLibrary().catch(e=>toast(safeError(e)));
   $('#library-prev').onclick=()=>{state.page=Math.max(0,state.page-1);loadLibrary().catch(e=>toast(safeError(e)));};

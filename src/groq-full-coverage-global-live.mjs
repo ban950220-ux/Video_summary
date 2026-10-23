@@ -75,7 +75,7 @@ export async function handleFullCoverageGlobalAction(request,env,{id,job,sourceO
  if(body.step==='finalize'){
   if(!progress.complete||unsettled||body.confirmNoProviderCall!==true)fail('GLOBAL_FINAL_NOT_READY');
   const sections=assembleFullCoverageReport({plan:current.plan,records:current.sections,segments:source.segments,raw:source.raw,legacyFailureEvidence:heldFailureEvidence});
-  const report=await fullCoverageGlobalReport({context,progress,segments:source.segments,sections,semanticReview:body.semanticReview});
+  const report=await fullCoverageGlobalReport({context,progress,segments:source.segments,sections,semanticReview:body.semanticReview,sourceScope:job.audit?.fullCoverageFresh?.sourceScope??null});
   const synthesisProofs=durable.rows.map(row=>{
    const record=JSON.parse(row.result_json),saved=durable.savedNodes.get(record.key),recovery=durable.recoveryProofs.find(item=>item.failedId===row.id);
    if(!saved||!['DONE','FAILED_UNCERTAIN'].includes(row.state)||Boolean(recovery)!==(row.state==='FAILED_UNCERTAIN'))fail('GLOBAL_FINAL_NODE_CHANGED');

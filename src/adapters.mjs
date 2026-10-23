@@ -18,6 +18,16 @@ function safeGroqRateLimit(headers){
  const number=(name,max)=>{const raw=headers.get(name);if(raw===null||!/^\d{1,8}$/.test(raw))return null;const value=Number(raw);return value<=max?value:null;};
  return {retryAfterSeconds:number('retry-after',3600),remainingRequests:number('x-ratelimit-remaining-requests',1000000),remainingAudioSeconds:number('x-ratelimit-remaining-audio-seconds',86400)};
 }
+function supadataTimedSegments(content){
+  if(!Array.isArray(content)) throw new ProviderError('TRANSCRIPT_RESPONSE_INVALID','Supadata timed transcript is missing.');
+  if(content.length===0) throw new ProviderError('TRANSCRIPT_EMPTY','Supadata returned no spoken segments.');
+  const segments=content.map(s=>{
+    if(!s||typeof s.text!=='string'||!s.text.trim()||!Number.isFinite(s.offset)||!Number.isFinite(s.duration)||s.offset<0||s.duration<=0||!Number.isFinite(s.offset+s.duration)||s.offset+s.duration>Number.MAX_SAFE_INTEGER) throw new ProviderError('TRANSCRIPT_RESPONSE_INVALID','Supadata transcript contains an invalid timed segment.');
+    return {text:s.text.trim(),startMs:s.offset,endMs:s.offset+s.duration};
+  });
+  if(segments.some((s,i)=>i>0&&s.startMs<segments[i-1].startMs)) throw new ProviderError('TRANSCRIPT_RESPONSE_INVALID','Supadata transcript segments are out of order.');
+  return segments;
+}
 export async function fetchSupadataCaption(url,env,fetchFn=fetch){
   assertLive(env,'SUPADATA');
   if(!env.SUPADATA_API_KEY) throw new ProviderError('KEY_MISSING','Supadata API 키 미설정');
@@ -34,9 +44,10 @@ export async function fetchSupadataCaption(url,env,fetchFn=fetch){
   if(res.status===206) return {status:'NO_CAPTIONS',provider:'supadata',billedCredits,segments:[],usageProvenance:billedCredits===null?'UNKNOWN':'EXACT_APP'};
   if(!res.ok) throw new ProviderError(String(res.status),`Supadata HTTP ${res.status}`);
   const data=await res.json();
-  if(data.jobId) return {status:'PENDING',jobId:data.jobId,billedCredits,provider:'supadata',segments:[]};
-  const segments=(Array.isArray(data.content)?data.content:[]).map(s=>({text:String(s.text||''),startMs:Number(s.offset),endMs:Number(s.offset)+Number(s.duration)})).filter(s=>s.text&&Number.isFinite(s.startMs)&&Number.isFinite(s.endMs)&&s.endMs>s.startMs);
-  return {status:'TRANSCRIPT_AVAILABLE',provider:'supadata',segments,language:data.lang||null,billedCredits,usageProvenance:billedCredits===null?'UNKNOWN':'EXACT_APP'};
+  if(!data||typeof data!=='object'||Array.isArray(data))throw new ProviderError('TRANSCRIPT_RESPONSE_INVALID','Supadata response is invalid.');
+  if(data.jobId){if(typeof data.jobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(data.jobId))throw new ProviderError('TRANSCRIPT_RESPONSE_INVALID','Supadata job ID is invalid.');return {status:'PENDING',jobId:data.jobId,billedCredits,provider:'supadata',segments:[]};}
+  const segments=supadataTimedSegments(data.content);
+  return {status:'TRANSCRIPT_AVAILABLE',provider:'supadata',provenance:'SUPADATA_NATIVE',segments,language:data.lang||null,billedCredits,usageProvenance:billedCredits===null?'UNKNOWN':'EXACT_APP',audioVerified:false};
 }
 
 export async function transcribeOwnedAudio({bytes,name,mime,durationSeconds,env,fetchFn=fetch,beforeFetch}){
@@ -117,8 +128,8 @@ export async function summarizeTranscriptWithGemini(text,env,fetchFn=fetch,befor
 export async function pollSupadataCaption(jobId,env,fetchFn=fetch){
  assertLive(env,'SUPADATA');if(typeof jobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(jobId))throw new InputError('제공자 작업 ID 오류');
  const data=await requestJson('https://api.supadata.ai/v1/transcript/'+encodeURIComponent(jobId),{headers:{'x-api-key':env.SUPADATA_API_KEY}},fetchFn);
- if(data.status==='failed')return {status:'NO_CAPTIONS',segments:[]};
+ if(data.status==='failed')throw new ProviderError('TRANSCRIPT_JOB_FAILED','Supadata transcript job failed.');
  if(data.status!=='completed')return {status:'PENDING',jobId,segments:[]};
- const result=data.result||data;const segments=(Array.isArray(result.content)?result.content:[]).map(s=>({text:String(s.text||''),startMs:Number(s.offset),endMs:Number(s.offset)+Number(s.duration)})).filter(s=>s.text&&Number.isFinite(s.startMs)&&s.endMs>s.startMs);
- return {status:segments.length?'TRANSCRIPT_AVAILABLE':'NO_CAPTIONS',segments,provider:'supadata'};
+ const result=data.result||data;const segments=supadataTimedSegments(result.content);
+ return {status:'TRANSCRIPT_AVAILABLE',segments,provider:'supadata',provenance:'SUPADATA_NATIVE',audioVerified:false};
 }

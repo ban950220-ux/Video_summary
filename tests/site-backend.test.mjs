@@ -50,6 +50,21 @@ const env={ADMIN_TOKEN:token,DB:new FakeDB(),KEY_ENCRYPTION_KEY_B64:root};
 const request=(path,{method='GET',body,auth=token}={})=>new Request('https://private.invalid'+path,{method,headers:{Authorization:'Bearer '+auth,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
 const call=async(path,opts={})=>worker.fetch(request(path,opts),env);
 
+test('legacy MP3-only job still persists without a YouTube identity',async()=>{
+  const isolated={...env,DB:new FakeDB()};
+  const localCall=(path,opts={})=>worker.fetch(request(path,opts),isolated);
+  const created=await localCall('/api/jobs',{method:'POST',body:{sourceType:'audio',durationSeconds:5892,title:'Owned MP3'}});
+  assert.equal(created.status,202);
+  const {job,persisted}=await created.json();
+  assert.equal(persisted,true);
+  const stored=isolated.DB.jobs.get(job.id);
+  assert.equal(stored.video_id,null);
+  assert.equal(stored.source_url,null);
+  const read=await (await localCall('/api/jobs/'+job.id)).json();
+  assert.equal(read.job.video_id,stored.video_id);
+  assert.equal(read.job.source_url,stored.source_url);
+});
+
 test('AES-GCM vault encrypt/decrypt, random IV, provider-bound authenticated data',async()=>{
   const key=configuredMasterKey(env);assert.equal(key.length,32);
   const a=await encryptProviderKey(key,'groq','gsk_test_example_never_real');

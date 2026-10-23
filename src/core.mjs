@@ -93,12 +93,26 @@ export function estimateSource({durationSeconds,sourceType='url',hasCaptions=nul
   const routes=[];
   if(sourceType==='url'){
     routes.push({provider:'supadata',capability:'URL_NATIVE_CAPTION_ONLY',available:'CONDITIONAL',creditsMin:1,creditsMax:1,notes:'mode=native 강제: 자막 없을 때도 206 응답은 1크레딧 청구됨. AI 자동 생성 비활성.'});
-    routes.push({provider:'supadata',capability:'URL_GENERATED_ASR_OPTIONAL_DISABLED',available:'BLOCKED_BY_DEFAULT',creditsMin:Math.ceil(mins*2),creditsMax:Math.ceil(mins*2),notes:'mode=generate/auto는 무료 100크레딧 경로에서 비활성. 승인 및 잔여량 실측 후 별도 평가.'});
+    routes.push({provider:'supadata',capability:'URL_GENERATED_ASR_OPTIONAL_DISABLED',available:'BLOCKED_BY_DEFAULT',creditsMin:2*Math.ceil(mins),creditsMax:2*Math.ceil(mins),notes:'mode=generate/auto는 무료 100크레딧 경로에서 비활성. 승인 및 잔여량 실측 후 별도 평가.'});
     routes.push({provider:'gemini',capability:'VIDEO_ASSIST',available:'CONDITIONAL',creditsMin:null,creditsMax:null,notes:'영상 이해는 FULL 전사와 다름'});
   }
   if(hasOwnedAudio||sourceType==='audio') routes.push({provider:'groq',capability:'AUDIO_STT',available:'CONDITIONAL',audioSeconds:d,paidCostUSD:Number((d/3600*.04).toFixed(4)),notes:'보유 음성/크기/포맷 검증이 선행돼야 함'});
   if(sourceType==='text') routes.push({provider:'local',capability:'TEXT_IMPORT',available:'YES',creditsMin:0,creditsMax:0});
   return routes;
+}
+
+// Offline admission estimate only. It never starts a provider request. A timed-out
+// generation may still be billed, so reconcile it before considering a new attempt.
+export function planSupadataUrlGeneration({durationSeconds,rightsConfirmed=false,publicAccessConfirmed=false,freePlanConfirmed=false,billingDisabledConfirmed=false,explicitGenerationApproval=false,freeCreditsRemaining=null,priorAttemptUncertain=false}) {
+  const creditsReserved=2*Math.ceil(durationSec(durationSeconds)/60);
+  const blockedReason=priorAttemptUncertain?'PRIOR_ATTEMPT_UNCERTAIN'
+    :!rightsConfirmed?'RIGHTS_UNVERIFIED'
+    :!publicAccessConfirmed?'PUBLIC_ACCESS_UNVERIFIED'
+    :!explicitGenerationApproval?'GENERATION_APPROVAL_REQUIRED'
+    :!freePlanConfirmed||!billingDisabledConfirmed?'FREE_BILLING_STATUS_UNVERIFIED'
+    :!Number.isSafeInteger(freeCreditsRemaining)||freeCreditsRemaining<0?'FREE_CREDITS_UNVERIFIED'
+    :creditsReserved>freeCreditsRemaining?'INSUFFICIENT_FREE_CREDITS':null;
+  return {allowed:blockedReason===null,blockedReason,creditsReserved,creditBasis:'CONSERVATIVE_WHOLE_MINUTE_ESTIMATE_NOT_PROVIDER_CHARGE',requestMode:'generate',provider:'supadata'};
 }
 
 export function usableFreeUnits({limit,observedUsed=null,appUsed=0,reserved=0,otherUsageKnown=false}) {

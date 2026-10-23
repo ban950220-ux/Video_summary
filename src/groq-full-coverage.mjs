@@ -1,4 +1,6 @@
 import {validateAnalysis} from './report.mjs';
+import {transcriptAudit} from './core.mjs';
+import {auditGaps} from './report.mjs';
 import {assertGroupCoverage} from './summary-plan.mjs';
 import {groqSummaryRequestBody} from './groq-summary-contract.mjs';
 import {assertGrounding,completeSource,reviewedFullCoverageLegacy} from './groq-summary.mjs';
@@ -29,6 +31,11 @@ export async function completeFreshTranscriptSource(env,job,sourceOf){
  const source=await sourceOf(env,job.id);assertFullSource(source?.segments,source?.raw);
  const sourceHash=await hash(JSON.stringify({raw:source.raw,segments:source.segments}));
  if(source.provenance!=='FRESH_IMPORTED_TRANSCRIPT'||job.audit.fullCoverageFresh.sourceHash!==sourceHash||source.segments.at(-1).endMs>job.duration_seconds*1000+2000)fail('FRESH_SOURCE_BINDING_INVALID');
+ const scope=job.audit.fullCoverageFresh.sourceScope;
+ if(scope?.provenance==='SUPADATA_NATIVE'){
+  const timed=transcriptAudit(source.segments,job.duration_seconds,false);
+  if(JSON.stringify(job.audit.sourceScope)!==JSON.stringify(scope)||scope.coverageMeaning!=='STORED_TRANSCRIPT_SEGMENTS_ONLY'||scope.audioAccuracy!=='NOT_INDEPENDENTLY_VERIFIED'||scope.transcriptStatus!==job.audit.status||scope.transcriptStatus!==timed.status||scope.timelineRatio!==timed.timelineRatio||scope.firstMs!==source.segments[0].startMs||scope.lastMs!==source.segments.at(-1).endMs||scope.expectedDurationMs!==Math.round(job.duration_seconds*1000)||JSON.stringify(scope.gaps)!==JSON.stringify(auditGaps(source.segments,job.duration_seconds).gaps))fail('FRESH_NATIVE_COVERAGE_CHANGED');
+ }
  return {source,transcriptHash:sourceHash,legacyTranscriptHash:null};
 }
 
