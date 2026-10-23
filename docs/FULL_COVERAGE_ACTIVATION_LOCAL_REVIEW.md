@@ -1,5 +1,12 @@
 # Full coverage activation: local review only
 
+For PR27–29 trees where 0017–0020 also appear as pending, use the separately
+reviewed single-file scope and interruption rules in
+`MIGRATION_SEQUENCE_0016_0020.md`. The original one-pending-file instructions
+below are not permission to run bulk apply or to hide later migrations from
+the full repository observation. This historical approval/status text does not
+replace current authorization or fresh operational evidence.
+
 This document does not authorize a Cloudflare change, provider request, or paid use. The current production Worker and D1 must be inspected again in the owner session before acting. Production builds were reported disabled and no queued build visible at 2026-10-21 08:36:52 UTC; with builds disabled, the UI hid Build/Deploy commands and Build variables, so their *current* values are unknown.
 
 ## What this patch changes

@@ -1,10 +1,18 @@
 // Offline assessment of a read-only operator snapshot. This module never connects to D1.
 import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
+import {createHash} from 'node:crypto';
+import {reviewedMigrationSource,matchesReviewedMigrationSource} from './migration-source-catalog.mjs';
 
 export const databaseId='d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34';
 export const migrationName='0016_full_coverage_write_lock.sql';
-const migrationSql=readFileSync(resolve(import.meta.dirname,'../migrations',migrationName),'utf8');
+// Authenticate the SAME buffer used to derive expectations. A later file hash
+// cannot authenticate SQL that was read before the file was restored or changed.
+const migrationBytes=readFileSync(resolve(import.meta.dirname,'../migrations',migrationName));
+const reviewedMigration=reviewedMigrationSource().files.find(file=>file.name===migrationName);
+const importHash=createHash('sha256').update(migrationBytes).digest('hex');
+if(!reviewedMigration||![reviewedMigration.sha256,reviewedMigration.crlfSha256].includes(importHash))throw Error('FULL_COVERAGE_MIGRATION_SOURCE_INVALID');
+const migrationSql=migrationBytes.toString('utf8');
 const statements=[...migrationSql.matchAll(/^CREATE TRIGGER IF NOT EXISTS (full_coverage_[a-z_]+) [\s\S]*?END;/gm)];
 export const triggerNames=statements.map(match=>match[1]).sort();
 // SQLite drops IF NOT EXISTS from sqlite_master.sql. Fold only unquoted SQL
@@ -39,15 +47,33 @@ const isUtc=value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d
 const nonEmpty=value=>typeof value==='string'&&value.length>0;
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const requiredTables=['jobs','usage_events','yta_operations','yta_sources'];
+const source=reviewedMigrationSource(),migrationIndex=source.files.findIndex(file=>file.name===migrationName);
+const prerequisiteMigrations=source.files.slice(0,migrationIndex).map(file=>file.name);
+const deferredMigrations=source.files.slice(migrationIndex+1).map(file=>file.name);
+const migrationHashes=[source.files[migrationIndex].sha256,source.files[migrationIndex].crlfSha256];
+const fresh=(value,now)=>isUtc(value)&&Date.parse(value)<=now&&now-Date.parse(value)<=5*60_000;
+// Explicit single-file tooling scope, separately observed from the FULL repo
+// pending list. This never filters or rewrites the supplied remote observation.
+// Installed Wrangler applies EVERY pending file in its configured directory.
+function singleFileScope(scope,pending){
+ return scope?.kind==='SINGLE_MIGRATION_DIRECTORY_V1'&&scope.databaseId===databaseId
+  &&scope.migrationsTable==='d1_migrations'
+  &&Array.isArray(scope.files)&&scope.files.length===1
+  &&migrationHashes.some(sha256=>same(scope.files,[{name:migrationName,sha256}]))
+  &&same(scope.pendingMigrations,pending);
+}
 
 // Snapshot fields must come from a fresh read-only D1/Build inspection, not from
 // this script. A pass is a review aid, not an authorization to apply a migration.
 export function assessFullCoverageMigration(snapshot,{now=Date.now()}={}){
  const blocks=[];
- if(snapshot?.kind!=='FULL_COVERAGE_MIGRATION_READONLY_V1'||snapshot.databaseId!==databaseId)blocks.push('TARGET_UNVERIFIED');
+ if(snapshot?.kind!=='FULL_COVERAGE_MIGRATION_READONLY_V2'||snapshot.databaseId!==databaseId)blocks.push('TARGET_UNVERIFIED');
  const at=isUtc(snapshot?.capturedAt)?Date.parse(snapshot.capturedAt):NaN;
  if(!Number.isFinite(at)||at>now||now-at>5*60_000)blocks.push('SNAPSHOT_STALE');
- if(!same(snapshot?.pendingMigrations,[migrationName]))blocks.push('PENDING_MIGRATIONS_UNEXPECTED');
+ if(!matchesReviewedMigrationSource(snapshot?.repositorySource))blocks.push('MIGRATION_SOURCE_UNVERIFIED');
+ if(!same(snapshot?.pendingMigrations,[migrationName,...deferredMigrations]))blocks.push('PENDING_MIGRATIONS_UNEXPECTED');
+ if(!singleFileScope(snapshot?.executionScope,[migrationName]))blocks.push('SINGLE_MIGRATION_SCOPE_UNVERIFIED');
+ if(!same(snapshot?.appliedMigrations,prerequisiteMigrations))blocks.push('MIGRATION_HISTORY_UNVERIFIED');
  if(!same(snapshot?.managedTriggerNames,[]))blocks.push('MANAGED_TRIGGERS_PRESENT');
  if(!Array.isArray(snapshot?.presentTables)||!requiredTables.every(table=>snapshot.presentTables.includes(table)))blocks.push('TABLES_MISSING');
  if(snapshot?.unsettledRelevantOperationCount!==0)blocks.push('OPERATIONS_IN_FLIGHT');
@@ -60,9 +86,23 @@ export function assessFullCoverageMigration(snapshot,{now=Date.now()}={}){
 
 // Review the D1 sqlite_master SQL after apply. Names alone cannot prove the
 // installed triggers match the reviewed migration, especially with IF NOT EXISTS.
-export function verifyFullCoverageMigration(after){
- const actual=after?.triggers;
- if(!Array.isArray(actual)||actual.length!==triggerNames.length||!same(after?.pendingMigrations,[]))return {verified:false,reason:'POST_MIGRATION_SHAPE_UNVERIFIED'};
+export function verifyFullCoverageMigration(after,{before,now=Date.now()}={}){
+ if(!before)return {verified:false,reason:'BEFORE_SNAPSHOT_REQUIRED'};
+ if(!assessFullCoverageMigration(before,{now}).readyForOperatorReview)return {verified:false,reason:'BEFORE_SNAPSHOT_UNVERIFIED'};
+ // Re-read ALL source bytes after the operation as well. Same filenames do not
+ // establish unchanged SQL, even though only 0016 may run in this stage.
+ if(!matchesReviewedMigrationSource(after?.repositorySource))return {verified:false,reason:'MIGRATION_SOURCE_UNVERIFIED'};
+ if(after?.databaseId!==databaseId||!fresh(after?.capturedAt,now)||Date.parse(after.capturedAt)<Date.parse(before.capturedAt)
+  ||!singleFileScope(after?.executionScope,[])||!same(after.executionScope.files,before.executionScope.files)
+  ||!same(after?.appliedMigrations,[...prerequisiteMigrations,migrationName]))return {verified:false,reason:'POST_MIGRATION_SCOPE_UNVERIFIED'};
+ if(!same(after?.pendingMigrations,deferredMigrations))return {verified:false,reason:'POST_MIGRATION_SHAPE_UNVERIFIED'};
+ return verifyFullCoverageTriggerDefinitions(after?.triggers);
+}
+
+// Schema comparison only. This does not assess a queue, execution scope, backup,
+// authorization or migration completion. Production postcheck is the function above.
+export function verifyFullCoverageTriggerDefinitions(actual){
+ if(!Array.isArray(actual)||actual.length!==triggerNames.length)return {verified:false,reason:'POST_MIGRATION_SHAPE_UNVERIFIED'};
  const byName=new Map(actual.map(row=>[row?.name,normalizeSql(row?.sql)]));
  if(byName.size!==triggerNames.length||triggerNames.some(name=>byName.get(name)!==expectedTriggerSql[name]))return {verified:false,reason:'TRIGGER_DEFINITION_MISMATCH'};
  return {verified:true,reason:null};
