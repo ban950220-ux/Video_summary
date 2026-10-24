@@ -1,7 +1,7 @@
 // Fail-closed lexical gate for the two activation names in wrangler.toml.
 // It intentionally accepts one narrow spelling instead of attempting to
 // normalize every TOML key/table form. Any other active occurrence is denied.
-const withoutComment=line=>{
+export const withoutComment=line=>{
  let quoted=null,escaped=false;
  for(let i=0;i<line.length;i++){
   const char=line[i];

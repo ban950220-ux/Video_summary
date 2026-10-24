@@ -2,6 +2,7 @@
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {approvedRemoteBaseline,approvedPreDeployLineage,protectedRemoteBaseline,legacyQuoteRecoveryBinding,legacyGroqRecoveryScopeBinding,sameCanonical} from './remote-state-policy.mjs';
+import {geminiPaidFlagNames,assertGeminiPaidReviewFresh} from './gemini-paid-activation.mjs';
 
 export const expectedPriorVersionId=approvedPreDeployLineage.priorVersionId;
 const etag=/^[0-9a-f]{64}$/i;
@@ -19,18 +20,23 @@ function completeRuntime(value){
  if(Object.hasOwn(value,'compatibility_flags')&&(!Array.isArray(value.compatibility_flags)||!value.compatibility_flags.every(flag=>typeof flag==='string'&&flag.trim().length>0)))return false;
  return true;
 }
-function knownBindingAddition(current,prior){
+function knownBindingAddition(current,prior,baseline){
  const present=current.resources?.bindings,original=prior.resources?.bindings;
- if(!Array.isArray(present)||!Array.isArray(original)||present.length!==original.length+1)return false;
+ if(!Array.isArray(present)||!Array.isArray(original))return false;
  const names=present.map(item=>item?.name),oldNames=original.map(item=>item?.name);
- if(new Set(names).size!==names.length||new Set(oldNames).size!==oldNames.length)return false;
+ if(names.some(name=>typeof name!=='string')||oldNames.some(name=>typeof name!=='string')||new Set(names).size!==names.length||new Set(oldNames).size!==oldNames.length)return false;
  const added=present.filter(item=>!oldNames.includes(item.name));
+ if(baseline.geminiTwoPassPaidEnabled===true&&present.length===original.length+3&&added.length===3&&geminiPaidFlagNames.every(name=>added.some(item=>item.name===name&&item.type==='plain_text'&&item.text==='true'))){
+  return sameCanonical(present.filter(item=>!geminiPaidFlagNames.includes(item.name)).sort((a,b)=>a.name.localeCompare(b.name)),[...original].sort((a,b)=>a.name.localeCompare(b.name)));
+ }
+ if(present.length!==original.length+1)return false;
  if(added.length!==1)return false;
  const binding=added[0],known=binding.name===legacyQuoteRecoveryBinding&&binding.type==='plain_text'&&typeof binding.text==='string'&&binding.text.length>0||binding.name===legacyGroqRecoveryScopeBinding&&binding.type==='secret_text'&&!Object.hasOwn(binding,'text');
  return known&&sameCanonical(present.filter(item=>item.name!==binding.name).sort((a,b)=>a.name.localeCompare(b.name)),[...original].sort((a,b)=>a.name.localeCompare(b.name)));
 }
 
 export function safeWorkerLineageReport(deployments,current,prior,baseline=approvedRemoteBaseline){
+ assertGeminiPaidReviewFresh(baseline);
  const message=`source-commit:${baseline.sourceCommit}`;
  const expectedPriorVersionId=baseline.priorVersionId;
  const latest=deployments?.[0];
@@ -41,7 +47,7 @@ export function safeWorkerLineageReport(deployments,current,prior,baseline=appro
  const priorAnnotation=oldDeployment?annotationKind(oldDeployment.annotations?.['workers/message'],message):'DEPLOYMENT_NOT_IN_PAGE';
  const runtimeMetadataComplete=completeRuntime(current.resources?.script_runtime)&&completeRuntime(prior.resources?.script_runtime);
  const runtimeMetadataEqual=runtimeMetadataComplete&&sameCanonical(current.resources.script_runtime,prior.resources.script_runtime);
- const bindingAddition=knownBindingAddition(current,prior),pinnedEtag=Boolean(currentEtag&&priorEtag&&currentEtag===baseline.scriptEtag&&priorEtag===baseline.scriptEtag);
+ const bindingAddition=knownBindingAddition(current,prior,baseline),pinnedEtag=Boolean(currentEtag&&priorEtag&&currentEtag===baseline.scriptEtag&&priorEtag===baseline.scriptEtag);
  const provenance=sourceKind(latest.source)==='DASHBOARD'&&sourceKind(oldDeployment?.source)==='WRANGLER';
  const sameKnownLineage=Boolean(pinnedEtag&&priorAnnotation==='EXPECTED'&&annotationKind(latest.annotations?.['workers/message'],message)==='OTHER'&&provenance&&runtimeMetadataEqual&&bindingAddition&&currentAssets===1&&priorAssets===1);
  return {

@@ -1,7 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {expectedPriorVersionId,runWorkerVersionLineageDiagnostic,safeWorkerLineageReport} from '../scripts/worker-version-lineage-diagnostic.mjs';
-import {approvedRemoteBaseline,approvedPreDeployLineage} from '../scripts/remote-state-policy.mjs';
+import {approvedRemoteBaseline,approvedPreDeployLineage,protectedRemoteBaseline} from '../scripts/remote-state-policy.mjs';
+import {geminiPaidFlagNames} from '../scripts/gemini-paid-activation.mjs';
 import {assertRemoteDeploymentBaseline} from '../scripts/read-remote-state.mjs';
 
 const priorVersionId=approvedPreDeployLineage.priorVersionId;
@@ -124,3 +125,59 @@ test('missing credentials, denied API and changed active deployment fail closed 
  current.resources.script_runtime.extra_setting=false;
  assert.equal(safeWorkerLineageReport(deployments(),current,prior).runtimeMetadataEqual,false);
  });
+
+test('Dashboard lineage accepts only the reviewed exact paid three-binding addition',()=>{
+ const b=protectedRemoteBaseline({GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify({...JSON.parse(reviewEnv.GROQ_DEPLOYMENT_EVIDENCE_JSON),geminiTwoPassPaidEnabled:true})});
+ const prior=version(priorVersionId),current=version(b.activeVersionId);
+ current.resources.bindings=[...structuredClone(prior.resources.bindings),...geminiPaidFlagNames.map(name=>({name,type:'plain_text',text:'true'}))];
+ assert.equal(safeWorkerLineageReport(deployments(),current,prior,b).codeLineageEvidence,'SAME_SCRIPT_AND_SETTINGS_AS_ANNOTATED_PRIOR');
+ assert.equal(safeWorkerLineageReport(deployments(),current,prior).knownBindingAddition,false);
+ for(const mutate of [
+  x=>x.resources.bindings.pop(),
+  x=>x.resources.bindings.splice(-2),
+  x=>x.resources.bindings.push({name:'EXTRA',type:'plain_text',text:'true'}),
+  x=>{x.resources.bindings.at(-1).text='false';},
+  x=>{x.resources.bindings.at(-1).text=true;},
+  x=>{x.resources.bindings.at(-1).type='secret_text';},
+  x=>x.resources.bindings.push({...x.resources.bindings.at(-1)}),
+  x=>{x.resources.bindings[0].secret='CHANGED';},
+  x=>x.resources.bindings.shift(),
+ ]){const changed=structuredClone(current);mutate(changed);assert.equal(safeWorkerLineageReport(deployments(),changed,prior,b).knownBindingAddition,false);}
+ for(const mutate of [
+  x=>{x.resources.script.etag='b'.repeat(64);},
+  x=>{x.resources.script_runtime.usage_model='changed';},
+ ]){const changed=structuredClone(current);mutate(changed);assert.equal(safeWorkerLineageReport(deployments(),changed,prior,b).codeLineageEvidence,'UNVERIFIED');}
+ const wrong=deployments();wrong[1].source='dash';assert.equal(safeWorkerLineageReport(wrong,current,prior,b).codeLineageEvidence,'UNVERIFIED');
+ const missing=deployments().slice(0,1);assert.equal(safeWorkerLineageReport(missing,current,prior,b).codeLineageEvidence,'UNVERIFIED');
+ assert.throws(()=>safeWorkerLineageReport(deployments(),current,prior,{...b,deploymentEvidenceExpiresAt:new Date(Date.now()-1000).toISOString()}),/DEPLOYMENT_EVIDENCE_EXPIRED/);
+});
+
+test('real pre-deploy reads accept the reviewed paid Dashboard delta and reject a changed existing binding',async()=>{
+ const b=protectedRemoteBaseline({GROQ_DEPLOYMENT_EVIDENCE_JSON:JSON.stringify({...JSON.parse(reviewEnv.GROQ_DEPLOYMENT_EVIDENCE_JSON),geminiTwoPassPaidEnabled:true})});
+ const bindings=[...Object.entries(b.runtimeFlags).map(([name,text])=>({name,text,type:'plain_text'})),
+  {name:'DB',type:'d1',id:b.databaseId},{name:'ASSETS',type:'assets'},
+  {name:'ACCESS_AUD',type:'plain_text',text:'test-audience-value'},{name:'ACCESS_TEAM_DOMAIN',type:'plain_text',text:'https://test.cloudflareaccess.com'},
+  ...['ACCESS_OWNER_EMAIL','KEY_ENCRYPTION_KEY_B64','ENABLE_GEMINI_TWO_PASS','GEMINI_TWO_PASS_ALLOWED_JOB_ID'].map(name=>({name,type:'secret_text'})),
+  {name:'GEMINI_LEGACY_QUOTE_RECOVERY_JSON',type:'plain_text',text:secret}];
+ const prior=version(priorVersionId);prior.resources.bindings=structuredClone(bindings);
+ bindings.push(...geminiPaidFlagNames.map(name=>({name,type:'plain_text',text:'true'})));
+ const current=version(b.activeVersionId);current.resources.bindings=structuredClone(bindings);
+ const calls=[],fetcher=async(url,options)=>{
+  calls.push(options.method);let result;
+  if(url.endsWith('/workers/services/'+b.workerName))result={default_environment:{environment:'production',script:{tag:'expected-tag'}}};
+  else if(url.endsWith('/environments/production'))result={script:{compatibility_date:b.compatibilityDate,observability:b.observability}};
+  else if(url.endsWith('/bindings'))result=bindings;
+  else if(url.endsWith('/subdomain'))result={enabled:true,previews_enabled:false};
+  else if(url.includes('/routes?')||url.includes('/workers/domains/records?'))result=[];
+  else if(url.endsWith('/script-settings'))result=b.scriptSettings;
+  else if(url.includes('/deployments'))result={deployments:deployments()};
+  else if(url.endsWith('/versions/'+b.activeVersionId))result=current;
+  else if(url.endsWith('/versions/'+priorVersionId))result=prior;
+  else throw Error('unexpected fixture endpoint');
+  return {ok:true,json:async()=>({success:true,result})};
+ };
+ const result=await assertRemoteDeploymentBaseline({token:secret,baseline:b,ciMatchTag:'expected-tag',fetcher});
+ assert.equal(result.activeVersions[0].id,b.activeVersionId);assert.equal(calls.length,22);assert.ok(calls.every(method=>method==='GET'));
+ current.resources.bindings.find(x=>x.name==='ACCESS_AUD').text='changed-audience';
+ await assert.rejects(assertRemoteDeploymentBaseline({token:secret,baseline:b,ciMatchTag:'expected-tag',fetcher}),/SOURCE_COMMIT_MISMATCH/);
+});
