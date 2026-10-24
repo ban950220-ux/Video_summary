@@ -1,4 +1,5 @@
 import {geminiSourceAssessment,projectGeminiReport} from './gemini-source-assessment.mjs';
+import {inspectUnusedQuote,unusedQuoteReview,approveUnusedQuote,renewUnusedQuote} from './gemini-quote-renewal.mjs';
 import {ProviderError} from './adapters.mjs';
 import {configuredMasterKey,decryptProviderKey} from './vault.mjs';
 import {capacityIdentity,capacityIdentityForCredentialSnapshot} from './observed-capacity.mjs';
@@ -139,11 +140,7 @@ async function reserveQuote(env,id,scope,requestHash,credential,mode,row,attempt
  try{
   const current=await quoteAttempt(env,id);
   if(recovery&&(current||row||(await allCalls(env,id)).length))fail('TWO_PASS_QUOTE_ATTEMPT_EXISTS');
-  if(current){
-   if(current.state!=='QUOTE_SAVED'||!row||!(row.state==='CANCELLED'||row.expires_at<=Date.now())||(await allCalls(env,id)).length)fail('TWO_PASS_QUOTE_ATTEMPT_EXISTS');
-   const prior=current.result_json;
-   const update=await env.DB.prepare(`UPDATE yta_operations SET state='RESERVED',result_json=?,created_at=?,error_code=NULL WHERE id=? AND provider='gemini-two-pass-quote' AND state='QUOTE_SAVED' AND result_json=? AND EXISTS(SELECT 1 FROM jobs j JOIN yta_sources s ON s.job_id=j.id JOIN provider_credentials k ON k.owner_id='owner' AND k.provider='gemini' WHERE ${guard})`).bind(encoded,stamp,idempotencyId,prior,...bindings).run();
-   changed=update.meta?.changes??0;
+  if(current){fail('TWO_PASS_QUOTE_ATTEMPT_EXISTS');
   }else{
    const insert=await env.DB.prepare(`INSERT OR IGNORE INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) SELECT ?,j.id,'gemini-two-pass-quote',0,'RESERVED',?,? FROM jobs j JOIN yta_sources s ON s.job_id=j.id JOIN provider_credentials k ON k.owner_id='owner' AND k.provider='gemini' WHERE ${guard}`).bind(idempotencyId,stamp,encoded,...bindings).run();
    changed=insert.meta?.changes??0;
@@ -256,6 +253,35 @@ async function reconcile(env,id,phase,scope,row,receipt){
 export async function handleGeminiTwoPassAction(request,env,{id,action,job,sourceOf,ownedJob}){
  const exists=await env.DB.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='yta_gemini_two_pass_jobs'").first();if(!exists)fail('TWO_PASS_SCHEMA_REQUIRED');
  let row=await saved(env,id);
+ const renewalContext=async()=>{
+  if(!row)fail('TWO_PASS_QUOTE_REQUIRED');
+  const quote=await activeQuote(row);quoteGate(env,row.project_mode,id);
+  const scope=await scoped(env,job,sourceOf),credential=await credentialSnapshot(env),first=summaryRequest(scope.source,scope.audit);
+  const context=await inspectUnusedQuote(env,{id,row,scope,credential,quote,requestSha256:await digest(first),legacyUncertain:id===LEGACY_UNCERTAIN_QUOTE_JOB_ID});
+  return {context,scope,credential,first,quote};
+ };
+ if(action==='gemini-two-pass-renewal'&&['GET','POST'].includes(request.method)){
+  if(request.method==='GET'){
+   try{return json(unusedQuoteReview((await renewalContext()).context));}
+   catch(error){if(error instanceof ProviderError)return json({eligible:false,reason:error.code,generationAllowed:false,countTokensRequested:false});throw error;}
+  }
+  const body=await request.json(),{context}=await renewalContext();
+  return json(await approveUnusedQuote(env,context,body));
+ }
+ if(action==='gemini-two-pass-quote'&&request.method==='POST'&&row&&id!==LEGACY_UNCERTAIN_QUOTE_JOB_ID){
+  // An existing quote can only change through a separately approved, archived renewal.
+  if((await allCalls(env,id)).length)fail('TWO_PASS_ALREADY_STARTED');
+  const body=await request.json();if(!body.renewalApprovalId)fail('TWO_PASS_RENEWAL_APPROVAL_REQUIRED');
+  const {context,credential,first,quote:old}=await renewalContext();
+  const gate=()=>{quoteGate(env,body.projectMode,id);if(body.projectMode==='FREE_ATTESTED'&&body.confirmBillingDisabled!==true)fail('TWO_PASS_FREE_PROJECT_UNVERIFIED');};
+  await renewUnusedQuote(env,context,body,{gate,metadata:()=>modelMetadata(env,credential),count:()=>counted(env,first,credential),buildQuote:(count,metadata)=>{
+   if(!Number.isSafeInteger(count)||count<1||count>TWO_PASS_INPUT_CAP)fail('TWO_PASS_TOKEN_BOUND');
+   const inputCap=Math.min(TWO_PASS_INPUT_CAP,count+16384),costs=costCeiling({inputTokensPerCall:inputCap}),checkedAt=Date.now();
+   if(costs.totalApprovalMicroUsd>170000)fail('TWO_PASS_COST_BOUND');
+   return {...old,executionId:crypto.randomUUID(),revision:(old.revision??1)+1,inputTokensCounted:count,inputTokensPerCallCap:inputCap,preTaxMicroUsd:costs.totalPreTaxMicroUsd,costBufferMicroUsd:costs.costBufferMicroUsd,maxMicroUsd:costs.totalApprovalMicroUsd,costBufferBps:costs.costBufferBps,modelAccessEvidence:{...metadata,inputTokensCounted:count,checkedAt},expiresAt:checkedAt+1800000,renewalApprovalId:body.renewalApprovalId,quoteRequestId:body.quoteRequestId,generationApproval:'NEW_EXACT_QUOTE_APPROVAL_REQUIRED'};
+  }});
+  return json(view(await saved(env,id),[]));
+ }
  if(action==='gemini-two-pass-status'&&request.method==='GET'){
   const attempt=await quoteAttempt(env,id),status=view(row,row?await allCalls(env,id):[]);
   status.auditSha256=row?.audit_sha256??null;
@@ -297,10 +323,7 @@ export async function handleGeminiTwoPassAction(request,env,{id,action,job,sourc
   if(recovery)await recoveryDispatch(env,id,attempt,'COUNT_RECEIVED','QUOTE_SAVING',scope,credential);
   const quote={kind:'GEMINI_TWO_PASS_FULL_TRANSCRIPT',executionId:crypto.randomUUID(),revision:row?(JSON.parse(row.quote_json).revision??1)+1:1,model:TWO_PASS_MODEL,priceVersion:PAID_SUMMARY_CATALOG.priceVersion,sourceSha256:scope.sourceHash,auditSha256:scope.auditHash,firstRequestSha256:await digest(first),transcriptCountConsent:true,inputTokensCounted:count,inputTokensPerCallCap:inputCap,outputTokensPerCallCap:TWO_PASS_OUTPUT_CAP,maxCalls:2,maxRetries:0,preTaxMicroUsd:costs.totalPreTaxMicroUsd,costBufferMicroUsd:costs.costBufferMicroUsd,maxMicroUsd:costs.totalApprovalMicroUsd,costBufferBps:costs.costBufferBps,approvalKind:'CALCULATED_COST_CEILING_NOT_PROVIDER_LIMIT',credentialGeneration,modelAccessEvidence:{...metadata,inputTokensCounted:count,checkedAt},expiresAt,projectMode:mode,...(recovery?{quoteRecoveryApprovalId:recovery.approvalId,generationApproval:'NEW_EXACT_QUOTE_APPROVAL_REQUIRED'}:{})};
   const quoteSha256=await digest(quote),insert=await env.DB.prepare("INSERT OR IGNORE INTO yta_gemini_two_pass_jobs(job_id,owner_id,source_sha256,audit_sha256,first_request_sha256,quote_sha256,quote_json,project_mode,credential_generation,state,expires_at,created_at,updated_at) SELECT j.id,'owner',?,?,?,?,?,?,?,'QUOTED',?,?,? FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=? AND j.owner_id='owner' AND j.audit_json=? AND (j.report_json IS NULL OR j.report_json='null') AND s.raw=? AND s.segments_json=? AND s.provenance=? AND (?=0 OR (j.duration_seconds=? AND EXISTS(SELECT 1 FROM yta_operations o WHERE o.id=? AND o.provider='gemini-two-pass-quote' AND o.state='QUOTE_SAVING' AND json_extract(o.result_json,'$.attemptId')=?) AND EXISTS(SELECT 1 FROM provider_credentials k WHERE k.owner_id='owner' AND k.provider='gemini' AND k.cipher_version=? AND k.iv_b64=? AND k.ciphertext_b64=? AND k.updated_at=?))) AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=j.id||':deleting' AND d.state='DELETING')").bind(scope.sourceHash,scope.auditHash,quote.firstRequestSha256,quoteSha256,JSON.stringify(quote),mode,credentialGeneration,expiresAt,now(),now(),id,scope.auditJson,scope.sourceRaw,scope.segmentsJson,scope.source.provenance,recovery?1:0,scope.durationSeconds,quoteAttemptId(id),attempt.attemptId,credential.cipherVersion,credential.ivB64,credential.ciphertextB64,credential.updatedAt).run();
-  if(insert.meta?.changes!==1){
-   const revised=await env.DB.prepare("UPDATE yta_gemini_two_pass_jobs SET source_sha256=?,audit_sha256=?,first_request_sha256=?,quote_sha256=?,quote_json=?,project_mode=?,credential_generation=?,state='QUOTED',first_report_json=NULL,review_json=NULL,error_code=NULL,expires_at=?,created_at=?,updated_at=? WHERE job_id=? AND owner_id='owner' AND (state='CANCELLED' OR expires_at<=?) AND NOT EXISTS(SELECT 1 FROM yta_gemini_two_pass_calls c WHERE c.job_id=?) AND EXISTS(SELECT 1 FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=yta_gemini_two_pass_jobs.job_id AND j.owner_id='owner' AND j.audit_json=? AND (j.report_json IS NULL OR j.report_json='null') AND s.raw=? AND s.segments_json=? AND s.provenance=? AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=j.id||':deleting' AND d.state='DELETING'))").bind(scope.sourceHash,scope.auditHash,quote.firstRequestSha256,quoteSha256,JSON.stringify(quote),mode,credentialGeneration,expiresAt,now(),now(),id,Date.now(),id,scope.auditJson,scope.sourceRaw,scope.segmentsJson,scope.source.provenance).run();
-   if(revised.meta?.changes!==1)fail('TWO_PASS_QUOTE_CONFLICT');
-  }
+  if(insert.meta?.changes!==1)fail('TWO_PASS_QUOTE_CONFLICT');
   const stored=await saved(env,id);await advanceQuoteAttempt(env,id,attempt,recovery?'QUOTE_SAVING':'COUNT_RECEIVED','QUOTE_SAVED');quoteEvent(env,correlationId,stage,'SUCCEEDED');
   return json(view(stored,[]));
   }catch(error){

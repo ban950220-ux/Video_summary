@@ -480,13 +480,13 @@ test('reservation and transition before-commit or ack faults release zero-call r
   const ran=await f.call('run','POST',{phase:0,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true});assert.equal(ran.status,200,await ran.clone().text());assert.equal(f.sends,1);
  }finally{f.db.close();}}
 });
-test('expired and cancelled unused quotes receive a fresh revision, while any reserved phase prevents reset',async()=>{
- for(const change of ['expired','cancelled']){const f=await fixture();try{const first=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true}),old=(await first.json()).quote;
-  if(change==='expired')f.db.prepare('UPDATE yta_gemini_two_pass_jobs SET expires_at=? WHERE job_id=?').run(Date.now()-1,f.id);else assert.equal((await f.call('cancel','POST',{})).status,200);
-  const revised=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal(revised.status,200,await revised.clone().text());const current=(await revised.json()).quote;assert.notEqual(current.quoteSha256,old.quoteSha256);
-  const stale=await f.call('approve','POST',{quoteSha256:old.quoteSha256,maxMicroUsd:old.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true});assert.equal((await stale.json()).error.code,'TWO_PASS_APPROVAL_SCOPE_CHANGED');
-  await f.call('approve','POST',{quoteSha256:current.quoteSha256,maxMicroUsd:current.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true});await f.call('run','POST',{phase:0,quoteSha256:current.quoteSha256,confirmSeparatePaidApproval:true});await f.call('cancel','POST',{});
-  const blocked=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal((await blocked.json()).error.code,'TWO_PASS_ALREADY_STARTED');assert.equal(f.sends,1);
+test('expired and cancelled quotes cannot implicitly overwrite the old quote attempt',async()=>{
+ for(const change of ['expired','cancelled']){const f=await fixture();try{
+  await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});
+  if(change==='expired')f.db.prepare('UPDATE yta_gemini_two_pass_jobs SET expires_at=? WHERE job_id=?').run(Date.now()-1,f.id);else await f.call('cancel','POST',{});
+  const old=f.db.prepare('SELECT * FROM yta_gemini_two_pass_jobs').get(),attempt=f.db.prepare('SELECT * FROM yta_operations').all();
+  const revised=await f.call('quote','POST',{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true});assert.equal((await revised.json()).error.code,'TWO_PASS_RENEWAL_APPROVAL_REQUIRED');
+  assert.deepEqual(f.db.prepare('SELECT * FROM yta_gemini_two_pass_jobs').get(),old);assert.deepEqual(f.db.prepare('SELECT * FROM yta_operations').all(),attempt);assert.equal(f.sends,0);
  }finally{f.db.close();}}
 });
 

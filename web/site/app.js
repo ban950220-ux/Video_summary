@@ -474,11 +474,11 @@ function showGeminiTwoPassChoice(job,target,requestId){
   const refresh=el('button',{className:'btn secondary small',text:'견적 상태 다시 조회'});
   refresh.onclick=()=>render().catch(showQuoteStatusFailure);host.append(refresh);
  };
- const quoteRequest=async button=>{
+ const quoteRequest=async (button,renewal={})=>{
   button.disabled=true;
   host.append(el('p',{text:'Gemini 모델 확인과 전체 전사 토큰 계산을 기다리는 중입니다. 다시 요청하지 마세요.'}));
   try{
-   await api(base+'-quote',{method:'POST',body:{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true},signal:typeof AbortSignal==='undefined'?undefined:AbortSignal.timeout(120000)});
+   await api(base+'-quote',{method:'POST',body:{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true,...renewal},signal:typeof AbortSignal==='undefined'?undefined:AbortSignal.timeout(120000)});
    quoteUncertain=false;quoteError='';
   }catch(error){quoteUncertain=true;quoteError=quoteFailureStage(error)+': '+safeError(error);}
   if(current())await render().catch(showQuoteStatusFailure);
@@ -503,8 +503,25 @@ function showGeminiTwoPassChoice(job,target,requestId){
   if(quoteUncertain)host.append(el('p',{text:'견적 요청 결과가 불확실합니다. 저장된 견적을 확인하거나 상태를 다시 조회하고, 새 요청은 보내지 마세요.'}));
   const q=status.quote;if(status.state==='FIRST_READY'&&status.calls.some(item=>item.phase===0&&item.state==='SETTLED'))postUncertain=false;host.append(el('p',{text:`상태 ${status.state} · 모델 ${q.model} · 공식 계수 1차 입력 ${q.inputTokensCounted}토큰 · 단계별 승인 입력 범위 ${q.inputTokensPerCallCap} / 요청 출력 상한 ${q.outputTokensPerCallCap}토큰 · 최대 생성 2회 · 재시도 0회 · 해당 범위 고정 단가 세전 상한 ${q.preTaxMicroUsd} microUSD + 사용자 승인 비용 여유분 ${q.costBufferMicroUsd} microUSD (${q.costBufferBps/100}%) = 계산 기반 실행 승인 상한 $${(q.maxMicroUsd/1e6).toFixed(6)}. 실제 세금·추가 수수료·공급자 최종 청구액은 UNKNOWN이며 공급자 결제 강제 한도가 아닙니다. · 만료 ${fmtDate(new Date(q.expiresAt).toISOString())}.`}));
   if(!quoteUncertain&&status.calls.length===0&&(status.state==='CANCELLED'||q.expiresAt<=Date.now())){
-   const consent=el('input',{attrs:{type:'checkbox'}}),label=el('label',{text:'새 견적을 위해 전체 전사와 구간 ID를 Google 토큰 계수 API에 다시 보내는 데 동의합니다.'});label.prepend(consent);host.append(label);
-   const renew=el('button',{className:'btn secondary small',text:'새 견적 발급'});renew.onclick=()=>{if(consent.checked)return quoteRequest(renew);};host.append(renew);
+   const review=el('button',{className:'btn secondary small',text:'Review unused quote renewal'});host.append(review);
+   review.onclick=async()=>{
+    review.disabled=true;
+    try{
+     const check=await api(base+'-renewal');if(!current())return;
+     if(!check.eligible){host.append(el('p',{text:'Renewal blocked: '+check.reason+'. Existing requests, usage and uncertainty remain unchanged.'}));return;}
+     const preserve=el('input',{attrs:{type:'checkbox'}}),label=el('label',{text:'Preserve the expired or cancelled quote and approve renewal preparation only. This does not send the transcript or authorize paid generation.'});label.prepend(preserve);host.append(label);
+     const requestId=crypto.randomUUID(),approve=el('button',{className:'btn secondary small',text:'Approve unused quote renewal only'});host.append(approve);
+     approve.onclick=async()=>{
+      if(!preserve.checked)return;approve.disabled=true;
+      try{
+       const grant=await api(base+'-renewal',{method:'POST',body:{requestId,evidenceSha256:check.evidenceSha256,confirmArchiveUnusedQuote:true,confirmNoProviderCall:true}});if(!current())return;
+       const consent=el('input',{attrs:{type:'checkbox'}}),line=el('label',{text:'Send the full transcript and segment IDs to Google again for a new token-count quote. Paid generation requires another approval.'});line.prepend(consent);host.append(line);
+       const quoteRequestId=crypto.randomUUID(),renew=el('button',{className:'btn secondary small',text:'Request new quote with transcript consent'});host.append(renew);
+       renew.onclick=()=>{if(consent.checked&&Date.now()<grant.expiresAt)return quoteRequest(renew,{renewalApprovalId:grant.renewalApprovalId,quoteRequestId});};
+      }catch(error){approve.disabled=false;host.append(el('p',{text:'Renewal approval was not confirmed. Retrying this approval uses the same request ID and sends no provider request. '+safeError(error)}));}
+     };
+    }catch(error){host.append(el('p',{text:'Renewal review unavailable: '+safeError(error)}));}
+   };
   }
   for(const item of status.calls)host.append(el('p',{text:`${item.phase===0?'요약':'대조'}: ${item.state} · 공식 입력 계수 ${item.inputTokensCounted} · 수신 보존 ${item.responseStored?'완전':'미완전'} · 사용량 ${item.usage?JSON.stringify(item.usage):'UNKNOWN'} · 비용 추정 ${item.tokenEstimateMicroUsd??'UNKNOWN'} microUSD · ${item.errorCode??''}`}));
   if(status.sourceAssessment){const source=status.sourceAssessment;host.append(el('p',{className:'tip',text:`원문 상태 ${source.status} · 감사 ${source.auditConsistency} · 출처 ${source.provenance??'UNKNOWN'} · 저장 시간 ${source.range?.firstStartMs??'?'}–${source.range?.lastEndMs??'?'} ms / 원본 ${source.durationSeconds??'?'}초 · 전체 원음 포함 여부 NOT_VERIFIED`}));}
