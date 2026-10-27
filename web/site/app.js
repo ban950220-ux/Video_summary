@@ -490,7 +490,19 @@ function showSeparateSummaryPreparation(job,target,requestId){
 function showGeminiTwoPassChoice(job,target,requestId){
  const current=()=>detailCurrent(job.id,requestId,target),base='/api/jobs/'+job.id+'/gemini-two-pass',host=el('div');target.append(host);
  if(job.source_type==='audio')showSeparateSummaryPreparation(job,target,requestId);
- let postUncertain=false,quoteUncertain=false,quoteError='';
+ let postUncertain=false,uncertainPhase=null,quoteUncertain=false,quoteError='',activeRequest=null,statusSequence=0;
+ const pendingView=storedState=>{
+  empty(host);
+  host.append(el('p',{attrs:{role:'status','aria-live':'polite'},text:activeRequest+' 진행 중 · 제공자 수신과 저장 완료는 아직 미확인입니다. 다시 실행하지 마세요.'}));
+  if(storedState)host.append(el('p',{text:'마지막 저장 상태: '+storedState+' · 이 조회만으로 진행 중 요청의 완료를 판단하지 않습니다.'}));
+  const refresh=el('button',{className:'btn secondary small',text:'저장 상태 다시 조회'});refresh.onclick=()=>render().catch(showOperationStatusFailure);host.append(refresh);
+ };
+ const beginRequest=label=>{if(activeRequest||!current())return false;activeRequest=label;statusSequence++;pendingView();return true;};
+ const showOperationStatusFailure=()=>{
+  if(!current())return;empty(host);
+  host.append(el('p',{text:'요청 결과 또는 저장 상태가 불확실합니다. 실행을 반복하지 말고 저장 상태만 다시 확인하세요.'}));
+  const refresh=el('button',{className:'btn secondary small',text:'저장 상태 다시 조회'});refresh.onclick=()=>render().catch(showOperationStatusFailure);host.append(refresh);
+ };
  const quoteFailureStage=error=>({TWO_PASS_MODEL_UNAVAILABLE:'모델 조회 실패',TWO_PASS_COUNT_UNAVAILABLE:'토큰 계수 실패',TWO_PASS_QUOTE_CONFLICT:'견적 저장 실패'})[error?.code]??'요청 결과 확인 실패';
  const showQuoteStatusFailure=error=>{
   if(!current())return;
@@ -500,16 +512,21 @@ function showGeminiTwoPassChoice(job,target,requestId){
   refresh.onclick=()=>render().catch(showQuoteStatusFailure);host.append(refresh);
  };
  const quoteRequest=async (button,renewal={})=>{
+  if(!beginRequest('견적 확인'))return;
   button.disabled=true;
   host.append(el('p',{text:'Gemini 모델 확인과 전체 전사 토큰 계산을 기다리는 중입니다. 다시 요청하지 마세요.'}));
   try{
    await api(base+'-quote',{method:'POST',body:{projectMode:'PAID_APPROVED',confirmFullTranscriptSentToGoogleForTokenCount:true,...renewal},signal:typeof AbortSignal==='undefined'?undefined:AbortSignal.timeout(120000)});
    quoteUncertain=false;quoteError='';
   }catch(error){quoteUncertain=true;quoteError=quoteFailureStage(error)+': '+safeError(error);}
+  activeRequest=null;
   if(current())await render().catch(showQuoteStatusFailure);
  };
  const render=async()=>{
-  const status=await api(base+'-status',{signal:typeof AbortSignal==='undefined'?undefined:AbortSignal.timeout(15000)});if(!current())return;if(status.state==='QUOTED'&&status.quote?.quoteSha256&&status.quote.expiresAt>Date.now()){quoteUncertain=false;quoteError='';}empty(host);
+  const sequence=++statusSequence;let status;
+  try{status=await api(base+'-status',{signal:typeof AbortSignal==='undefined'?undefined:AbortSignal.timeout(15000)});}
+  catch(error){if(!current()||sequence!==statusSequence)return;throw error;}
+  if(!current()||sequence!==statusSequence)return;if(activeRequest){pendingView(status.state);return;}if(status.state==='QUOTED'&&status.quote?.quoteSha256&&status.quote.expiresAt>Date.now()){quoteUncertain=false;quoteError='';}empty(host);
   host.append(el('h2',{text:'Gemini 전체 전사 요약 + 원문 대조'}),el('p',{text:'저장된 전사만 사용합니다. 생성은 최대 2회, 자동 재시도와 자동 3차 호출은 없습니다. 2차 예약 전에 남은 승인을 취소할 수 있으며, 예약이 먼저 확정되면 그 호출은 취소할 수 없습니다. 대조 PASS도 사람의 의미 검토·원음과 구간 시각의 정확성·외부 사실을 보증하지 않습니다.'}),el('p',{text:'현재 확인된 Gemini 프로젝트는 Tier 1 유료입니다. 별도 무료 프로젝트의 결제 비활성 증거가 없으므로 무료 실행으로 분류할 수 없습니다. 견적 요청은 저장 키로 정확한 모델의 메타데이터와 토큰 계수 접근을 확인합니다. 이는 생성 성공·잔액·결제 가능성을 보증하지 않으며, 유료 실행은 표시한 최대액을 별도로 승인해야 합니다.'}));
   if(status.state==='QUOTE_PENDING'||status.state==='QUOTE_UNCERTAIN_LEGACY'){
    host.append(el('p',{text:status.state==='QUOTE_PENDING'?'견적 계수 요청 기록이 남아 있습니다. 마지막 확인 단계: '+(status.quoteAttempt?.state??'UNKNOWN')+'. 결과가 불확실하므로 새 요청을 보내지 마세요.':'이 작업의 이전 견적 요청 결과가 불확실합니다. 저장 기록이 없어도 미전송으로 간주하지 않으며 새 요청은 차단됩니다.'}));
@@ -526,7 +543,8 @@ function showGeminiTwoPassChoice(job,target,requestId){
    paid.onclick=()=>{if(confirm.checked)return quoteRequest(paid);};host.append(paid);return;
   }
   if(quoteUncertain)host.append(el('p',{text:'견적 요청 결과가 불확실합니다. 저장된 견적을 확인하거나 상태를 다시 조회하고, 새 요청은 보내지 마세요.'}));
-  const q=status.quote;if(status.state==='FIRST_READY'&&status.calls.some(item=>item.phase===0&&item.state==='SETTLED'))postUncertain=false;host.append(el('p',{text:`상태 ${status.state} · 모델 ${q.model} · 공식 계수 1차 입력 ${q.inputTokensCounted}토큰 · 단계별 승인 입력 범위 ${q.inputTokensPerCallCap} / 요청 출력 상한 ${q.outputTokensPerCallCap}토큰 · 최대 생성 2회 · 재시도 0회 · 해당 범위 고정 단가 세전 상한 ${q.preTaxMicroUsd} microUSD + 사용자 승인 비용 여유분 ${q.costBufferMicroUsd} microUSD (${q.costBufferBps/100}%) = 계산 기반 실행 승인 상한 $${(q.maxMicroUsd/1e6).toFixed(6)}. 실제 세금·추가 수수료·공급자 최종 청구액은 UNKNOWN이며 공급자 결제 강제 한도가 아닙니다. · 만료 ${fmtDate(new Date(q.expiresAt).toISOString())}.`}));
+  const q=status.quote;if(postUncertain&&status.calls.some(item=>item.phase===uncertainPhase&&item.state==='SETTLED')){postUncertain=false;uncertainPhase=null;}host.append(el('p',{text:`상태 ${status.state} · 모델 ${q.model} · 공식 계수 1차 입력 ${q.inputTokensCounted}토큰 · 단계별 승인 입력 범위 ${q.inputTokensPerCallCap} / 요청 출력 상한 ${q.outputTokensPerCallCap}토큰 · 최대 생성 2회 · 재시도 0회 · 해당 범위 고정 단가 세전 상한 ${q.preTaxMicroUsd} microUSD + 사용자 승인 비용 여유분 ${q.costBufferMicroUsd} microUSD (${q.costBufferBps/100}%) = 계산 기반 실행 승인 상한 $${(q.maxMicroUsd/1e6).toFixed(6)}. 실제 세금·추가 수수료·공급자 최종 청구액은 UNKNOWN이며 공급자 결제 강제 한도가 아닙니다. · 만료 ${fmtDate(new Date(q.expiresAt).toISOString())}.`}));
+  if(postUncertain)host.append(el('p',{className:'tip',text:(uncertainPhase===1?'2차 대조':'1차 요약')+' 요청 결과가 불확실합니다. 해당 단계의 저장 영수증을 확인하기 전에는 다시 실행하지 않습니다.'}));
   if(!quoteUncertain&&status.calls.length===0&&(status.state==='CANCELLED'||q.expiresAt<=Date.now())){
    const review=el('button',{className:'btn secondary small',text:'Review unused quote renewal'});host.append(review);
    review.onclick=async()=>{
@@ -564,10 +582,10 @@ function showGeminiTwoPassChoice(job,target,requestId){
   if(status.errorCode)host.append(el('p',{text:`중단 사유 ${status.errorCode}. 저장된 응답의 무호출 복구 또는 Groq 경로를 검토하세요. 새 유료 호출은 자동으로 보내지 않습니다.`}));
   if(status.state==='QUOTED'&&q.expiresAt>Date.now()){
    const confirm=el('input',{attrs:{type:'checkbox'}}),row=el('label',{text:'이 유료 프로젝트의 계산 기반 실행 승인 상한·100% 비용 여유분·2회 상한·만료·재시도 없음에 동의합니다. 비용 여유분은 실제 세금 검증이 아니며 공급자 청구 한도도 아닙니다.'});row.prepend(confirm);host.append(row);
-   const approve=el('button',{className:'btn secondary small',text:'표시된 최대 금액 승인 저장 · 생성 없음'});approve.onclick=async()=>{if(!confirm.checked)return;approve.disabled=true;try{await api(base+'-approve',{method:'POST',body:{quoteSha256:q.quoteSha256,maxMicroUsd:q.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'승인 상태 조회 실패. 다시 승인하지 말고 상태를 확인하세요.'}));});};host.append(approve);
+   const approve=el('button',{className:'btn secondary small',text:'표시된 최대 금액 승인 저장 · 생성 없음'});approve.onclick=async()=>{if(!confirm.checked||!beginRequest('승인 저장'))return;approve.disabled=true;try{await api(base+'-approve',{method:'POST',body:{quoteSha256:q.quoteSha256,maxMicroUsd:q.maxMicroUsd,maxCalls:2,confirmNoAutomaticRetry:true,confirmProjectMode:'PAID_APPROVED',confirmSeparatePaidApproval:true}});}catch(error){toast(safeError(error));}activeRequest=null;if(current())await render().catch(showOperationStatusFailure);};host.append(approve);
   }
   if(['QUOTED','APPROVED'].includes(status.state)||status.state==='FIRST_READY'&&status.calls.some(item=>item.phase===0&&item.state==='SETTLED')){const cancel=el('button',{className:'btn secondary small',text:status.state==='FIRST_READY'?'남은 2차 유료 호출 승인 취소':'견적·승인 취소'});cancel.onclick=async()=>{cancel.disabled=true;try{await api(base+'-cancel',{method:'POST',body:{}});}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'취소 상태 조회 실패. 상태를 다시 확인하세요.'}));});};host.append(cancel);}
-  if((status.state==='APPROVED'||status.next==='RUN_REVIEW')&&q.expiresAt>Date.now()&&!postUncertain){const phase=status.state==='APPROVED'?0:1,run=el('button',{className:'btn secondary small',text:phase===0?'승인된 1차 전체 요약 실행':'승인된 2차 원문 대조 실행'});run.onclick=async()=>{run.disabled=true;postUncertain=true;try{await api(base+'-run',{method:'POST',body:{phase,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true}});postUncertain=false;}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'호출 결과 조회 실패. 실행 POST를 반복하지 마세요.'}));});};host.append(run);}
+  if((status.state==='APPROVED'||status.next==='RUN_REVIEW')&&q.expiresAt>Date.now()&&!postUncertain){const phase=status.state==='APPROVED'?0:1,run=el('button',{className:'btn secondary small',text:phase===0?'승인된 1차 전체 요약 실행':'승인된 2차 원문 대조 실행'});run.onclick=async()=>{if(postUncertain||!beginRequest(phase===0?'1차 전체 요약':'2차 원문 대조'))return;run.disabled=true;postUncertain=true;uncertainPhase=phase;try{await api(base+'-run',{method:'POST',body:{phase,quoteSha256:q.quoteSha256,confirmSeparatePaidApproval:true}});postUncertain=false;uncertainPhase=null;}catch(error){toast(safeError(error));}activeRequest=null;if(current())await render().catch(showOperationStatusFailure);};host.append(run);}
   const recoverable=status.calls.find(item=>item.responseStored&&item.state!=='SETTLED');if(recoverable){const recover=el('button',{className:'btn secondary small',text:'보존 응답 재검증 · 제공자 호출 없음'});recover.onclick=async()=>{recover.disabled=true;try{await api(base+'-recover',{method:'POST',body:{phase:recoverable.phase,confirmNoProviderCall:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(()=>{host.append(el('p',{text:'무호출 복구 결과 조회 실패. 상태를 다시 확인하세요.'}));});};host.append(recover);}
   const unused=status.calls.find(item=>item.state==='RESERVED');if(unused){const release=el('button',{className:'btn secondary small',text:'공급자 호출 전 예약 복구'});release.onclick=async()=>{release.disabled=true;try{await api(base+'-recover',{method:'POST',body:{phase:unused.phase,confirmNoProviderCall:true}});}catch(error){toast(safeError(error));}if(current())await render().catch(error=>toast(safeError(error)));};host.append(release);}
   const refresh=el('button',{className:'btn secondary small',text:'저장 상태 다시 조회'});refresh.onclick=()=>render().catch(error=>toast(safeError(error)));host.append(refresh);

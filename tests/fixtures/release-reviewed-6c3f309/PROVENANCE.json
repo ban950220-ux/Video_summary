@@ -1,0 +1,10 @@
+{
+  "source": "User-provided video-release-code-handoff-v1.zip",
+  "archiveSha256": "4ea141cae1685b54b594ab6d1cd4040d04f1c174ecb7f777d4e1e3f9df354db9",
+  "candidateCommit": "6c3f309c30f270d696fecc581cd928532c767499",
+  "candidateTree": "d5ac6ab65696e06484809794867610f6658fa97a",
+  "assetDigest": "09e9fdd7ae49f3753818f7566219db990909f9822fa27d8c2dfef90fca041467",
+  "moduleDigest": "e8b67790b2e6eae73d7194c49d2a4f07a52f919816664d4a701c1c75c74e48e1",
+  "productionExecutionSupported": false,
+  "note": "Frozen public code fixture; all authorization and remote observations in tests are synthetic. No live credentials, user audio, transcript or database are present."
+}
