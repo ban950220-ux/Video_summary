@@ -395,6 +395,10 @@ export async function routeLive(request,env){
   if(runnerTables.some(row=>row.name==='yta_local_runner_audio_attempts'))scrubRunner.push(env.DB.prepare("UPDATE yta_local_runner_audio_attempts SET evidence_json=NULL WHERE job_id=? AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting'));
   if(runnerTables.some(row=>row.name==='yta_local_runner_audio_resumes'))scrubRunner.push(env.DB.prepare("UPDATE yta_local_runner_audio_resumes SET approval_json='{}',state='USED' WHERE job_id=? AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting'));
   if(scrubRunner.length)await env.DB.batch(scrubRunner);
+  // The existing explicit analysis-delete action also removes its separate
+  // imported attachments. The tombstone above blocks late import commits.
+  const importTables=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('yta_summary_imports','yta_summary_import_requests')").bind().all()).results||[];
+  for(const table of ['yta_summary_import_requests','yta_summary_imports'])if(importTables.some(row=>row.name===table))await env.DB.prepare('DELETE FROM '+table+" WHERE job_id=? AND owner_id='owner' AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting').run();
   const receiptTable=await env.DB.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='yta_paid_summary_receipts'").bind().first();
   if(receiptTable)await env.DB.prepare("UPDATE yta_paid_summary_receipts SET response_json=NULL,response_sha256=NULL,response_complete=0,state='SOURCE_DELETED',error_code='PAID_SOURCE_DELETED',updated_at=? WHERE job_id=? AND owner_id='owner'").bind(new Date().toISOString(),id).run();
   try{await persistGroqSettlementsForDeletion(env,id,job,settlements);}catch{} // A failed accounting seal must not retain private source content.

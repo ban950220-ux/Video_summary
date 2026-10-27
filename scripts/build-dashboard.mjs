@@ -1,7 +1,7 @@
 // Dependency-free bundler for this fixed, reviewed module graph.
 // Produces a single Cloudflare Dashboard ESM Worker including protected assets.
 import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
-const names=['core','vault','access','groq-summary-contract','adapters','provider-keys','audio','report','summary-plan','observed-capacity','groq-year-recovery','groq-complete-synthesis','groq-usage-reconciliation','groq-d1-budget','groq-synthesis-execution','groq-summary','groq-full-coverage','groq-full-coverage-d1','groq-full-coverage-live','groq-full-coverage-global','groq-full-coverage-global-live','groq-full-coverage-fresh','paid-summary-contract','paid-summary-budget','paid-summary-trial','paid-summary-receipt','paid-summary-adapter','two-pass-windows','gemini-two-pass-contract','gemini-source-assessment','gemini-quote-renewal','source-summary-attempt','gemini-two-pass','paid-summary','live','worker','site-worker'];
+const names=['core','vault','access','groq-summary-contract','adapters','provider-keys','audio','report','summary-plan','observed-capacity','groq-year-recovery','groq-complete-synthesis','groq-usage-reconciliation','groq-d1-budget','groq-synthesis-execution','groq-summary','groq-full-coverage','groq-full-coverage-d1','groq-full-coverage-live','groq-full-coverage-global','groq-full-coverage-global-live','groq-full-coverage-fresh','paid-summary-contract','paid-summary-budget','paid-summary-trial','paid-summary-receipt','paid-summary-adapter','two-pass-windows','gemini-two-pass-contract','gemini-source-assessment','gemini-quote-renewal','source-summary-attempt','gemini-two-pass','paid-summary','manual-summary-import','live','worker','site-worker'];
 let output='// Generated from v0.7 source. No secrets. Live calls require owner free-account grants.\n';
 for(const name of names){
   let source=readFileSync(new URL('../src/'+name+'.mjs',import.meta.url),'utf8');
@@ -13,7 +13,7 @@ for(const name of names){
 }
 output='const modules={};\n'+output;
 const assets={};
-for(const [path,file,type] of [['/','index.html','text/html'],['/index.html','index.html','text/html'],['/app.js','app.js','application/javascript'],['/style.css','style.css','text/css'],['/audio.mjs','audio.mjs','application/javascript'],['/audio-runner.mjs','audio-runner.mjs','application/javascript'],['/audio-progress-plan.mjs','audio-progress-plan.mjs','application/javascript'],['/groq-summary-progress.mjs','groq-summary-progress.mjs','application/javascript'],['/context-review.mjs','context-review.mjs','application/javascript']]){
+for(const [path,file,type] of [['/','index.html','text/html'],['/index.html','index.html','text/html'],['/app.js','app.js','application/javascript'],['/style.css','style.css','text/css'],['/audio.mjs','audio.mjs','application/javascript'],['/audio-runner.mjs','audio-runner.mjs','application/javascript'],['/audio-progress-plan.mjs','audio-progress-plan.mjs','application/javascript'],['/groq-summary-progress.mjs','groq-summary-progress.mjs','application/javascript'],['/context-review.mjs','context-review.mjs','application/javascript'],['/manual-summary-import.mjs','manual-summary-import.mjs','application/javascript']]){
   assets[path]={body:readFileSync(new URL('../web/site/'+file,import.meta.url),'utf8'),type};
 }
 output+='const assets='+JSON.stringify(assets)+';\n';

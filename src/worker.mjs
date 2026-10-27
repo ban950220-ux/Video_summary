@@ -4,6 +4,7 @@ import {configuredMasterKey,decryptProviderKey,encryptProviderKey,providerAllowe
 import {routeLive,saveSource,ensureLiveSchema} from './live.mjs';
 import {ProviderError} from './adapters.mjs';
 import {capacityIdentityForCredentialSnapshot} from './observed-capacity.mjs';
+import {routeManualSummaryImport,importedSummaryCounts} from './manual-summary-import.mjs';
 
 const JSON_HEADERS={'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer'};
 const json=(obj,status=200)=>new Response(JSON.stringify(obj),{status,headers:JSON_HEADERS});
@@ -100,10 +101,14 @@ async function listJobs(env,url){
   const offset=Math.min(10000,Math.max(0,Number.parseInt(url.searchParams.get('offset')||'0',10)||0));
   const q=(url.searchParams.get('q')||'').trim().slice(0,100);
   const pattern='%'+q.replace(/[\\%_]/g,c=>'\\'+c)+'%';
+  // Inspect optional import storage within the existing list query. An
+  // unpromoted migration must not add D1 reads to the legacy summary budget.
+  const importSchema="EXISTS(SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='yta_summary_imports') AS imported_summary_schema_ready";
   const stmt=q
-    ? env.DB.prepare("SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json FROM jobs WHERE owner_id = ? AND (title LIKE ? ESCAPE '\\' OR video_id LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ? OFFSET ?").bind('owner',pattern,pattern,limit,offset)
-    : env.DB.prepare('SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json FROM jobs WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?').bind('owner',limit,offset);
+    ? env.DB.prepare("SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json,"+importSchema+" FROM jobs WHERE owner_id = ? AND (title LIKE ? ESCAPE '\\' OR video_id LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ? OFFSET ?").bind('owner',pattern,pattern,limit,offset)
+    : env.DB.prepare('SELECT id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json,'+importSchema+' FROM jobs WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?').bind('owner',limit,offset);
   const rows=(await stmt.all()).results??[];
+  const importedCounts=await importedSummaryCounts(env,rows.map(row=>row.id),rows.some(row=>row.imported_summary_schema_ready===1));
   const geminiRows=rows.filter(row=>JSON.parse(row.report_json||'null')?.compositionMode==='gemini-two-pass-v1');
   const geminiViews=new Map();
   // Limit live source data to five rows; a page can contain 50 large transcripts.
@@ -118,10 +123,10 @@ async function listJobs(env,url){
       geminiViews.set(row.id,{status:projected.status,summary:report.summary??[],summaryCompletion:projected.summaryCompletion,sourceStatus:projected.sourceStatus,sourceBinding:projected.report.sourceBinding,audioProcessingComplete:audit?.audioProcessingCoverage===1,audioTranscriptComplete:false});
     }
   }
-  return json({jobs:rows.map(({report_json,audit_json,...row})=>{
-    if(geminiViews.has(row.id))return {...row,...geminiViews.get(row.id)};
+  return json({jobs:rows.map(({report_json,audit_json,imported_summary_schema_ready,...row})=>{
+    if(geminiViews.has(row.id))return {...row,...geminiViews.get(row.id),importedSummaryCount:importedCounts.get(row.id)??0};
     let audit;try{audit=JSON.parse(audit_json||'null');}catch{audit=null;}
-    return {...row,summary:JSON.parse(report_json||'null')?.summary??[],nativeTranscriptSummaryReady:row.source_type==='url'&&['TRANSCRIPT_UNVERIFIED','PARTIAL_TRANSCRIPT'].includes(row.status)&&audit?.providerCompleteness==='NOT_INDEPENDENTLY_VERIFIED',nativePollReady:row.source_type==='url'&&row.status==='NATIVE_PENDING'&&typeof audit?.providerJobId==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(audit.providerJobId),freshTranscriptJob:row.source_type==='text'&&audit?.fullCoverageFresh?.contract==='FRESH_IMPORTED_TRANSCRIPT_V1',audioTranscriptComplete:row.source_type==='audio'&&audit?.audioProcessing==='ALL_PLANNED_CHUNKS_PROCESSED'&&audit.audioProcessingCoverage===1};
+    return {...row,importedSummaryCount:importedCounts.get(row.id)??0,summary:JSON.parse(report_json||'null')?.summary??[],nativeTranscriptSummaryReady:row.source_type==='url'&&['TRANSCRIPT_UNVERIFIED','PARTIAL_TRANSCRIPT'].includes(row.status)&&audit?.providerCompleteness==='NOT_INDEPENDENTLY_VERIFIED',nativePollReady:row.source_type==='url'&&row.status==='NATIVE_PENDING'&&typeof audit?.providerJobId==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(audit.providerJobId),freshTranscriptJob:row.source_type==='text'&&audit?.fullCoverageFresh?.contract==='FRESH_IMPORTED_TRANSCRIPT_V1',audioTranscriptComplete:row.source_type==='audio'&&audit?.audioProcessing==='ALL_PLANNED_CHUNKS_PROCESSED'&&audit.audioProcessingCoverage===1};
   }),limit,offset,hasMore:rows.length===limit,source:'D1'});
 }
 async function credentialEvent(env,provider,event){
@@ -171,6 +176,7 @@ export async function routeApi(request,env){
     const url=new URL(request.url);
     if(url.pathname==='/api/health'&&request.method==='GET')return json({service:'youtube-ai-analyzer-mvp',version:'0.7.0',mode:env?.ENABLE_LIVE_FREE==='true'?'LIVE_FREE_GATED':'MOCK_ONLY',deployed:env?.SITE_DEPLOYED==='true',productionReady:false,realCalls:env?.ENABLE_LIVE_FREE==='true'?null:false,storageConfigured:!!env?.DB});
     try{
+      const imported=await routeManualSummaryImport(request,env);if(imported)return imported;
       const live=await routeLive(request,env);if(live)return live;
       if(url.pathname==='/api/preflight'&&request.method==='POST')return json(preflight(await bodyJson(request)));
       if(url.pathname==='/api/jobs'&&request.method==='POST')return await handleJob(env,await bodyJson(request));
