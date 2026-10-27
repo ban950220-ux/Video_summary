@@ -1,0 +1,66 @@
+{
+  "kind": "OFFLINE_ARTIFACT_COMPARISON",
+  "productionExecutionSupported": false,
+  "originalPatchPinsChanged": false,
+  "candidates": [
+    {
+      "label": "main-6c3f309",
+      "commit": "6c3f309c30f270d696fecc581cd928532c767499",
+      "tree": "d5ac6ab65696e06484809794867610f6658fa97a",
+      "moduleBytes": 897758,
+      "moduleSha256": "8d83ed98f2416ab26bfc99d51ed3d1686a93ee9e22db8bffd585e3aee2a3f031",
+      "moduleDigest": "e8b67790b2e6eae73d7194c49d2a4f07a52f919816664d4a701c1c75c74e48e1",
+      "assetDigest": "09e9fdd7ae49f3753818f7566219db990909f9822fa27d8c2dfef90fca041467",
+      "assetCount": 8,
+      "assetSha256": {
+        "web/site/app.js": "2b09400806c168680f3e22920c417a076e729af343d1d85d43e81c8470b285e1",
+        "web/site/audio-progress-plan.mjs": "ad7d3e85550baa8652d059468aaeababfcbb9ac5728c68ffb73b5048a8ef4b38",
+        "web/site/audio-runner.mjs": "60e5f5de69ba19a767d376a980e5a13112c6469508ff3463831c375e9b2cbf92",
+        "web/site/audio.mjs": "19250dd1fef7cc0b2284cdb8b65cb813c6789372db45d0bed1a8645214b1a00d",
+        "web/site/context-review.mjs": "fc8bf1c476fe18c14b4165e6e24cb2e413963295b5487e2ea7a43ff48f3606da",
+        "web/site/groq-summary-progress.mjs": "4305fdcab4e5ec88241317a20ccaea0453912b3fc65805cbfbf57f258f86cbb4",
+        "web/site/index.html": "40c0e1f1312ab919d077f35db57f9c1bc1393967010deaebfa1ae5483481d8f7",
+        "web/site/style.css": "2c7e40d98d90c25fea4009e7390623011f73fa65a1a79e02a50af5ff90b8d8da"
+      },
+      "lockMatchedWrangler": "4.149.0",
+      "esbuild": "0.28.2",
+      "networkDenied": true,
+      "credentialsEnvironmentEmpty": true,
+      "realUploads": 0,
+      "realPromotions": 0
+    },
+    {
+      "label": "pr39-f4c6d88",
+      "commit": "f4c6d880c72c8565158090640dadfc4236d80405",
+      "tree": "379cfbff08cfab90149c465d47ee48bc88dba3f8",
+      "moduleBytes": 897932,
+      "moduleSha256": "cb32de0b40f82e6a66583a29f184348f5fc46294310de6ef8d8b022c8a0ab8f8",
+      "moduleDigest": "cd05cd3d684d36c25ac7b26980258393eee270a89c530bc8279be6dbc7edd86d",
+      "assetDigest": "d9605d196ec54ad6ed5b94662e7e4c63bcb7673ce43592116d4f924e4e2952ff",
+      "assetCount": 8,
+      "assetSha256": {
+        "web/site/app.js": "0e6cc7d4b34beb4c6e0587f55fbfd0315102537ea8a9e9b99fd0580fa6c83405",
+        "web/site/audio-progress-plan.mjs": "ad7d3e85550baa8652d059468aaeababfcbb9ac5728c68ffb73b5048a8ef4b38",
+        "web/site/audio-runner.mjs": "60e5f5de69ba19a767d376a980e5a13112c6469508ff3463831c375e9b2cbf92",
+        "web/site/audio.mjs": "19250dd1fef7cc0b2284cdb8b65cb813c6789372db45d0bed1a8645214b1a00d",
+        "web/site/context-review.mjs": "fc8bf1c476fe18c14b4165e6e24cb2e413963295b5487e2ea7a43ff48f3606da",
+        "web/site/groq-summary-progress.mjs": "4305fdcab4e5ec88241317a20ccaea0453912b3fc65805cbfbf57f258f86cbb4",
+        "web/site/index.html": "40c0e1f1312ab919d077f35db57f9c1bc1393967010deaebfa1ae5483481d8f7",
+        "web/site/style.css": "2c7e40d98d90c25fea4009e7390623011f73fa65a1a79e02a50af5ff90b8d8da"
+      },
+      "lockMatchedWrangler": "4.149.0",
+      "esbuild": "0.28.2",
+      "networkDenied": true,
+      "credentialsEnvironmentEmpty": true,
+      "realUploads": 0,
+      "realPromotions": 0
+    }
+  ],
+  "changedAssets": [
+    "web/site/app.js"
+  ],
+  "originalFrozenModuleMatchesRebuild": true,
+  "originalFrozenModuleDigestMatches": true,
+  "originalFrozenAssetDigestMatches": true,
+  "pr39CompatibleWithOldContract": false
+}
