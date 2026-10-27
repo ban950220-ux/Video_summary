@@ -67,7 +67,7 @@ export function prepareMp3Chunk(bytes){
  return {bytes:prepared,metadataCorrected:true};
 }
 export function mergeAudioSegments(chunks){
- const segments=[];let previousEnd=0;const missingChunks=[],rejectedSegments=[],retainedByChunk={},orderedChunks=[...chunks].sort((a,b)=>a.start-b.start);
+ const segments=[];let previousEnd=0;const missingChunks=[],rejectedSegments=[],retainedByChunk={},deduplicatedByChunk={},orderedChunks=[...chunks].sort((a,b)=>a.start-b.start);
  for(const chunk of orderedChunks){
   const items=chunk.segments||[];
   for(const s of items){
@@ -75,7 +75,7 @@ export function mergeAudioSegments(chunks){
    if(!text||!Number.isFinite(start)||!Number.isFinite(end)||end<=start||start<chunk.start-.1||end>chunk.end+2){rejectedSegments.push({chunkIndex:chunk.index,reason:'INVALID_SEGMENT'});continue;}
    if(chunk.index>0&&(start+end)/2<previousEnd){
     const duplicate=segments.some(prior=>prior.chunk<chunk.index&&prior.text===text&&prior.endMs>Math.round(start*1000)&&prior.startMs<Math.round(end*1000));
-    if(duplicate){rejectedSegments.push({chunkIndex:chunk.index,reason:'OVERLAP_DUPLICATE'});continue;}
+   if(duplicate){rejectedSegments.push({chunkIndex:chunk.index,reason:'OVERLAP_DUPLICATE'});deduplicatedByChunk[chunk.index]=(deduplicatedByChunk[chunk.index]||0)+1;continue;}
     // Distinct speech in an intentional chunk overlap is uncertain, not missing.
     // Keep its evidence and mark the boundary for review instead of discarding it.
     segments.push({startMs:Math.round(start*1000),endMs:Math.round(end*1000),text,chunk:chunk.index,boundaryPreviousEndMs:Math.round(previousEnd*1000)});
@@ -85,14 +85,16 @@ export function mergeAudioSegments(chunks){
    segments.push({startMs:Math.round(start*1000),endMs:Math.round(end*1000),text,chunk:chunk.index});
    retainedByChunk[chunk.index]=(retainedByChunk[chunk.index]||0)+1;
   }
-  if(!retainedByChunk[chunk.index])missingChunks.push(chunk.index);
+  // A valid overlap duplicate is represented by an earlier retained segment.
+  // Empty/invalid-only chunks remain missing; this does not attest audio coverage.
+  if(!retainedByChunk[chunk.index]&&!deduplicatedByChunk[chunk.index])missingChunks.push(chunk.index);
   previousEnd=Math.max(previousEnd,chunk.end);
  }
  // Provider chunks arrive in source order; overlaps can put a later chunk's
  // first segment before the prior chunk's last segment on the source timeline.
  segments.sort((a,b)=>a.startMs-b.startMs||a.endMs-b.endMs||a.chunk-b.chunk);
  const boundaryAmbiguities=boundaryMarkersFromRetained(orderedChunks,segments);
- return {segments:segments.map(({boundaryPreviousEndMs,...segment})=>segment),missingChunks,rejectedSegments,retainedByChunk,boundaryAmbiguities};
+ return {segments:segments.map(({boundaryPreviousEndMs,...segment})=>segment),missingChunks,rejectedSegments,retainedByChunk,deduplicatedByChunk,boundaryAmbiguities};
 }
 export function boundaryMarkersFromRetained(chunks,segments){
  const orderedChunks=[...chunks].sort((a,b)=>a.index-b.index);

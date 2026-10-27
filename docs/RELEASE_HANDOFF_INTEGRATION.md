@@ -89,3 +89,18 @@ permission, authenticate a caller's evidence or resolve a policy-denied read.
 The prior operational snapshot verified stored transcript readback only. It did
 not prove a final AI summary was saved, the effective hidden Gemini flag, or a fresh
 deployment baseline. No fixture or offline test result replaces those checks.
+
+## Current-code integration
+
+The owner requested integration and release of the current code on 2026-10-27.
+PR39 at `f4c6d880c72c8565158090640dadfc4236d80405` is merged into this proposal's
+branch without changing the frozen main fixture or its old contract. The two
+application changes and their regression tests retain their exact reviewed bytes.
+Any real deployment must build the final merged commit's `src/site-worker.mjs`
+and `web/site` assets through the existing guarded production path. The old
+`tests/fixtures/release-reviewed-6c3f309` payload is test input only and is never a
+production release candidate for this integrated code.
+
+The source merge does not satisfy the separate live metadata, settings preservation,
+authenticated execution or exact-version verification requirements. CI deliberately
+continues to assert that the release gate is blocked without those current inputs.
