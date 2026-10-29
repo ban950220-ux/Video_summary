@@ -791,6 +791,7 @@ export async function routeLive(request,env){
   }
   return json({error:{code:'METHOD_NOT_ALLOWED'}},405);
  }catch(error){
+  if(typeof env.__testOnlyErrorCapture==='function')env.__testOnlyErrorCapture(error);
   if(error instanceof InputError)return json({error:{code:error.code,message:error.message}},400);
   if(error instanceof ProviderError)return json({error:{code:error.code,message:error.message}},error.code==='NOT_FOUND'?404:409);
   if(/^SUMMARY_REVIEW_(SOURCE|PARTITION|OPERATIONS|APPROVAL|CHECKPOINT|CREDENTIAL)_INTERNAL$/.test(error?.safeReviewCode??''))return json({error:{code:error.safeReviewCode,message:error.message}},500);

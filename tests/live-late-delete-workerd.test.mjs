@@ -19,7 +19,8 @@ test('Workerd shared execute never restores private bodies after delete, while p
  try{
   const DB=await mf.getD1Database('DB');
   for(const file of ['../schema.sql','../migrations/0002_live.sql','../migrations/0003_observed_capacity.sql'])for(const sql of statements(file))await DB.prepare(sql).run();
-  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',SUPADATA_API_KEY:'LOCAL_FAKE_KEY',GEMINI_API_KEY:'LOCAL_FAKE_KEY'},audit={status:'TRANSCRIPT_UNVERIFIED'},now=Date.now();
+  let internalError=null;
+  const env={DB,ENABLE_LIVE_FREE:'true',ALLOW_PAID_API:'false',SUPADATA_API_KEY:'LOCAL_FAKE_KEY',GEMINI_API_KEY:'LOCAL_FAKE_KEY',__testOnlyErrorCapture:error=>{internalError={name:error?.name,code:error?.code,message:String(error?.message).slice(0,300)};}},audit={status:'TRANSCRIPT_UNVERIFIED'},now=Date.now();
   for(const provider of ['supadata','gemini'])await DB.prepare('INSERT INTO yta_quota(provider,allowance,request_limit,expires_at,confirmed_at,billing_disabled) VALUES(?,250000,100,?,?,1)').bind(provider,now+3600000,now).run();
   const remaining={requestsMinute:1000,tokensMinute:1000000000,requestsDay:1000};
   await DB.prepare("INSERT INTO yta_capacity(provider,model,source,observed_at,valid_until,reset_json,remaining_json,reserved_json,billing_disabled) VALUES('gemini','gemini-2.5-flash',?,?,?,?,?,?,1)").bind('AI_STUDIO_LIVE:'+hash('gemini:LOCAL_FAKE_KEY'),now,now+3600000,JSON.stringify(Object.fromEntries(Object.keys(remaining).map(k=>[k,now+3600000]))),JSON.stringify(remaining),JSON.stringify(Object.fromEntries(Object.keys(remaining).map(k=>[k,0])))).run();
@@ -57,7 +58,8 @@ test('Workerd shared execute never restores private bodies after delete, while p
     }
     return Response.json({candidates:[{finishReason:outcome==='success'?'STOP':'MAX_TOKENS',content:{parts:[{text:JSON.stringify(report())}]}}]});
    };
-   const response=await invoke(id,kind);assert.equal(response.status,409,`${kind}/${outcome}/${mode}: ${await response.clone().text()}`);
+   internalError=null;
+   const response=await invoke(id,kind);assert.equal(response.status,409,`${kind}/${outcome}/${mode}: ${await response.clone().text()} internal=${JSON.stringify(internalError)}`);
    const rows=await privateOperations(id);assert.equal(rows.length,1);assert.equal(rows[0].state,outcome==='success'?'DONE':'FAILED_UNCERTAIN');assert.equal(rows[0].result_json,null);assert.ok(rows[0].units>0);
    const quotaAfter=await DB.prepare('SELECT consumed,request_count FROM yta_quota WHERE provider=?').bind(provider).first();assert.equal(quotaAfter.request_count,quotaBefore.request_count+1);assert.equal(quotaAfter.consumed,quotaBefore.consumed+rows[0].units);
    const usage=(await DB.prepare('SELECT * FROM usage_events WHERE job_id=?').bind(id).all()).results;assert.equal(usage.length,outcome==='success'?1:0);if(usage.length)assert.equal(usage[0].used_units,rows[0].units);assert.ok(!JSON.stringify(usage).includes(marker));
