@@ -1,3 +1,4 @@
+import {projectApprovedSummary} from './approved-summary-format.mjs';
 import {projectGeminiReport} from './gemini-source-assessment.mjs';
 import {InputError,videoIdOf,durationSec,parseCaptions,transcriptAudit,extractiveReport,estimateSource,PROVIDERS,DEFAULT_POLICY,usableFreeUnits} from './core.mjs';
 import {configuredMasterKey,decryptProviderKey,encryptProviderKey,providerAllowed} from './vault.mjs';
@@ -5,6 +6,7 @@ import {routeLive,saveSource,ensureLiveSchema} from './live.mjs';
 import {ProviderError} from './adapters.mjs';
 import {capacityIdentityForCredentialSnapshot} from './observed-capacity.mjs';
 import {routeManualSummaryImport,importedSummaryCounts} from './manual-summary-import.mjs';
+import {routeAsrResultBridge} from './asr-result-bridge.mjs';
 
 const JSON_HEADERS={'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff','referrer-policy':'no-referrer'};
 const json=(obj,status=200)=>new Response(JSON.stringify(obj),{status,headers:JSON_HEADERS});
@@ -53,6 +55,36 @@ async function audioSubmissionHash(quote,title,payload){
   const binding=JSON.stringify({sourceType:'audio',videoId:quote.videoId??null,durationSeconds:quote.durationSeconds,title:title??null,ownedAudioSha256:sha});
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(binding)))).map(byte=>byte.toString(16).padStart(2,'0')).join('');
 }
+async function urlSubmissionHash(quote,title,payload){
+  const id=payload.submissionId;
+  if(id===undefined&&payload.ownedAudioSha256===undefined)return null;
+  if(typeof id!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)||payload.ownedAudioSha256!==undefined)throw new InputError('URL 작업의 재시도 식별자 형식을 확인하세요.');
+  const binding=JSON.stringify({kind:'URL_NATIVE_CAPTION_SUBMISSION_V1',sourceType:'url',videoId:quote.videoId,durationSeconds:quote.durationSeconds,title:title??null});
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(binding)))).map(byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+async function saveBoundUrlJob(env,row,submissionHash){
+  const column=await env.DB.prepare("SELECT name FROM pragma_table_info('jobs') WHERE name='submission_hash'").first();
+  if(!column)throw new ProviderError('LIVE_SCHEMA_REQUIRED','URL 작업 중복 방지에 기존 요청 식별자 저장 열이 필요합니다.');
+  await ensureLiveSchema(env);
+  let inserted;
+  try{
+    // The existing primary key is the atomic replay slot. Orphaned prior work
+    // and deletion tombstones cannot be turned into a fresh caption request.
+    inserted=await env.DB.prepare("INSERT OR IGNORE INTO jobs(id,owner_id,video_id,title,source_url,source_type,status,duration_seconds,created_at,updated_at,report_json,audit_json,submission_hash) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM yta_operations WHERE job_id=? OR id=?) AND NOT EXISTS(SELECT 1 FROM yta_sources WHERE job_id=?) AND NOT EXISTS(SELECT 1 FROM yta_audio WHERE job_id=?) AND NOT EXISTS(SELECT 1 FROM usage_events WHERE job_id=?)")
+      .bind(row.id,'owner',row.videoId,row.title??null,row.url,'url',row.status,row.durationSeconds,row.createdAt,row.createdAt,JSON.stringify(row.report??null),JSON.stringify(row.audit??null),submissionHash,row.id,row.id+':deleting',row.id,row.id,row.id).run();
+  }catch{throw new ProviderError('URL_SUBMISSION_WRITE_UNCERTAIN','URL 작업 저장 결과가 불확실합니다. 같은 요청 식별자의 저장 상태부터 확인하세요.');}
+  if(![0,1].includes(inserted.meta?.changes))throw new ProviderError('URL_SUBMISSION_WRITE_UNCERTAIN','URL 작업 저장 결과가 불확실합니다. 같은 요청 식별자의 저장 상태부터 확인하세요.');
+  const saved=await env.DB.prepare("SELECT jobs.*, EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING') AS deleting FROM jobs WHERE jobs.id=? AND jobs.owner_id='owner'").bind(row.id+':deleting',row.id).first();
+  if(!saved){
+    const deleted=await env.DB.prepare("SELECT 1 AS ok FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING'").bind(row.id+':deleting').first();
+    throw new ProviderError(deleted?'URL_SUBMISSION_DELETED':'URL_SUBMISSION_UNAVAILABLE',deleted?'삭제된 URL 작업입니다. 저장 상태를 확인한 뒤 새 작업을 명시적으로 선택하세요.':'이 요청 식별자로 URL 작업을 확인할 수 없습니다. 새 요청을 자동으로 보내지 마세요.');
+  }
+  if(saved.deleting)throw new ProviderError('URL_SUBMISSION_DELETED','삭제된 URL 작업입니다. 저장 상태를 확인한 뒤 새 작업을 명시적으로 선택하세요.');
+  if(saved.submission_hash!==submissionHash||saved.source_type!=='url'||saved.video_id!==row.videoId||saved.source_url!==row.url||saved.duration_seconds!==row.durationSeconds||saved.title!==(row.title??null))throw new ProviderError('URL_SUBMISSION_MISMATCH','요청 식별자가 다른 URL 입력에 연결되어 있습니다. 기존 작업을 확인하세요.');
+  let audit,report;
+  try{audit=JSON.parse(saved.audit_json||'null');report=JSON.parse(saved.report_json||'null');}catch{throw new ProviderError('URL_SUBMISSION_WRITE_UNCERTAIN','저장된 URL 작업 상태를 읽을 수 없습니다. 원본을 보존하고 작업 상태를 검토하세요.');}
+  return {job:{id:saved.id,createdAt:saved.created_at,videoId:saved.video_id,source:saved.source_type,url:saved.source_url,durationSeconds:saved.duration_seconds,title:saved.title,status:saved.status,audit,report},persisted:true,reused:inserted.meta.changes===0};
+}
 function preflight(payload){
   const durationSeconds=durationSec(payload.durationSeconds);
   const source=payload.sourceType;
@@ -63,12 +95,13 @@ function preflight(payload){
 async function handleJob(env,payload){
   const quote=preflight(payload),ts=new Date().toISOString();
   const title=typeof payload.title==='string' ? payload.title.trim().slice(0,160) : null;
-  const submissionHash=await audioSubmissionHash(quote,title,payload);
+  const submissionHash=await (quote.sourceType==='url'?urlSubmissionHash(quote,title,payload):audioSubmissionHash(quote,title,payload));
   if(quote.sourceType==='audio'&&quote.videoId&&!submissionHash)throw new InputError('YouTube URL과 보유 MP3를 연결할 때 요청 식별자와 MP3 SHA-256이 필요합니다.');
   if(submissionHash&&!env?.DB)return dbUnavailable();
-  const job={id:submissionHash?payload.submissionId:crypto.randomUUID(),createdAt:ts,videoId:quote.videoId,source:quote.sourceType,durationSeconds:quote.durationSeconds,title};
+  const job={id:submissionHash?(quote.sourceType==='url'?payload.submissionId.toLowerCase():payload.submissionId):crypto.randomUUID(),createdAt:ts,videoId:quote.videoId,source:quote.sourceType,durationSeconds:quote.durationSeconds,title};
   if(quote.sourceType==='url'){
-    const row={...job,url:`https://www.youtube.com/watch?v=${quote.videoId}`,status:'NEED_UPLOAD',audit:{status:'VIDEO_SUMMARY_ONLY_UNAVAILABLE',reason:'현재 데모에는 YouTube 직접 접근 API 키가 없으며 영상 내용을 추측하지 않습니다.'},report:null};
+    const row={...job,url:`https://www.youtube.com/watch?v=${quote.videoId}`,status:'NEED_UPLOAD',audit:{status:'CAPTION_RESULT_UNAVAILABLE',nativeAcquisition:'NO_STORED_RESULT',automaticAudioAcquisition:'NOT_CONNECTED',reason:'저장된 자막 결과가 없습니다. 이전 요청 상태를 확인한 뒤 자막 확보를 검토하세요. 자동 음성 취득 워커는 연결되지 않았습니다.'},report:null};
+    if(submissionHash){const bound=await saveBoundUrlJob(env,row,submissionHash);return json({...bound,preflight:quote},202);}
     return json({job:row,persisted:await saveJob(env,row),preflight:quote},202);
   }
   if(quote.sourceType==='audio'){
@@ -126,7 +159,10 @@ async function listJobs(env,url){
   return json({jobs:rows.map(({report_json,audit_json,imported_summary_schema_ready,...row})=>{
     if(geminiViews.has(row.id))return {...row,...geminiViews.get(row.id),importedSummaryCount:importedCounts.get(row.id)??0};
     let audit;try{audit=JSON.parse(audit_json||'null');}catch{audit=null;}
-    return {...row,importedSummaryCount:importedCounts.get(row.id)??0,summary:JSON.parse(report_json||'null')?.summary??[],nativeTranscriptSummaryReady:row.source_type==='url'&&['TRANSCRIPT_UNVERIFIED','PARTIAL_TRANSCRIPT'].includes(row.status)&&audit?.providerCompleteness==='NOT_INDEPENDENTLY_VERIFIED',nativePollReady:row.source_type==='url'&&row.status==='NATIVE_PENDING'&&typeof audit?.providerJobId==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(audit.providerJobId),freshTranscriptJob:row.source_type==='text'&&audit?.fullCoverageFresh?.contract==='FRESH_IMPORTED_TRANSCRIPT_V1',audioTranscriptComplete:row.source_type==='audio'&&audit?.audioProcessing==='ALL_PLANNED_CHUNKS_PROCESSED'&&audit.audioProcessingCoverage===1};
+    // Discovery hint only: the detail/source checks and /native admission remain
+    // authoritative for existing source, report, deletion and operation state.
+    const nativeAcquisitionReady=row.source_type==='url'&&row.status==='NEED_UPLOAD'&&JSON.parse(report_json||'null')===null&&['CAPTION_RESULT_UNAVAILABLE','CAPTION_NOT_REQUESTED','VIDEO_SUMMARY_ONLY_UNAVAILABLE'].includes(audit?.status);
+    return {...row,importedSummaryCount:importedCounts.get(row.id)??0,summary:JSON.parse(report_json||'null')?.summary??[],nativeAcquisitionReady,nativeTranscriptSummaryReady:row.source_type==='url'&&['TRANSCRIPT_UNVERIFIED','PARTIAL_TRANSCRIPT'].includes(row.status)&&audit?.providerCompleteness==='NOT_INDEPENDENTLY_VERIFIED',nativePollReady:row.source_type==='url'&&row.status==='NATIVE_PENDING'&&typeof audit?.providerJobId==='string'&&/^[a-zA-Z0-9-]{1,100}$/.test(audit.providerJobId),freshTranscriptJob:row.source_type==='text'&&audit?.fullCoverageFresh?.contract==='FRESH_IMPORTED_TRANSCRIPT_V1',audioTranscriptComplete:row.source_type==='audio'&&audit?.audioProcessing==='ALL_PLANNED_CHUNKS_PROCESSED'&&audit.audioProcessingCoverage===1};
   }),limit,offset,hasMore:rows.length===limit,source:'D1'});
 }
 async function credentialEvent(env,provider,event){
@@ -176,6 +212,7 @@ export async function routeApi(request,env){
     const url=new URL(request.url);
     if(url.pathname==='/api/health'&&request.method==='GET')return json({service:'youtube-ai-analyzer-mvp',version:'0.7.0',mode:env?.ENABLE_LIVE_FREE==='true'?'LIVE_FREE_GATED':'MOCK_ONLY',deployed:env?.SITE_DEPLOYED==='true',productionReady:false,realCalls:env?.ENABLE_LIVE_FREE==='true'?null:false,storageConfigured:!!env?.DB});
     try{
+      const asr=await routeAsrResultBridge(request,env);if(asr)return asr;
       const imported=await routeManualSummaryImport(request,env);if(imported)return imported;
       const live=await routeLive(request,env);if(live)return live;
       if(url.pathname==='/api/preflight'&&request.method==='POST')return json(preflight(await bodyJson(request)));
@@ -199,7 +236,14 @@ export async function routeApi(request,env){
           const row=await env.DB.prepare('SELECT * FROM jobs WHERE id = ? AND owner_id = ?').bind(id,'owner').first();
           if(!row)return json({error:{code:'NOT_FOUND'}},404);
           let audit;try{audit=JSON.parse(row.audit_json||'null');}catch{audit=null;}
-          return json({job:await projectGeminiReport(env,{...row,report:JSON.parse(row.report_json||'null'),audit})});
+          const report=JSON.parse(row.report_json||'null');let source=null;
+          // Read-only, owner-scoped projection. Persisted reports and receipts stay exact.
+          if(report)try{
+            const savedSource=await env.DB.prepare("SELECT s.* FROM yta_sources s JOIN jobs j ON j.id=s.job_id WHERE s.job_id=? AND j.owner_id='owner' AND NOT EXISTS(SELECT 1 FROM yta_operations d WHERE d.id=j.id||':deleting' AND d.state='DELETING')").bind(id).first();
+            if(savedSource)source={...savedSource,segments:JSON.parse(savedSource.segments_json||'[]')};
+          }catch{/* Source unavailable: preserve the report and display an explicit unverified state. */}
+          const projected=await projectGeminiReport(env,{...row,report,audit},source);
+          return json({job:projectApprovedSummary(projected,source)});
         }
         if(request.method==='DELETE'){
           await env.DB.prepare('DELETE FROM jobs WHERE id = ? AND owner_id = ?').bind(id,'owner').run();
@@ -209,7 +253,7 @@ export async function routeApi(request,env){
       return json({error:{code:'NOT_FOUND'}},404);
     }catch(e){
       if(e instanceof InputError) return json({error:{code:e.code,message:e.message}},400);
-      if(e instanceof ProviderError&&['LIVE_SCHEMA_REQUIRED','AUDIO_SUBMISSION_DELETED','AUDIO_SUBMISSION_WRITE_UNCERTAIN'].includes(e.code))return json({error:{code:e.code,message:e.message}},409);
+      if(e instanceof ProviderError&&['LIVE_SCHEMA_REQUIRED','AUDIO_SUBMISSION_DELETED','AUDIO_SUBMISSION_WRITE_UNCERTAIN','URL_SUBMISSION_DELETED','URL_SUBMISSION_MISMATCH','URL_SUBMISSION_UNAVAILABLE','URL_SUBMISSION_WRITE_UNCERTAIN'].includes(e.code))return json({error:{code:e.code,message:e.message}},409);
       // Do not leak provider credentials, transcripts, or request bodies into logs.
       return json({error:{code:'INTERNAL_ERROR',message:'내부 처리 오류입니다.'}},500);
     }

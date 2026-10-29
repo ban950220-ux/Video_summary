@@ -3,6 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
+import {renderApprovedSummary} from '../web/site/approved-summary-format.mjs';
 
 test('PASS review needs explicit caveat acknowledgement before a no-provider save',async()=>{
  const node=tag=>({tag,children:[],dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-accept';
@@ -10,7 +11,7 @@ test('PASS review needs explicit caveat acknowledgement before a no-provider sav
  let status={state:'ISSUES',quote,sourceAssessmentSha256:'f'.repeat(64),auditSha256:'c'.repeat(64),reviewVerdict:'PASS',review:{verdict:'PASS',issues:[]},calls:[{phase:0,state:'SETTLED',responseSha256:'d'.repeat(64)},{phase:1,state:'SETTLED',responseSha256:'e'.repeat(64)}]};
  const fetcher=async(path,options)=>{calls.push({path,method:options.method,body:options.body});if(path.endsWith('-accept'))status={...status,state:'COMPLETE'};return {ok:true,headers:{get:()=> 'application/json'},json:async()=>status};};
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showGeminiTwoPassChoice;globalThis.__state=state;');
- const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout};runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__show({id:'job-accept'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
+ const context={renderApprovedSummary,document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout};runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__show({id:'job-accept'},target,0);await new Promise(resolve=>setTimeout(resolve,0));
  const host=target.children[0],button=host.children.find(item=>item.tag==='button'&&item.textContent==='Save source-based report with limitations');assert.ok(button);
  await button.onclick();assert.equal(calls.filter(item=>item.method==='POST').length,0);
  const checks=host.children.filter(item=>item.tag==='label'&&item.children?.[0]?.tag==='input'&&item.textContent?.startsWith('I ')||item.tag==='label'&&item.textContent?.startsWith('Accept this summary'));
@@ -22,7 +23,7 @@ const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
 test('saved partial Gemini report renders the summary, source limits and stale warning',()=>{
  const node=tag=>({tag,children:[],dataset:{},append(...items){this.children.push(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div');
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showReport;');
- const context={document:{createElement:node,querySelector:()=>null},window:{},location:{hash:''},setTimeout,clearTimeout};runInNewContext(source,context);
+ const context={renderApprovedSummary,document:{createElement:node,querySelector:()=>null},window:{},location:{hash:''},setTimeout,clearTimeout};runInNewContext(source,context);
  context.__show({status:'SOURCE_REVIEW_REQUIRED',report:{kind:'GEMINI_TWO_PASS_EVIDENCE_LINKED',compositionMode:'gemini-two-pass-v1',summaryCompletion:'COMPLETE',sourceBinding:'STALE_SOURCE',sourceAssessment:{status:'PARTIAL_TRANSCRIPT',provenance:'GROQ_OWNED_AUDIO',durationSeconds:8,range:{firstStartMs:0,lastEndMs:8000}},summary:[{text:'Saved summary',evidenceIds:[1]}]}},target,true);
  const text=element=>[element.textContent??'',...(element.children??[]).map(text)].join(' '),rendered=text(target);
  assert.match(rendered,/Saved summary/);assert.match(rendered,/PARTIAL_TRANSCRIPT/);assert.match(rendered,/GROQ_OWNED_AUDIO/);assert.match(rendered,/0–8000 ms/);assert.match(rendered,/STALE_SOURCE/);assert.match(rendered,/다시 검토/);assert.doesNotMatch(rendered,/AI 요약 아님/);
@@ -32,7 +33,7 @@ test('a Groq recovery warning leaves the Gemini choice reachable without a provi
  const choice={transcription:{complete:true},summary:{complete:false,savedRawStages:0,rawStages:12,remainingRawStages:12,recoveryReviewRequired:true},free:{model:'mock-free',inputTokensUpperPerCall:4800,outputTokensUpperPerCall:1800,eta:{reason:'UNKNOWN'}},paid:{executionEnabled:false,quoteIssueReady:false,reason:'별도 승인 필요',model:'gemini-3.1-flash-lite',priceVersion:'v1',maxRetries:0}};
  const calls=[],fetcher=async(path,options)=>{calls.push({path,method:options.method});const result=path.endsWith('/summary-choice')?choice:path.endsWith('/paid-summary-status')?{approval:null,reservations:[]}:{state:'NOT_STARTED',calls:[]};return {ok:true,headers:{get:()=> 'application/json'},json:async()=>result};};
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showSummaryChoice=showSummaryChoice;globalThis.__state=state;');
- const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout};runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showSummaryChoice({id:'job-a'},target,0);await tick();
+ const context={renderApprovedSummary,document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout};runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showSummaryChoice({id:'job-a'},target,0);await tick();
  const host=target.children[0];assert.ok(host.children.some(item=>item.textContent?.includes('Groq 복구 기록의 근거')));const gemini=host.children.find(item=>item.tag==='button'&&item.textContent?.includes('Gemini 전체 전사 요약'));assert.ok(gemini);gemini.onclick();await tick();
  assert.ok(target.children[0].children.some(item=>item.textContent?.includes('계정 전체 잔여량은 UNKNOWN')));assert.deepEqual(calls.map(item=>item.method),['GET','GET','GET']);
 });
@@ -42,7 +43,7 @@ test('two-pass option requires current account evidence, quote and approval befo
  let status={state:'NOT_STARTED',calls:[]};
  const fetcher=async(path,options)=>{calls.push({path,method:options.method,body:options.body});if(path.endsWith('-quote'))status={state:'QUOTED',calls:[],quote};return {ok:true,headers:{get:()=> 'application/json'},json:async()=>status};};
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__showGeminiTwoPassChoice=showGeminiTwoPassChoice;globalThis.__state=state;');
- const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout};
+ const context={renderApprovedSummary,document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__showGeminiTwoPassChoice({id:'job-a'},target,0);await tick();
  const host=target.children[0];assert.ok(host.children.some(item=>item.textContent?.includes('계정 전체 잔여량은 UNKNOWN')));assert.equal(host.children.some(item=>item.tag==='button'&&item.textContent?.includes('실행')),false);
  const consent=host.children.find(item=>item.tag==='label'&&item.textContent?.includes('Google')),button=host.children.find(item=>item.tag==='button'&&item.textContent?.includes('견적 요청'));assert.ok(consent);await button.onclick();assert.deepEqual(calls.map(item=>item.method),['GET']);consent.children[0].checked=true;await button.onclick();await tick();
@@ -67,7 +68,7 @@ test('an uncertain quote response shows status-only recovery and never resends c
  const node=tag=>({tag,children:[],dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-c';
  const calls=[];const fetcher=async(path,options)=>{calls.push({path,method:options.method,signal:options.signal});if(options.method==='POST')throw Error('simulated network timeout');return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({state:'NOT_STARTED',calls:[]})};};
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showGeminiTwoPassChoice;globalThis.__state=state;');
- const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout,AbortSignal:{timeout:ms=>({deadline:ms})}};
+ const context={renderApprovedSummary,document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout,AbortSignal:{timeout:ms=>({deadline:ms})}};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__show({id:'job-c'},target,0);await tick();
  const host=target.children[0],consent=host.children.find(item=>item.tag==='label'&&item.textContent?.includes('Google')),button=host.children.find(item=>item.tag==='button');consent.children[0].checked=true;await button.onclick();
  assert.equal(calls.filter(item=>item.method==='POST').length,1);assert.equal(calls.find(item=>item.method==='POST').signal.deadline,120000);
@@ -81,7 +82,7 @@ test('failed status read after uncertain quote still offers only a working read-
  const calls=[];let statusReads=0;
  const fetcher=async(path,options)=>{calls.push(options.method);if(options.method==='POST')throw Object.assign(Error('provider timeout'),{code:'TWO_PASS_COUNT_UNAVAILABLE'});statusReads++;if(statusReads===2)throw Error('status unavailable');return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({state:'NOT_STARTED',calls:[]})};};
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showGeminiTwoPassChoice;globalThis.__state=state;');
- const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout,AbortSignal:{timeout:ms=>({deadline:ms})}};
+ const context={renderApprovedSummary,document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout,AbortSignal:{timeout:ms=>({deadline:ms})}};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__show({id:'job-d'},target,0);await tick();
  const host=target.children[0],consent=host.children.find(item=>item.tag==='label'&&item.textContent?.includes('Google'));consent.children[0].checked=true;
  await host.children.find(item=>item.tag==='button').onclick();
@@ -96,7 +97,7 @@ test('reopening a pending quote offers status refresh but never another quote PO
  const node=tag=>({tag,children:[],dataset:{},append(...items){this.children.push(...items);},prepend(...items){this.children.unshift(...items);},replaceChildren(...items){this.children=items;},setAttribute(){}}),target=node('div'),toast=node('div');target.dataset.jobId='job-e';
  const calls=[],fetcher=async(path,options)=>{calls.push(options.method);return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({state:'QUOTE_PENDING',quoteAttempt:{state:'COUNT_SENT'},quote:null,calls:[]})};};
  const source=readFileSync(new URL('../web/site/app.js',import.meta.url),'utf8').replace(/\r\n?/g,'\n').replace(/^import .*;\n/gm,'').replace(/\ninit\(\);\s*$/,'\nglobalThis.__show=showGeminiTwoPassChoice;globalThis.__state=state;');
- const context={document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout,AbortSignal:{timeout:ms=>({deadline:ms})}};
+ const context={renderApprovedSummary,document:{createElement:node,querySelector:selector=>selector==='#toast'?toast:null,hidden:false},window:{},location:{hash:''},fetch:fetcher,detailRequestIsCurrent:()=>true,setTimeout,clearTimeout,AbortSignal:{timeout:ms=>({deadline:ms})}};
  runInNewContext(source,context,{filename:'web/site/app.js'});context.__state.view='library';context.__show({id:'job-e'},target,0);await tick();
  const host=target.children[0];assert.ok(host.children.some(item=>item.textContent?.includes('COUNT_SENT')));
  assert.equal(host.children.filter(item=>item.tag==='button').length,1);
