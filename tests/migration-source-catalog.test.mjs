@@ -11,15 +11,16 @@ import {migrationBefore,migrationAfter} from './fixtures/migration-review-snapsh
 
 test('fixed commit/tree/catalog metadata is required, cannot omit a tail or replace a same-name hash',()=>{
  const catalog=reviewedMigrationSource();assert.equal(catalog.sourceCommit,'043ba56ee716f044698a6de66f079a7c7bae8753');
- assert.equal(catalog.sourceTree,'4e5eeda2d4781719af3e543d5eeaef62de342df0');assert.equal(catalog.files.length,14);
- for(const mutate of [s=>s.sourceCommit='0'.repeat(40),s=>s.sourceTree='0'.repeat(40),s=>s.files.pop(),s=>s.files.reverse(),s=>s.files.push(s.files.at(-1)),s=>s.files[10].sha256='0'.repeat(64),s=>s.files[10].crlfSha256='0'.repeat(64)]){
+ assert.equal(catalog.sourceTree,'4e5eeda2d4781719af3e543d5eeaef62de342df0');assert.equal(catalog.files.length,15);assert.equal(catalog.fileCount,15);
+ assert.equal(catalog.additionalSources.length,1);assert.equal(catalog.additionalSources[0].sourcePath,'migrations/pending/0021_manual_summary_imports.sql');
+ for(const mutate of [s=>s.sourceCommit='0'.repeat(40),s=>s.sourceTree='0'.repeat(40),s=>s.fileCount=14,s=>s.additionalSources[0].sourceCommit='0'.repeat(40),s=>s.additionalSources[0].sourcePath='migrations/unreviewed.sql',s=>s.files.pop(),s=>s.files.reverse(),s=>s.files.push(s.files.at(-1)),s=>s.files[10].sha256='0'.repeat(64),s=>s.files[10].crlfSha256='0'.repeat(64)]){
   const b=migrationBefore();mutate(b.repositorySource);
   assert.ok(assessFullCoverageMigration(b).blocks.includes('MIGRATION_SOURCE_UNVERIFIED'));
   assert.equal(verifyFullCoverageMigration(migrationAfter(b),{before:b}).verified,false);
   const valid=migrationBefore(),a=migrationAfter(valid);mutate(a.repositorySource);
   assert.deepEqual(verifyFullCoverageMigration(a,{before:valid}),{verified:false,reason:'MIGRATION_SOURCE_UNVERIFIED'});
  }
- catalog.files.pop();assert.equal(reviewedMigrationSource().files.length,14,'callers receive a copy, not the validator trust anchor');
+ catalog.files.pop();assert.equal(reviewedMigrationSource().files.length,15,'callers receive a copy, not the validator trust anchor');
  const legacy=migrationBefore();legacy.kind='FULL_COVERAGE_MIGRATION_READONLY_V1';legacy.pendingMigrations=legacy.pendingMigrations.slice(0,1);delete legacy.executionScope;delete legacy.repositorySource;
  assert.equal(assessFullCoverageMigration(legacy).readyForOperatorReview,false);
  assert.deepEqual(verifyFullCoverageMigration({pendingMigrations:[],triggers:migrationAfter(migrationBefore()).triggers}),{verified:false,reason:'BEFORE_SNAPSHOT_REQUIRED'});
@@ -62,4 +63,15 @@ test('physical same-name SQL changes, extra/missing files and changes after init
   writeFileSync(target,readFileSync(target,'utf8').replace("'groq-full-coverage'","'GROQ-FULL-COVERAGE'"));
   assert.equal(local.assessFullCoverageMigration(crlf).readyForOperatorReview,false,'no semantic SQL normalization');
  }finally{const full=resolve(folder),tail=relative(resolve(tmpdir()),full);if(!tail||tail.startsWith('..')||isAbsolute(tail)||!tail.startsWith('migration-catalog-fixture-'))throw Error('CLEANUP_SCOPE_INVALID');rmSync(full,{recursive:true,force:true});}
+});
+
+test('registering 0021 source never extends the existing 0016 execution authorization',()=>{
+ const before=migrationBefore();
+ const manual=reviewedMigrationSource().files.find(file=>file.name==='0021_manual_summary_imports.sql');
+ assert.ok(manual);
+ before.executionScope.files=[structuredClone(manual)];
+ before.executionScope.pendingMigrations=[manual.name];
+ const result=assessFullCoverageMigration(before);
+ assert.equal(result.readyForOperatorReview,false);
+ assert.ok(result.blocks.includes('SINGLE_MIGRATION_SCOPE_UNVERIFIED'));
 });

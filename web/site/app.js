@@ -3,6 +3,9 @@ import {runAudioChunks,runSummaryStages,runApprovedFreeBatch,runApprovedGroqSumm
 import {audioProgressPlan,cleanedAudioComplete,fmtRetryDate} from '/audio-progress-plan.mjs';
 import {groqSummaryProgress,groqGapFailureText} from '/groq-summary-progress.mjs';
 import {validateContextReviewLayer} from '/context-review.mjs';
+import {mountImportedSummaries} from '/manual-summary-import.mjs';
+import {renderApprovedSummary} from '/approved-summary-format.mjs';
+import {mountAsrResultBridge} from '/asr-result-bridge.mjs';
 // Private owner-only site, no third-party scripts and no API keys in browser storage.
 const $=(sel)=>document.querySelector(sel);
 const state={view:'analyze',mode:'url',page:0,hasMore:false,provider:null,connections:[]};
@@ -14,6 +17,9 @@ const PROVIDER_INFO={
 };
 let toastTimer;
 let libraryDetailRequest=0;
+let analysisRequest=0;
+let analysisRunning=false;
+const reportRenderContexts=new WeakMap();
 let stopGroqSummarySession=null;
 function stopActiveGroqSummary(){stopGroqSummarySession?.();}
 function beginLibraryDetailAction(target,jobId){stopActiveGroqSummary();return beginDetailAction(target,jobId,libraryDetailRequest);}
@@ -35,6 +41,7 @@ async function api(path,{method='GET',body,signal}={}){
 async function waitForeground(ms){if(document.hidden)throw Error('브라우저 화면이 비활성화됐습니다. 이력에서 다시 확인하세요.');await new Promise(resolve=>setTimeout(resolve,ms));if(document.hidden)throw Error('브라우저 화면이 비활성화됐습니다. 이력에서 다시 확인하세요.');}
 function switchView(view){
   if(!['analyze','library','usage','settings'].includes(view))view='analyze';
+  if(state.view==='analyze'&&view!=='analyze')analysisRequest++;
   if(state.view==='library'&&view!=='library'){stopActiveGroqSummary();libraryDetailRequest++;}
   state.view=view;
   document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id===`view-${view}`));
@@ -44,11 +51,88 @@ function switchView(view){
   if(view==='usage')loadUsage().catch(e=>toast(safeError(e)));
   if(view==='settings'){loadQuota().catch(e=>toast(safeError(e)));loadCapacity().catch(e=>toast(safeError(e)));}if(view==='settings')loadConnections().catch(e=>toast(safeError(e)));
 }
-function setInputMode(mode){state.mode=mode;$('#file-fields').hidden=mode!=='text';$('#url-fields').hidden=mode!=='url';$('#audio-fields').hidden=mode!=='audio'&&mode!=='url';document.querySelectorAll('[data-input-mode]').forEach(b=>{const active=b.dataset.inputMode===mode;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));});}
+function setInputMode(mode){if(state.mode!==mode)analysisRequest++;state.mode=mode;$('#file-fields').hidden=mode!=='text';$('#url-fields').hidden=mode!=='url';$('#audio-fields').hidden=mode!=='audio'&&mode!=='url';document.querySelectorAll('[data-input-mode]').forEach(b=>{const active=b.dataset.inputMode===mode;b.classList.toggle('active',active);b.setAttribute('aria-selected',String(active));});updateLocalAsrInput();}
+function updateLocalAsrInput(){
+ const local=state.mode==='audio'&&$('#local-asr-mode')?.checked===true;
+ if(local&&$('#audio-free-batch-run'))$('#audio-free-batch-run').checked=false;
+ if($('#local-asr-fields'))$('#local-asr-fields').hidden=state.mode!=='audio';
+ if($('#local-asr-rights-field'))$('#local-asr-rights-field').hidden=!local;
+ if($('#audio-provider-fields'))$('#audio-provider-fields').hidden=local;
+ if($('#live-analysis-field'))$('#live-analysis-field').hidden=local;
+ if($('#audio-file'))$('#audio-file').accept=local?'.mp3,.wav,audio/mpeg,audio/wav':'.mp3,audio/mpeg';
+ if($('#audio-file-label'))$('#audio-file-label').textContent=local?'원음 MP3/WAV 파일 (최대 200MB · 파일 내용은 이 단계에서 업로드하지 않음)':'보유 MP3 파일 (최대 120분 · 200MB)';
+ if($('#duration-label'))$('#duration-label').textContent=local?'분석 선언 길이 (분 · 측정 길이와 별도)':'영상 길이 (분)';
+}
+function initLocalAsrInputs(){
+ $('#local-asr-mode')?.addEventListener('change',()=>{analysisRequest++;updateLocalAsrInput();});
+ const changed=()=>{if(state.mode!=='audio'||$('#local-asr-mode')?.checked!==true)return;analysisRequest++;if(!analysisRunning&&$('#result-panel')?.hidden===false)$('#analysis-progress').textContent='원음·입력 또는 확인 항목이 바뀌었습니다. 분석 기록을 다시 확인한 뒤 오디오 요청과 결과 연결을 계속하세요.';};
+ for(const selector of ['#video-title','#duration-min','#resume-job'])$(selector)?.addEventListener('input',changed);
+ for(const selector of ['#audio-file','#local-asr-rights'])$(selector)?.addEventListener('change',changed);
+}
 function startNewUrlAudioSubmission(){
  if(!confirm('이전 작업이 삭제된 것을 확인한 경우에만 새 작업을 시작하세요. 응답이 유실되었을 뿐이라면 새 요청은 중복 전사와 토큰 사용을 만들 수 있습니다. 새 작업을 시작할까요?'))return false;
  try{window.sessionStorage.removeItem('url-owned-audio-submission-v1');}catch{toast('브라우저 임시 저장소를 확인할 수 없습니다. 새 작업을 시작하지 않았습니다.');return false;}
  $('#resume-job').value='';$('#new-url-audio-job').hidden=true;$('#analysis-progress').textContent='새 작업을 선택했습니다. 제출 전 URL과 MP3를 다시 확인하세요.';return true;
+}
+const URL_CAPTION_SUBMISSION_KEY='url-caption-submission-v1';
+function retainUrlCaptionSubmission(input,quote){
+ const binding=JSON.stringify([quote.videoId,quote.durationSeconds??input.durationSeconds,input.title]);
+ let previous;try{previous=JSON.parse(window.sessionStorage.getItem(URL_CAPTION_SUBMISSION_KEY)||'null');}catch{throw Error('브라우저 임시 저장소를 확인할 수 없어 URL 작업을 생성하지 않았습니다.');}
+ if(previous&&(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(previous.id??'')||typeof previous.binding!=='string'))throw Error('이전 URL 요청 식별자를 확인할 수 없습니다. 기존 이력을 먼저 확인하세요.');
+ if(previous&&previous.binding!==binding&&['CREATE_SENT','UNCERTAIN'].includes(previous.state))throw Error('이전 URL 생성 응답이 불명확합니다. 같은 입력과 요청 식별자로 이력을 먼저 확인하세요.');
+ const retained=previous?.binding===binding?{...previous,id:previous.id.toLowerCase()}:{binding,id:crypto.randomUUID().toLowerCase(),state:'PREPARED'};
+ saveUrlCaptionSubmission(retained);return retained;
+}
+function saveUrlCaptionSubmission(record){try{window.sessionStorage.setItem(URL_CAPTION_SUBMISSION_KEY,JSON.stringify(record));}catch{throw Error('브라우저 임시 저장소에 URL 요청 식별자를 보존할 수 없어 다음 작업을 중단했습니다.');}}
+async function localAsrAnalysisRecord(input,resume,current){
+ const key='owned-local-asr-analysis-v1';
+ const check=(job,id)=>{if(job?.id!==id||(job.source_type??job.source)!=='audio'||(job.video_id??job.videoId??null)!==null||(job.source_url??job.url??null)!==null||Number(job.duration_seconds??job.durationSeconds)!==input.durationSeconds||String(job.title??'')!==input.title||job.audit?.ownedAudioSha256!==input.ownedAudioSha256)throw Error('저장된 분석과 선택한 원음·길이·제목이 일치하지 않습니다. 기존 기록을 확인하세요.');};
+ if(resume){const saved=await api('/api/jobs/'+encodeURIComponent(resume));if(!current())return null;check(saved.job,resume);return {...saved,persisted:true,reused:true};}
+ const scope=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([input.sourceType,input.durationSeconds,input.title,input.ownedAudioSha256])))),byte=>byte.toString(16).padStart(2,'0')).join('');if(!current())return null;
+ let previous;try{previous=JSON.parse(window.sessionStorage.getItem(key)||'null');}catch{throw Error('브라우저 임시 저장소를 확인할 수 없어 분석 기록을 생성하지 않았습니다.');}
+ if(previous&&(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(previous.id??'')||!/^[a-f0-9]{64}$/.test(previous.scope??'')||!['PREPARED','SENT','CREATED','UNKNOWN'].includes(previous.state)))throw Error('이전 로컬 전사 연결용 요청 식별자를 확인하지 못했습니다.');
+ if(previous&&previous.scope!==scope&&['SENT','UNKNOWN'].includes(previous.state))throw Error('이전 분석 생성 응답이 불명확합니다. 다른 입력의 새 기록을 만들기 전에 같은 원음으로 저장 상태를 확인하세요.');
+ const entry=previous?.scope===scope?previous:{id:crypto.randomUUID(),scope,state:'PREPARED'};
+ const keep=()=>{try{window.sessionStorage.setItem(key,JSON.stringify(entry));}catch{throw Error('요청 식별자를 보존할 수 없어 분석 기록 생성을 중단했습니다.');}};
+ const read=async()=>{const saved=await api('/api/jobs/'+encodeURIComponent(entry.id));check(saved.job,entry.id);return {...saved,persisted:true,reused:true};};
+ keep();let result,recovered=false;
+ if(entry.state!=='PREPARED'){try{result=await read();recovered=['SENT','UNKNOWN'].includes(entry.state);}catch{throw Error('이전 요청 '+entry.id+'의 저장 여부를 확인하지 못했습니다. 새 생성 요청은 보내지 않았습니다.');}}
+ else{
+  entry.state='SENT';keep();if(!current())return null;
+  try{result=await api('/api/jobs',{method:'POST',body:{...input,submissionId:entry.id}});if(result.persisted!==true)throw Error('저장 여부 미확인');check(result.job,entry.id);}
+  catch(error){entry.state='UNKNOWN';keep();if(!current())return null;if(error.code&&error.code!=='AUDIO_SUBMISSION_WRITE_UNCERTAIN')throw error;try{result=await read();recovered=true;}catch{throw Error('분석 생성 응답이 불명확합니다. 요청 '+entry.id+'를 보존했으며 같은 ID의 조회만 시도했습니다. 자동 재전송하지 않습니다.');}}
+  if(!recovered&&(result.reused||result.job.report)){if(!current())return null;result={...result,...await read()};}
+ }
+ entry.state='CREATED';keep();if(!current())return null;return {...result,readOnlyRecovery:recovered};
+}
+function assertUrlJobBinding(job,input,quote,id){
+ if(!job||job.id!==id||(job.source_type??job.source)!=='url'||(job.video_id??job.videoId)!==quote.videoId||(job.source_url??job.url)!==`https://www.youtube.com/watch?v=${quote.videoId}`||Number(job.duration_seconds??job.durationSeconds)!==Number(quote.durationSeconds??input.durationSeconds)||String(job.title??'')!==input.title)throw Error('현재 URL·영상 길이·제목과 저장된 URL 작업이 일치하지 않습니다. 기존 이력을 확인하세요.');
+}
+function confirmedUrlSource(payload){
+ const source=payload?.source;
+ if(!payload||!Object.hasOwn(payload,'source')||(source!==null&&(!source||!Array.isArray(source.segments)||!source.segments.length||source.segments.some(segment=>typeof segment?.text!=='string'||!segment.text.trim()))))throw Error('저장 원문 조회 결과를 확인할 수 없습니다. 기존 이력을 검토하세요. 자동으로 새 자막 요청을 보내지 않습니다.');
+ return source;
+}
+function urlCaptionState(job){
+ if((job?.source_type??job?.source)!=='url')return null;
+ if(job.status==='NATIVE_PENDING'||job.audit?.nativeAcquisition==='PENDING')return 'PENDING';
+ if(job.audit?.status==='NO_CAPTIONS'||job.audit?.nativeAcquisition==='NO_CAPTIONS')return 'NO_CAPTIONS';
+ if(job.status==='NEED_UPLOAD'&&!job.report&&['CAPTION_RESULT_UNAVAILABLE','CAPTION_NOT_REQUESTED','VIDEO_SUMMARY_ONLY_UNAVAILABLE'].includes(job.audit?.status))return 'NO_STORED_RESULT';
+ return null;
+}
+function urlPipelineNotice(job){
+ if(job?.audit?.localAsrReceipt?.provenance==='OWNER_SUBMITTED_LOCAL_ASR')return '소유자가 제출한 외부 로컬 ASR 전사 기록이 있습니다. 실제 음성 취득 워커는 연결되지 않았으며 원음 정확성·전체 발언 포함 여부는 독립 검증되지 않았습니다. 저장된 원문과 별도 요약 계획을 확인하세요.';
+ const status=urlCaptionState(job);
+ if(status==='NO_CAPTIONS')return '기존 자막을 확보하지 못했습니다. 자동 음성 취득 워커는 연결되지 않아 이 URL에서 음성 전사·요약이 자동으로 이어지지 않습니다. 이미 진행 중인 전사 작업이 있으면 해당 이력을 확인하세요. 자동 음성 전사 완료 상태가 아닙니다.';
+ if(status==='PENDING')return '기존 자막 제공자 처리 대기입니다. 자동 조회나 새 음성 전사를 시작하지 않습니다. 이력의 명시적 상태 조회는 Supadata API 요청이며 추가 크레딧을 예약하지 않습니다.';
+ if(status==='NO_STORED_RESULT')return '저장된 기존 자막 결과가 없습니다. 이전 요청 결과가 미확정일 수 있으므로 요청 상태를 확인해야 합니다. 자동 음성 취득 워커는 연결되지 않았으며 전사·요약 완료 상태가 아닙니다.';
+ return null;
+}
+function approvedSummaryResultIssue(result,id){
+ if(result?.formatMismatch===true)return 'SUMMARY_FORMAT_MISMATCH';
+ const profile='approved-four-part-v1',job=result?.job,report=job?.report,approved=report?.approvedSummary,view=job?.approvedSummaryView;
+ const profileMatches=result?.cached===true?result.requestedFormatProfile===profile&&result.storedFormatProfile===profile:result?.formatProfile===profile;
+ return job?.id===id&&result.persisted===true&&profileMatches&&report?.kind==='GEMINI_EVIDENCE_LINKED'&&approved?.formatVersion===profile&&approved.structuralValidation==='REFERENCES_QUOTES_LINKS_ONLY'&&approved.semanticReview==='NOT_PERFORMED'&&approved.sourceBinding?.kind==='EXACT_TRANSCRIPT_SEGMENTS_V1'&&/^[a-f0-9]{64}$/.test(approved.sourceBinding.segmentsSha256??'')&&view?.formatVersion===profile&&view.origin==='APPROVED_STRUCTURED'&&view.sourceStatus==='MATCHED'&&view.semanticReview==='NOT_PERFORMED'&&Array.isArray(view.sources)&&view.sources.length>0?null:'SUMMARY_RESULT_UNVERIFIED';
 }
 function resultLine(container,label,value){const div=el('div',{className:'line'});div.append(el('span',{text:label}),el('strong',{text:value}));container.append(div);}
 function audioPlanView(job,progress,target){
@@ -98,10 +182,28 @@ function showContextReviewImport(job,container){
  };
  input.onchange=load;independentInput.onchange=load;
 }
-function showReport(job,container,persisted,costReconciliation){empty(container);
+function showImportedSummaryEntry(job,container){
+ const host=el('section'),button=el('button',{className:'btn secondary small',text:'가져온 요약 저장·보기'}),view=state.view,detailVersion=libraryDetailRequest;
+ button.type='button';
+ host.append(el('p',{className:'tip',text:'기존 전사 기반 가져온 요약을 별도로 저장하고 다시 읽을 수 있습니다. 자동 AI 요약 완료 여부와 구분해서 표시합니다.'}),button);container.append(host);
+ const current=()=>host.isConnected!==false&&state.view===view&&(view!=='library'||detailCurrent(job.id,detailVersion,container));
+ button.onclick=async()=>{if(!current()||button.disabled)return;button.disabled=true;try{const mounted=mountImportedSummaries({host,jobId:job.id,api,isCurrent:current});await mounted.ready;}catch{if(current()){host.append(el('p',{text:'가져온 요약 기능을 열지 못했습니다. 분석을 다시 열어 주세요.'}));button.disabled=false;}}};
+}
+function showAsrResultEntry(job,container){
+ const host=el('section'),button=el('button',{className:'btn secondary small',text:'오디오 요청·외부 ASR 결과 연결'}),pane=el('div'),results=el('div'),render=reportRenderContexts.get(container),view=state.view,detailVersion=libraryDetailRequest,analysisVersion=analysisRequest;
+ results.dataset.jobId=job.id;button.type='button';host.append(el('p',{className:'tip',text:'기존 owner 인증으로 오디오 요청 상태를 조회하고 소유자 제출 로컬 전사를 연결합니다. 이 기능은 음성 취득·ASR·요약을 자동 실행하지 않습니다.'}),button,pane,results);container.append(host);
+ const current=()=>host.isConnected!==false&&reportRenderContexts.get(container)===render&&state.view===view&&(view!=='library'||detailCurrent(job.id,detailVersion,container))&&(view!=='analyze'||analysisRequest===analysisVersion);
+ let mounted=null;
+ const open=async()=>{if(!current())return;if(mounted)return mounted.ready;if(button.disabled)return;button.disabled=true;try{mounted=mountAsrResultBridge({host:pane,jobId:job.id,api,isCurrent:current,onReport:(saved,meta)=>{if(!current()||saved?.id!==job.id)return;showReport(saved,results,meta.persisted===true,undefined,{showAsrBridge:false});if(meta.formatMismatch)results.append(el('p',{className:'tip',text:'기존 저장 보고서를 열었습니다. 승인한 새 형식으로 생성된 결과가 아닙니다.'}));}});await mounted.ready;}catch{if(current()){pane.append(el('p',{text:'전사 결과 연결 화면을 열지 못했습니다. 현재 분석을 다시 열어 확인하세요.'}));button.disabled=false;mounted=null;}}};
+ button.onclick=open;return {open};
+}
+function showReport(job,container,persisted,costReconciliation,reportOptions={}){
+ const renderContext={view:state.view,detailVersion:libraryDetailRequest,analysisVersion:analysisRequest};reportRenderContexts.set(container,renderContext);empty(container);
+ const readCurrent=button=>reportRenderContexts.get(container)===renderContext&&container.isConnected!==false&&button.isConnected!==false&&(typeof container.contains!=='function'||container.contains(button))&&state.view===renderContext.view&&(renderContext.view!=='library'||detailCurrent(job.id,renderContext.detailVersion,container))&&(renderContext.view!=='analyze'||analysisRequest===renderContext.analysisVersion);
   resultLine(container,'상태',job.status??'NOT_RUN');if(job.id)resultLine(container,'분석 ID',job.id);
   resultLine(container,'저장 상태',persisted?'D1 저장':'미저장 / DB 미설정');
   if(job.audit){resultLine(container,'전사 범위',Number.isFinite(job.audit.timelineRatio)?`${Math.round(job.audit.timelineRatio*1000)/10}% (시간축 추정)`:'확인 불가');resultLine(container,'범위 설명',job.audit.reason??'확인 필요');}
+  const pipelineNotice=urlPipelineNotice(job);if(pipelineNotice)container.append(el('p',{className:'tip',text:pipelineNotice}));
   const report=job.report;
   if(report?.compositionMode==='gemini-two-pass-v1'){
    const source=report.sourceAssessment;
@@ -115,7 +217,7 @@ function showReport(job,container,persisted,costReconciliation){empty(container)
    if(report.sourceBinding==='STALE_SOURCE')container.append(el('p',{className:'tip',text:'저장 후 원문 또는 범위 검증 정보가 변경되었습니다. 현재 원문과 요약의 일치를 다시 검토해야 합니다.'}));
   }
   if(report){
-    if(['GEMINI_EVIDENCE_LINKED','GROQ_EVIDENCE_LINKED','GEMINI_PAID_FULL_EVIDENCE_LINKED','GEMINI_TWO_PASS_REVIEWED','GEMINI_TWO_PASS_EVIDENCE_LINKED'].includes(report.kind)){if(report.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED')resultLine(container,'요약 계약','전체 영상 단일 종합 요약 · Gemini 유료');if(report.kind==='GEMINI_TWO_PASS_EVIDENCE_LINKED')resultLine(container,'요약 계약','저장 전사 1차 요약 + 2차 원문 대조 · 자동 검사 통과 / 사람 미검토 · 원음·외부 사실 미검증');for(const [key,label] of [['summary','핵심 요약'],['chapters','시간대별 요약'],['claims','주장과 근거'],['numbers','수치와 확인 항목'],['critical','비판적 분석']]){container.append(el('h3',{text:label}));const list=el('ul');for(const item of report[key]||[])list.append(el('li',{text:item.text+' (원문 #'+item.evidenceIds.join(', #')+')'}));container.append(list);}container.append(el('h3',{text:'결론'}),el('p',{text:report.conclusion}),el('p',{className:'tip',text:report.warning}));}else{const h=el('h3',{text:'원문 추출 · AI 요약 아님'});container.append(h);
+    if(['GEMINI_EVIDENCE_LINKED','GROQ_EVIDENCE_LINKED','GEMINI_PAID_FULL_EVIDENCE_LINKED','GEMINI_TWO_PASS_REVIEWED','GEMINI_TWO_PASS_EVIDENCE_LINKED'].includes(report.kind)){if(report.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED')resultLine(container,'요약 계약','전체 영상 단일 종합 요약 · Gemini 유료');if(report.kind==='GEMINI_TWO_PASS_EVIDENCE_LINKED')resultLine(container,'요약 계약','저장 전사 1차 요약 + 2차 원문 대조 · 자동 검사 통과 / 사람 미검토 · 원음·외부 사실 미검증');renderApprovedSummary({host:container,job,document});if(report.warning)container.append(el('p',{className:'tip',text:report.warning}));}else{const h=el('h3',{text:'원문 추출 · AI 요약 아님'});container.append(h);
     const list=el('ol');for(const sentence of report.summary??[])list.append(el('li',{text:sentence}));container.append(list);
     container.append(el('p',{className:'subtitle',text:report.warning??'실제 AI 모델 분석·번역은 수행되지 않았습니다.'}));}
   }else container.append(el('p',{className:'subtitle',text:'AI 요약은 아직 없습니다. 전사 완료 후 저장된 원문과 내보내기를 확인할 수 있습니다.'}));
@@ -127,67 +229,115 @@ function showReport(job,container,persisted,costReconciliation){empty(container)
   if(report?.compositionMode==='groq-full-coverage-v1'){
     container.append(el('p',{className:'tip',text:'구간별 요약을 원문 순서로 결합했습니다. 전체 맥락을 별도로 AI 합성하거나 사람이 의미를 검수한 결과는 아닙니다.'}));
    resultLine(container,'원문 구간 범위',`${report.sourceCoverage?.firstId??'?'}–${report.sourceCoverage?.lastId??'?'} / ${report.sourceCoverage?.segmentCount??'?'} (자동 구조 검사)`);
-   container.append(el('p',{className:'tip',text:'기존 불확실한 raw:8 호출과 사용량은 보존되었습니다. 별도 새 요약 결과이며 자동 검사 통과·사람 내용 검토 전입니다.'}));
+   container.append(el('p',{className:'tip',text:'미확정 실행 기록이 있으면 해당 기록과 사용량을 보존합니다. 구간별 요약의 자동 구조 검사와 사람의 내용 검토 상태를 별도로 확인하세요.'}));
   }
   if(report?.compositionMode==='groq-full-coverage-global-v1'){
    container.append(el('p',{className:'tip',text:'The global summary is a separate AI synthesis of the evidence-linked section reports. Automatic citation, number and quote checks passed; human meaning review and external fact checking remain pending.'}));
    if(report.mediaCoverage?.provenance==='SUPADATA_NATIVE')container.append(el('p',{className:'tip',text:'Stored native captions only: '+report.mediaCoverage.transcriptStatus+'; '+report.mediaCoverage.firstMs+'-'+report.mediaCoverage.lastMs+' ms of '+report.mediaCoverage.expectedDurationMs+' ms. Audio accuracy and uncaptained speech are unverified.'}));
    resultLine(container,'Full source range',`${report.sourceCoverage?.firstId??'?'}-${report.sourceCoverage?.lastId??'?'} / ${report.sourceCoverage?.segmentCount??'?'}`);
-   container.append(el('p',{className:'tip',text:report.sectionReports?.sourceMode==='FRESH_IMPORTED_TRANSCRIPT'?'This is a separate summary job from the stored transcript. Original work and usage remain unchanged; summary tokens may be duplicated. Transcript accuracy has not been independently verified.':'The old raw:8 request and its usage remain uncertain. The new held-source call has a separate approval and receipt.'}));
+   container.append(el('p',{className:'tip',text:report.sectionReports?.sourceMode==='FRESH_IMPORTED_TRANSCRIPT'?'This is a separate summary job from the stored transcript. Original work and usage remain unchanged; summary tokens may be duplicated. Transcript accuracy has not been independently verified.':'This is a separate summary of the stored source. Review any uncertain prior operations and their usage, then review a current quote and approval for any new call.'}));
   }
-  if(job.id){const tools=el('div',{className:'library-actions'});for(const format of ['md','txt'])tools.append(el('a',{className:'btn secondary small',text:format.toUpperCase()+' 내보내기',attrs:{href:'/api/jobs/'+job.id+'/export?format='+format}}));const source=el('button',{className:'btn secondary small',text:'원문·근거 보기'});source.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/source'),uncertain=new Set((data.audioBoundaryAmbiguities||[]).map(x=>x.segmentId)),warning=data.audioBoundaryAmbiguityCount?`겹침 경계 검토 필요: 서로 다른 전사 표현 ${data.audioBoundaryAmbiguityCount}개를 보존했습니다. 중복 여부와 정확한 표현은 독립 청취로 확인해야 합니다.\n\n`:'';const pre=el('pre',{text:data.source?.segments?.length?warning+(data.source.segments).map(x=>'#'+x.id+(uncertain.has(x.id)?' [겹침 경계·발언 확인 필요]':'')+' ['+(x.startMs===null?'시각 미확인':Math.floor(x.startMs/1000)+'초')+'] '+x.text).join('\n'):'저장된 전체 전사가 아직 없습니다.'});container.append(pre);source.disabled=true;}catch(e){toast(safeError(e));}};tools.append(source);if(!['GEMINI_EVIDENCE_LINKED','GROQ_EVIDENCE_LINKED','GEMINI_PAID_FULL_EVIDENCE_LINKED','GEMINI_TWO_PASS_REVIEWED','GEMINI_TWO_PASS_EVIDENCE_LINKED'].includes(report?.kind)){const review=el('button',{className:'btn secondary small',text:'요약 부분 출력 검토'});review.onclick=async()=>{try{const data=await api('/api/jobs/'+job.id+'/summary-review');container.append(el('pre',{text:data.partialText}));review.disabled=true;}catch(error){toast(safeError(error));}};tools.append(review);}container.append(tools);}
+  if(job.id){const tools=el('div',{className:'library-actions'});for(const format of ['md','txt'])tools.append(el('a',{className:'btn secondary small',text:format.toUpperCase()+' 내보내기',attrs:{href:'/api/jobs/'+job.id+'/export?format='+format}}));const source=el('button',{className:'btn secondary small',text:'원문·근거 보기'});source.onclick=async()=>{if(source.disabled||!readCurrent(source))return;source.disabled=true;try{const data=await api('/api/jobs/'+job.id+'/source');if(!readCurrent(source))return;const uncertain=new Set((data.audioBoundaryAmbiguities||[]).map(x=>x.segmentId)),warning=data.audioBoundaryAmbiguityCount?`겹침 경계 검토 필요: 서로 다른 전사 표현 ${data.audioBoundaryAmbiguityCount}개를 보존했습니다. 중복 여부와 정확한 표현은 독립 청취로 확인해야 합니다.\n\n`:'';const pre=el('pre',{text:data.source?.segments?.length?warning+(data.source.segments).map(x=>'#'+x.id+(uncertain.has(x.id)?' [겹침 경계·발언 확인 필요]':'')+' ['+(x.startMs===null?'시각 미확인':Math.floor(x.startMs/1000)+'초')+'] '+x.text).join('\n'):'저장된 전체 전사가 아직 없습니다.'});container.append(pre);}catch(e){if(readCurrent(source)){toast(safeError(e));source.disabled=false;}}};tools.append(source);if(!['GEMINI_EVIDENCE_LINKED','GROQ_EVIDENCE_LINKED','GEMINI_PAID_FULL_EVIDENCE_LINKED','GEMINI_TWO_PASS_REVIEWED','GEMINI_TWO_PASS_EVIDENCE_LINKED'].includes(report?.kind)){const review=el('button',{className:'btn secondary small',text:'저장된 요약 응답 검토'});review.onclick=async()=>{if(review.disabled||!readCurrent(review))return;review.disabled=true;try{const data=await api('/api/jobs/'+job.id+'/summary-review');if(!readCurrent(review))return;container.append(el('p',{className:'tip',text:data.reviewKind==='STORED_COMPLETE_RESPONSE'?'완전한 제공자 응답 원문이 저장되어 있습니다. 중간 단계일 수 있으며 최종 보고서 검증·저장 완료를 뜻하지 않습니다.':'저장된 부분 응답입니다. 최종 요약 완료 상태가 아닙니다.'}));if(data.warning)container.append(el('p',{className:'tip',text:data.warning}));container.append(el('pre',{text:data.partialText}));}catch(error){if(readCurrent(review)){toast(safeError(error));review.disabled=false;}}};tools.append(review);}container.append(tools);}
+  const asrEntry=job.id&&persisted&&reportOptions.showAsrBridge!==false&&['audio','url'].includes(job.source_type??job.source)?showAsrResultEntry(job,container):null;
   if(job.id)showContextReviewImport(job,container);
+  if(job.id&&persisted)showImportedSummaryEntry(job,container);
   if(job.id&&report?.kind==='GEMINI_PAID_FULL_EVIDENCE_LINKED'){
    const cost=el('p',{className:'tip',text:paidCostText(costReconciliation)});container.append(cost);
    api('/api/jobs/'+job.id+'/paid-summary-status').then(status=>{cost.textContent=paidCostText(status.costReconciliation);}).catch(()=>{});
   }
+  return asrEntry;
 }
-async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button'),progress=$('#analysis-progress');let data,bytes,plan,fileSha256,submissionBinding;
- const mode=state.mode,execution=Object.freeze({batch:$('#audio-free-batch-run').checked,provider:$('#audio-provider').value,geminiConsent:$('#audio-gemini-confirm').checked,resume:$('#resume-job').value.trim(),file:$('#audio-file').files[0],rights:$('#audio-rights').checked});
- const live=$('#live-analysis').checked;const title=$('#video-title').value.trim();const duration=Number($('#duration-min').value);const ownedAudio=mode==='audio'||(mode==='url'&&Boolean(execution.file));
+async function handleAnalyze(ev){ev.preventDefault();const button=$('#run-button'),progress=$('#analysis-progress');if(button.disabled||analysisRunning)return;let data,bytes,plan,fileSha256,submissionBinding;
+ const mode=state.mode,execution=Object.freeze({batch:$('#audio-free-batch-run').checked,provider:$('#audio-provider').value,geminiConsent:$('#audio-gemini-confirm').checked,resume:$('#resume-job').value.trim(),file:$('#audio-file').files[0],fileName:$('#audio-file').files[0]?.name??null,rights:$('#audio-rights').checked,localAsr:state.mode==='audio'&&$('#local-asr-mode')?.checked===true,localAsrRights:$('#local-asr-rights')?.checked===true});
+ const live=$('#live-analysis').checked;const title=$('#video-title').value.trim();const duration=Number($('#duration-min').value),urlInput=mode==='url'?$('#youtube-url').value.trim():null;const ownedAudio=mode==='audio'||(mode==='url'&&Boolean(execution.file)),urlOnly=mode==='url'&&!ownedAudio;
  if(!Number.isInteger(duration)||duration<1||duration>120){toast('영상 길이는 1~120분입니다.');return;}
- button.disabled=true;
+ button.disabled=true;analysisRunning=true;const requestId=++analysisRequest,current=()=>requestId===analysisRequest&&state.view==='analyze'&&state.mode===mode&&!document.hidden&&(mode!=='url'||($('#youtube-url').value.trim()===urlInput&&$('#video-title').value.trim()===title&&Number($('#duration-min').value)===duration&&$('#resume-job').value.trim()===execution.resume&&$('#audio-file').files[0]===execution.file&&$('#live-analysis').checked===live))&&(!execution.localAsr||($('#local-asr-mode')?.checked===true&&$('#local-asr-rights')?.checked===execution.localAsrRights&&$('#audio-file').files[0]===execution.file&&$('#audio-file').files[0]?.name===execution.fileName&&$('#video-title').value.trim()===title&&Number($('#duration-min').value)===duration&&$('#resume-job').value.trim()===execution.resume));
  try{
+  if(execution.localAsr&&execution.batch)throw Error('기존 로컬 전사 결과 연결에서는 공급자 제한 배치를 함께 실행하지 않습니다. 배치 선택을 해제하세요.');
   if(execution.batch&&(mode!=='audio'||!live||!execution.resume||execution.provider!=='groq'||execution.geminiConsent))throw Error('제한 배치는 기존 분석 ID와 Groq만 사용하며 Gemini 동의는 선택하지 마세요.');
   const submittedScope=execution.batch?await api('/api/jobs/'+encodeURIComponent(execution.resume)+'/audio-free-batch'):null;
   if(execution.batch&&(!submittedScope?.approved||submittedScope.jobId!==execution.resume||submittedScope.state!=='APPROVED'))throw Error('제출 시점의 유효한 Groq Free 배치 승인을 확인하세요.');
-  if(mode==='url'&&!ownedAudio)data={sourceType:'url',url:$('#youtube-url').value.trim(),durationSeconds:duration*60,title};
+  if(urlOnly)data={sourceType:'url',url:urlInput,durationSeconds:duration*60,title:title.slice(0,160)};
+  else if(execution.localAsr){const file=execution.file;if(!file||!/\.(mp3|wav)$/i.test(file.name)||!Number.isSafeInteger(file.size)||file.size<1||file.size>200000000||!execution.localAsrRights)throw Error('적법한 원음 연결 범위에 동의하고 200MB 이하 MP3/WAV를 선택하세요.');progress.textContent='원음 파일의 SHA-256을 확인 중입니다. 음성·공급자 요청은 전송하지 않습니다…';bytes=new Uint8Array(await file.arrayBuffer());if(bytes.length!==file.size)throw Error('선택한 원음의 크기가 바뀌었습니다.');fileSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('');data={sourceType:'audio',durationSeconds:duration*60,title:(title||file.name).slice(0,160),ownedAudioSha256:fileSha256};}
   else if(mode==='text'){const file=$('#caption-file').files[0];if(!file||!/\.(srt|vtt|txt)$/i.test(file.name)||file.size>2000000)throw Error('2MB 이하 SRT/VTT/TXT를 선택하세요.');data={sourceType:'text',filename:file.name,transcript:await file.text(),durationSeconds:duration*60,title:title||file.name,persistTranscript:true};}
-  else{const file=execution.file;if(!file||!/\.mp3$/i.test(file.name)||file.size>200000000)throw Error('200MB 이하 MP3를 선택하세요.');if(!live||!execution.rights)throw Error('무료 API 처리와 적법한 보유 음성 업로드 동의가 필요합니다.');progress.textContent='MP3 시간축 및 조각 계획 확인 중…';bytes=new Uint8Array(await file.arrayBuffer());plan=planMp3(bytes);data={sourceType:'audio',...(mode==='url'?{url:$('#youtube-url').value.trim()}:{}),durationSeconds:plan.durationSeconds,title:title||file.name};if(mode==='url'){fileSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');if(!execution.resume){submissionBinding=JSON.stringify([data.url,data.durationSeconds,data.title,fileSha256]);let previous;try{previous=JSON.parse(window.sessionStorage.getItem('url-owned-audio-submission-v1')||'null');}catch{throw Error('브라우저의 임시 저장소를 사용할 수 없어 중복 없는 작업 생성을 보장할 수 없습니다.');}const submissionId=previous?.binding===submissionBinding&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(previous.id)?previous.id:crypto.randomUUID();try{window.sessionStorage.setItem('url-owned-audio-submission-v1',JSON.stringify({binding:submissionBinding,id:submissionId}));}catch{throw Error('브라우저의 임시 저장소를 사용할 수 없어 중복 없는 작업 생성을 보장할 수 없습니다.');}data.submissionId=submissionId;data.ownedAudioSha256=fileSha256;}}}
-  const quote=await api('/api/preflight',{method:'POST',body:data});progress.textContent='분석 기록 생성 중…';let result;const resume=ownedAudio?execution.resume:'';if(resume){result=await api('/api/jobs/'+encodeURIComponent(resume));if(result.job.source_type!=='audio'||Math.abs(result.job.duration_seconds-plan.durationSeconds)>1||(mode==='url'&&(result.job.video_id!==quote.videoId||result.job.source_url!==`https://www.youtube.com/watch?v=${quote.videoId}`)))throw Error('선택한 음성과 이전 분석이 다릅니다.');result.persisted=true;}else result=await api('/api/jobs',{method:'POST',body:data});const id=result.job.id;
+  else{const file=execution.file;if(!file||!/\.mp3$/i.test(file.name)||file.size>200000000)throw Error('200MB 이하 MP3를 선택하세요.');if(!live||!execution.rights)throw Error('무료 API 처리와 적법한 보유 음성 업로드 동의가 필요합니다.');progress.textContent='MP3 시간축 및 조각 계획 확인 중…';bytes=new Uint8Array(await file.arrayBuffer());plan=planMp3(bytes);data={sourceType:'audio',...(mode==='url'?{url:urlInput}:{}),durationSeconds:plan.durationSeconds,title:title||file.name};if(mode==='url'){fileSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');if(!execution.resume){submissionBinding=JSON.stringify([data.url,data.durationSeconds,data.title,fileSha256]);let previous;try{previous=JSON.parse(window.sessionStorage.getItem('url-owned-audio-submission-v1')||'null');}catch{throw Error('브라우저의 임시 저장소를 사용할 수 없어 중복 없는 작업 생성을 보장할 수 없습니다.');}const submissionId=previous?.binding===submissionBinding&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(previous.id)?previous.id:crypto.randomUUID();try{window.sessionStorage.setItem('url-owned-audio-submission-v1',JSON.stringify({binding:submissionBinding,id:submissionId}));}catch{throw Error('브라우저의 임시 저장소를 사용할 수 없어 중복 없는 작업 생성을 보장할 수 없습니다.');}data.submissionId=submissionId;data.ownedAudioSha256=fileSha256;}}}
+  if(!current())return;
+  const quote=await api('/api/preflight',{method:'POST',body:data});if(!current())return;progress.textContent='분석 기록 확인 중…';let result,recoveredUrlCreate=false,storedUrlSource=null;const resume=(ownedAudio||urlOnly)?execution.resume:'';
+  if(execution.localAsr){const saved=await localAsrAnalysisRecord(data,execution.resume,current);if(!saved||!current())return;$('#result-panel').hidden=false;const entry=showReport(saved.job,$('#result-content'),saved.persisted);progress.textContent=saved.readOnlyRecovery?'응답이 끊긴 같은 분석의 저장 기록을 조회했습니다. 음성 취득·전사·요약 요청은 보내지 않았습니다.':'외부 로컬 전사 연결용 분석 기록을 확인했습니다. 오디오 요청 기록과 결과 수신은 아래에서 별도로 선택하세요. 음성·공급자 요청은 보내지 않았습니다.';if(entry)await entry.open();return;}
+  if(urlOnly){
+   if(resume){result=await api('/api/jobs/'+encodeURIComponent(resume));if(!current())return;assertUrlJobBinding(result.job,data,quote,resume);result.persisted=true;}
+   else{
+    const submission=retainUrlCaptionSubmission(data,quote);data.submissionId=submission.id;
+    const readBack=async()=>{const saved=await api('/api/jobs/'+encodeURIComponent(submission.id));assertUrlJobBinding(saved.job,data,quote,submission.id);return {...saved,persisted:true,reused:true};};
+    if(submission.state!=='PREPARED'){
+     try{result=await readBack();}catch{throw Error('이전 URL 요청의 저장 여부를 확인하지 못했습니다. 요청 식별자 '+submission.id+'의 이력을 확인하세요. 새 작업이나 생성 요청을 자동 재전송하지 않았습니다.');}
+     recoveredUrlCreate=['CREATE_SENT','UNCERTAIN'].includes(submission.state);
+    }else{
+     submission.state='CREATE_SENT';saveUrlCaptionSubmission(submission);
+     try{result=await api('/api/jobs',{method:'POST',body:data});if(result.persisted!==true)throw Error('URL_JOB_SAVE_UNVERIFIED');assertUrlJobBinding(result.job,data,quote,submission.id);}
+     catch(error){
+      submission.state='UNCERTAIN';saveUrlCaptionSubmission(submission);if(!current())return;
+      if(error.code&&error.code!=='URL_SUBMISSION_WRITE_UNCERTAIN')throw error;
+      try{result=await readBack();recoveredUrlCreate=true;}catch{throw Error('URL 생성 응답과 저장 여부가 불명확합니다. 요청 식별자 '+submission.id+'를 보존했습니다. 같은 입력으로 이력을 다시 확인하세요. 생성 요청은 자동 재시도하지 않습니다.');}
+     }
+     if(!recoveredUrlCreate&&(result.reused===true||result.job.report)){if(!current())return;result={...result,...await readBack()};if(!current())return;}
+    }
+    submission.state='CREATED';saveUrlCaptionSubmission(submission);
+   }
+   if(!current())return;
+   const found=await api('/api/jobs/'+encodeURIComponent(result.job.id)+'/source');if(!current())return;storedUrlSource=confirmedUrlSource(found);
+  }else if(resume){result=await api('/api/jobs/'+encodeURIComponent(resume));if(!current())return;if(result.job.source_type!=='audio'||Math.abs(result.job.duration_seconds-plan.durationSeconds)>1||(mode==='url'&&(result.job.video_id!==quote.videoId||result.job.source_url!==`https://www.youtube.com/watch?v=${quote.videoId}`)))throw Error('선택한 음성과 이전 분석이 다릅니다.');result.persisted=true;}
+  else result=await api('/api/jobs',{method:'POST',body:data});
+  if(!current())return;const id=result.job.id;
   if(mode==='url'&&ownedAudio)$('#new-url-audio-job').hidden=true;$('#result-panel').hidden=false;showReport(result.job,$('#result-content'),result.persisted);
   if(mode==='url'&&ownedAudio&&result.job.audit?.audioProcessingCoverage===1){progress.textContent='기존 작업의 전사가 이미 저장되어 있습니다. 라이브러리에서 전체 요약을 확인하세요.';return;}
+  if(recoveredUrlCreate){progress.textContent='응답이 끊긴 URL 작업의 저장 기록을 읽기 전용으로 확인했습니다. 새 요청은 보내지 않았습니다. 계속하려면 같은 입력으로 명시적으로 다시 제출하세요.';return;}
+  if(urlOnly&&result.job.report){progress.textContent='기존 저장 보고서를 열었습니다. 새 요약 생성·음성 전사를 시작하지 않았습니다. 승인한 형식의 검증 상태는 보고서에서 확인하세요.';return;}
   if(live){
-   if(mode==='url'&&!ownedAudio){progress.textContent='기존 자막 조회 중…';result=await api('/api/jobs/'+id+'/native',{method:'POST',body:{}});if(['NEED_UPLOAD','NATIVE_PENDING'].includes(result.job.status)){showReport(result.job,$('#result-content'),true);throw Error(result.job.status==='NATIVE_PENDING'?'제공자 처리 대기: 이력의 Supadata 자막 처리 상태 조회를 사용하세요. 이는 Supadata API 요청이며 무료 할당을 예약합니다.':'기존 자막이 없습니다. 보유 음성/자막을 사용하세요.');}}
+   if(urlOnly&&!storedUrlSource?.segments?.length){
+    const nativeState=urlCaptionState(result.job);
+    if(['PENDING','NO_CAPTIONS'].includes(nativeState)){progress.textContent=urlPipelineNotice(result.job);return;}
+    if(nativeState!=='NO_STORED_RESULT')throw Error('기존 자막 요청 또는 저장 원문 상태를 확인할 수 없습니다. 이력에서 먼저 확인하세요. 자동 재전사하지 않습니다.');
+    if(!current())return;progress.textContent='기존 자막 요청 상태 확인 및 자막 확보 중…';result=await api('/api/jobs/'+id+'/native',{method:'POST',body:{}});if(!current())return;
+    assertUrlJobBinding(result.job,data,quote,id);showReport(result.job,$('#result-content'),result.persisted===true);
+    if(['NEED_UPLOAD','NATIVE_PENDING'].includes(result.job.status)){progress.textContent=urlPipelineNotice(result.job)||'기존 자막을 확보하지 못했습니다. 자동 음성 취득 워커는 연결되지 않았습니다. 기존 전사 작업을 확인하세요.';return;}
+    const found=await api('/api/jobs/'+encodeURIComponent(id)+'/source');if(!current())return;storedUrlSource=confirmedUrlSource(found);
+    if(result.persisted!==true||!Array.isArray(storedUrlSource?.segments)||!storedUrlSource.segments.length||storedUrlSource.segments.some(segment=>typeof segment.text!=='string'||!segment.text.trim()))throw Error('기존 자막 원문의 저장을 확인하지 못했습니다. 요약을 시작하지 않았습니다.');
+   }
    if(ownedAudio){
     fileSha256??=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(x=>x.toString(16).padStart(2,'0')).join('');
     if(execution.batch&&submittedScope.fileSha256!==fileSha256)throw Error('제출 시점에 승인된 MP3와 선택한 파일이 다릅니다.');
-    await api('/api/jobs/'+id+'/audio-plan',{method:'POST',body:{rightsConfirmed:true,fileSha256,chunks:plan.chunks.map(({index,start,end})=>({index,start,end}))}});
+    if(!current())return;await api('/api/jobs/'+id+'/audio-plan',{method:'POST',body:{rightsConfirmed:true,fileSha256,chunks:plan.chunks.map(({index,start,end})=>({index,start,end}))}});if(!current())return;
     if(execution.batch){
      const scope=submittedScope;
-     const run=await runApprovedFreeBatch({jobId:id,fileSha256,approvedChunkIds:scope.chunkIds,chunks:plan.chunks,getBatch:()=>api('/api/jobs/'+id+'/audio-free-batch'),getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),foreground:()=>!document.hidden,now:Date.now,wait:waitForeground,onUpdate:status=>{progress.textContent='Groq Free 제한 배치 · 조각 '+(status.index+1)+(status.done?' 저장됨':' 전송 중')+' · 분석 '+id;},sendChunk:async c=>{const prepared=prepareMp3Chunk(bytes.subarray(c.byteStart,c.byteEnd));const response=await fetch('/api/jobs/'+id+'/audio-chunk?index='+c.index+'&provider=groq&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream','x-groq-free-batch':'true'},credentials:'same-origin',body:prepared.bytes});const data=await response.json();return response.ok?data:{code:data.error?.code||'AUDIO_SEND_FAILED'};}});
+     const run=await runApprovedFreeBatch({jobId:id,fileSha256,approvedChunkIds:scope.chunkIds,chunks:plan.chunks,getBatch:()=>api('/api/jobs/'+id+'/audio-free-batch'),getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),foreground:current,now:Date.now,wait:waitForeground,onUpdate:status=>{progress.textContent='Groq Free 제한 배치 · 조각 '+(status.index+1)+(status.done?' 저장됨':' 전송 중')+' · 분석 '+id;},sendChunk:async c=>{const prepared=prepareMp3Chunk(bytes.subarray(c.byteStart,c.byteEnd));const response=await fetch('/api/jobs/'+id+'/audio-chunk?index='+c.index+'&provider=groq&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream','x-groq-free-batch':'true'},credentials:'same-origin',body:prepared.bytes});const data=await response.json();return response.ok?data:{code:data.error?.code||'AUDIO_SEND_FAILED'};}});
      if(!run.complete)throw Error('Groq Free 제한 배치 중단: '+run.reason+' · 조각 '+((run.index??scope.chunkIds?.[0]??0)+1)+' · 분석 '+id+'. 이력과 제공자 상태를 확인하세요.');
      progress.textContent='승인된 Groq Free 조각 전송이 끝났습니다. 전사 병합·요약은 별도 검토 후 진행하세요. 분석 '+id;toast('제한 배치 전송이 끝났습니다.');return;
     }
-    if(execution.geminiConsent)await api('/api/jobs/'+id+'/audio-consent',{method:'POST',body:{provider:'gemini',fileSha256,consent:true}});
-    const run=await runAudioChunks({chunks:plan.chunks,getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),getCapacity:()=>api('/api/live/capacity'),getQuota:()=>api('/api/live/quota'),now:Date.now,foreground:()=>!document.hidden,
+    if(execution.geminiConsent)await api('/api/jobs/'+id+'/audio-consent',{method:'POST',body:{provider:'gemini',fileSha256,consent:true}});if(!current())return;
+    const run=await runAudioChunks({chunks:plan.chunks,getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),getCapacity:()=>api('/api/live/capacity'),getQuota:()=>api('/api/live/quota'),now:Date.now,foreground:current,
      chooseProvider:()=>execution.provider,authorizedProviders:()=>['groq',...(execution.geminiConsent?['gemini']:[])],
      review429:async(c,saved)=>confirm('조각 '+(c.index+1)+'의 '+saved.reviewProvider+' 공식 요청 로그에서 429 거절과 출력 없음, 재시도 가능 시각을 확인했나요?')?saved.reviewOperationId:null,
      wait:waitForeground,
      onUpdate:status=>{progress.textContent=status.waitingUntil?'제공자 호출 간격 대기 중 · '+fmtDate(status.waitingUntil):'음성 전사 '+(status.index+1)+' / '+plan.chunks.length+' · 기록 '+id;},
      sendChunk:async(c,provider,reviewedId,options)=>{const prepared=prepareMp3Chunk(bytes.subarray(c.byteStart,c.byteEnd));const response=await fetch('/api/jobs/'+id+'/audio-chunk?index='+c.index+'&provider='+provider+'&name=chunk.mp3',{method:'POST',headers:{'content-type':'application/octet-stream',...(reviewedId?{'x-provider-log-429-no-output-confirmed':'true','x-provider-log-429-operation-id':reviewedId}:{}),...(options?.unknownCapacityProbe?{'x-groq-free-unknown-probe':'true'}:{})},credentials:'same-origin',body:prepared.bytes});const result=await response.json();return response.ok?result:{code:result.error?.code||'AUDIO_SEND_FAILED'};}});
     if(!run.complete)throw Error('음성 전사를 일시 중단했습니다: '+run.reason+' · 조각 '+((run.index??0)+1)+' · 기록 '+id+'. 제공자 관측치와 이력을 확인한 뒤 같은 파일로 재개하세요.');
-    result=await api('/api/jobs/'+id+'/audio-finish',{method:'POST',body:{}});showReport(result.job,$('#result-content'),true);if(mode==='url'){progress.textContent='전사가 저장되었습니다. 라이브러리에서 전체 요약 계획을 확인하고 별도로 승인하세요.';return;}
+    if(!current())return;result=await api('/api/jobs/'+id+'/audio-finish',{method:'POST',body:{}});if(!current())return;showReport(result.job,$('#result-content'),true);if(mode==='url'){progress.textContent='전사가 저장되었습니다. 라이브러리에서 전체 요약 계획을 확인하고 별도로 승인하세요.';return;}
    }
-   const summaryPlan=await api('/api/jobs/'+id+'/summary-plan');
+   if(!current())return;
+   const summaryPlan=await api('/api/jobs/'+id+'/summary-plan?formatProfile=approved-four-part-v1');if(!current())return;
+   if(summaryPlan.formatProfile!=='approved-four-part-v1')throw Error('요약 계획의 형식이 선택한 형식과 다릅니다. 실행하지 않았습니다.');
    progress.textContent='원문 근거 연결 요약 '+summaryPlan.stages+'개 구간 작성 중… 첫 단계 예약 상한 '+summaryPlan.firstPassUnits+' 단위. 할당이 부족하면 완료 단계만 보관하고 중단합니다.';
    const staged=summaryPlan.firstPassUnits>250000;if(staged&&!confirm('이 원문은 첫 단계만 '+summaryPlan.firstPassUnits+' 단위가 필요합니다. 여러 차례 무료 할당 확인이 필요할 수 있고 최종 합성 비용은 아직 모릅니다. 단계별로 진행할까요?'))throw Error('단계별 요약을 시작하지 않았습니다.');
-   const summary=await runSummaryStages({getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),getCapacity:()=>api('/api/live/capacity'),getQuota:()=>api('/api/live/quota'),sendSummary:()=>api('/api/jobs/'+id+'/summary',{method:'POST',body:{allowStaged:staged}}),wait:waitForeground,foreground:()=>!document.hidden,onUpdate:status=>{progress.textContent=status.waitingUntil?'Gemini 요약 호출 간격 대기 중 · '+fmtDate(status.waitingUntil):'요약 단계 '+(status.stage+1)+' 저장됨 · 기록 '+id;}});
+   if(!current())return;
+   const summary=await runSummaryStages({getProgress:()=>api('/api/jobs/'+id+'/audio-progress'),getCapacity:()=>api('/api/live/capacity'),getQuota:()=>api('/api/live/quota'),sendSummary:()=>api('/api/jobs/'+id+'/summary',{method:'POST',body:{allowStaged:staged,formatProfile:'approved-four-part-v1'}}),completionContext:{jobId:id,formatProfile:'approved-four-part-v1'},wait:waitForeground,foreground:current,onUpdate:status=>{if(current())progress.textContent=status.waitingUntil?'Gemini 요약 호출 간격 대기 중 · '+fmtDate(status.waitingUntil):'요약 단계 '+(status.stage+1)+' 저장됨 · 기록 '+id;}});if(!current())return;
+   if(summary.result?.formatMismatch){if(summary.result.job?.id!==id||summary.result.persisted!==true||summary.result.cached!==true||summary.result.requestedFormatProfile!=='approved-four-part-v1')throw Error('기존 보고서 응답의 대상·저장·요청 형식을 확인하지 못했습니다.');showReport(summary.result.job,$('#result-content'),summary.result.persisted===true);$('#result-content').append(el('p',{className:'tip',text:'기존 저장 보고서를 보존해 열었습니다. 승인한 네 부분 형식으로 새로 생성하거나 기존 내용을 덮어쓰지 않았습니다.'}));progress.textContent='기존 보고서를 열었습니다. 새 형식 요약 완료로 판정하지 않았습니다.';return;}
    if(!summary.complete)throw Error('요약을 일시 중단했습니다: '+summary.reason+' · 기록 '+id+'. 공급자 관측치와 사용량을 확인한 뒤 이력에서 계속하세요.');
    result=summary.result;
+   if(approvedSummaryResultIssue(result,id))throw Error('요약의 저장·형식·현재 전사 연결을 확인하지 못했습니다. 이력을 읽기 전용으로 다시 확인하세요.');
   }
-  showReport(result.job,$('#result-content'),result.persisted);progress.textContent='처리 결과를 저장했습니다. 완전 전사·외부 사실 검증 상태는 리포트를 확인하세요.';toast('분석 결과 저장 완료');
- }catch(e){if(e?.code==='AUDIO_SUBMISSION_DELETED'&&mode==='url')$('#new-url-audio-job').hidden=false;progress.textContent=safeError(e)+' — 완료된 원문과 조각은 이력에 보관됩니다. 불명확한 API 요청은 자동 재시도하지 않습니다.';toast(safeError(e));}finally{button.disabled=false;}
+  if(!current())return;showReport(result.job,$('#result-content'),result.persisted);if(!live){progress.textContent='분석 입력 기록을 저장했습니다. AI 전사·요약을 실행하거나 완료로 판정하지 않았습니다.';toast('입력 기록 저장 완료');return;}progress.textContent=result.cached?'저장된 승인 형식 요약을 열었습니다. 새로 생성한 결과가 아닙니다.':'승인한 형식의 요약 저장과 현재 전사 연결을 확인했습니다. 전체 원음·의미 품질·외부 사실 검증은 별도입니다.';toast(result.cached?'저장된 요약 열기 완료':'요약 저장 확인 완료');
+ }catch(e){if(e?.code==='AUDIO_SUBMISSION_DELETED'&&mode==='url')$('#new-url-audio-job').hidden=false;if(current()){progress.textContent=safeError(e)+' — 완료된 원문과 조각은 이력에 보관됩니다. 불명확한 API 요청은 자동 재시도하지 않습니다.';toast(safeError(e));}}finally{analysisRunning=false;button.disabled=false;}
 }
 function detailCurrent(jobId,requestId,target){return detailRequestIsCurrent({expectedRequestId:requestId,currentRequestId:libraryDetailRequest,expectedJobId:jobId,visibleJobId:target.dataset.jobId,view:state.view,hidden:target.hidden});}
 function showFreeBatchChoice(job,target,requestId){
@@ -217,7 +367,7 @@ function showGroqSummaryChoice(job,target,requestId){
  const headline=el('strong'),detail=el('p'),refreshButton=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});
  const diagnosticButton=el('button',{className:'btn secondary small',text:'실패 단계 무호출 진단'}),diagnosticDetail=el('p');diagnosticButton.hidden=true;
  const diagnosticEvidence=el('div');
- const correctionButton=el('button',{className:'btn secondary small',text:'raw:8 무료 1회 교정 견적 검토'});correctionButton.hidden=true;
+ const correctionButton=el('button',{className:'btn secondary small',text:'대상 구간 무료 1회 교정 견적 검토'});correctionButton.hidden=true;
  const scopeHost=el('div');
  statusBox.append(headline,detail,refreshButton,diagnosticButton,diagnosticDetail,diagnosticEvidence,correctionButton);
  target.append(reviewButton,statusBox,scopeHost);
@@ -420,10 +570,10 @@ function showGroqGapChoice(job,target,requestId){
  const savedFailure=async()=>{try{return groqGapFailureText(await api('/api/jobs/'+job.id+'/groq-summary-status'));}catch{return null;}};
  const render=async(note='')=>{
   const scope=await api(url);if(!current())return;empty(host);
-  host.append(el('h2',{text:'Groq Free · raw:8 누락 공개 독립 구간 진행'}),el('p',{text:`연속 완료 raw:0–7 · 검증 저장 ${scope.completedRawStages}/${scope.rawStages}구간 · 보류 ${scope.heldRawStages}구간 (raw:8, 원문 #${scope.gap.firstId}–#${scope.gap.lastId}) · 미처리 ${scope.pendingRawStages}구간. raw:8 원요청과 교정은 ${scope.gap.failureCode} 검증 실패로 검토 필요·미완료입니다. 전체 보고서는 저장되지 않습니다.`}),el('p',{text:'기존 실패 응답과 사용량은 보존됩니다. 다음 독립 구간만 진행하며 raw:8 재전송, 새 교정 슬롯, 자동 재시도는 없습니다. 제공자 계정 잔여량은 UNKNOWN입니다.'}));
+  host.append(el('h2',{text:'보류 구간 이후 독립 구간 처리 검토'}),el('p',{text:'선택한 구간의 기존 요청·응답·사용량 기록을 먼저 확인하세요. 미확정 기록은 보존하며, 이후 독립 구간을 진행해도 해당 구간의 내용이나 실행 결과가 확인된 것으로 처리하지 않습니다.'}),el('p',{text:'보류 구간은 이번 실행에서 제외합니다. 남은 구간에 새 요청이 필요한 경우 현재 무료 조건·잔여량과 각 요청 범위를 확인해야 합니다.'}));
   if(note)host.append(el('p',{attrs:{role:'status'},text:note}));
   const view=el('button',{className:'btn secondary small',text:'누락 공개 부분 묶음 보기'});view.onclick=()=>{if(current()){const nextRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);empty(target);showGroqBundleChoice(job,target,nextRequest,{withGap:true});}};host.append(view);
-  if(scope.bundleAvailable){host.append(el('p',{text:'독립 원시 구간은 모두 검증 저장됐습니다. raw:8은 보류 중이며 전체 요약은 미완료입니다.'}));return;}
+  if(scope.bundleAvailable){host.append(el('p',{text:'독립 구간 처리가 끝났습니다. 보류 구간의 누락과 미확정 상태를 확인한 뒤 저장된 묶음을 검토하세요.'}));return;}
   if(scope.approved){
    host.append(el('p',{text:`승인 창 ${scope.windowStart+1}번부터 최대 ${scope.maxRequests}회 · 만료 ${fmtRetryDate(scope.expiresAt)}. 다음 구간 ${scope.nextRawStage}.`}));
    if(scope.state!=='APPROVED'||scope.expiresAt<=Date.now())return;
@@ -441,21 +591,21 @@ function showGroqGapChoice(job,target,requestId){
       if(!current()||interrupted||document.hidden||!fresh.approved||fresh.outputKind!==scope.outputKind||fresh.gap?.originalSha256!==scope.gap.originalSha256||fresh.gap?.correctionSha256!==scope.gap.correctionSha256||!fresh.nextRawStage)throw Error('FOREGROUND_REQUIRED');
       progress.textContent=fresh.nextRawStage+' 전송 중 · 제공자 수신과 저장 결과는 아직 미확인입니다.';
       let sent;try{sent=await api(url,{method:'POST',body:{step:'execute',transcriptHash:scope.transcriptHash,expectedStage:fresh.nextRawStage,executeOnce:true}});}catch(error){if(error?.code)lastServerError={stage:fresh.nextRawStage,code:error.code};throw error;}
-      if(current()&&!interrupted)progress.textContent=sent.stage+' 저장 확인 · raw:8은 계속 보류 중입니다.';
+      if(current()&&!interrupted)progress.textContent=sent.stage+' 저장 확인 · 대상 구간은 계속 보류 중입니다.';
       return sent;
      },wait:ms=>new Promise((resolve,reject)=>{
       if(interrupted||!current()||document.hidden){reject(Error('FOREGROUND_REQUIRED'));return;}
       const until=Date.now()+ms;
-      const update=()=>{if(current())progress.textContent=`저장 상태 확인 · 다음 독립 구간까지 ${Math.max(0,Math.ceil((until-Date.now())/1000))}초 대기 · raw:8 보류`;};
+      const update=()=>{if(current())progress.textContent=`저장 상태 확인 · 다음 독립 구간까지 ${Math.max(0,Math.ceil((until-Date.now())/1000))}초 대기 · 대상 구간 보류`;};
       update();const ticker=setInterval(update,1000),timer=setTimeout(()=>{clearInterval(ticker);cancelWait=null;resolve();},ms);
       cancelWait=()=>{clearTimeout(timer);clearInterval(ticker);cancelWait=null;reject(Error('FOREGROUND_REQUIRED'));};
-     }),foreground:()=>current()&&!document.hidden&&!interrupted,onUpdate:({stage})=>{if(current()&&!interrupted)progress.textContent=stage+' 저장 확인 · raw:8 보류 · 요청 간격 대기';}});
-     finalNote=outcome.reason==='SUMMARY_BUNDLE_AVAILABLE'?'독립 구간 저장 완료 · raw:8 보류와 전체 요약 미완료를 유지합니다.':outcome.reason==='SUMMARY_WINDOW_COMPLETE'?'이번 승인 창이 끝났습니다. 계속하려면 새 범위를 검토·승인하세요.':outcome.reason?'진행 중단: '+outcome.reason+' · 저장 상태를 확인하세요. 자동 재전송은 없습니다.':'저장 상태를 확인하세요.';
+     }),foreground:()=>current()&&!document.hidden&&!interrupted,onUpdate:({stage})=>{if(current()&&!interrupted)progress.textContent=stage+' 저장 확인 · 대상 구간 보류 · 요청 간격 대기';}});
+     finalNote=outcome.reason==='SUMMARY_BUNDLE_AVAILABLE'?'독립 구간 저장 완료 · 대상 구간 보류와 전체 요약 미완료를 유지합니다.':outcome.reason==='SUMMARY_WINDOW_COMPLETE'?'이번 승인 창이 끝났습니다. 계속하려면 새 범위를 검토·승인하세요.':outcome.reason?'진행 중단: '+outcome.reason+' · 저장 상태를 확인하세요. 자동 재전송은 없습니다.':'저장 상태를 확인하세요.';
     }catch(error){finalNote=lastServerError?`마지막 서버 응답: ${lastServerError.stage} · ${lastServerError.code}. 저장 상태를 별도로 확인하세요. 자동 재전송은 없습니다.`:'요청 결과를 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다. '+safeError(error);}
     finally{cancelWait?.();document.removeEventListener('visibilitychange',visibility);if(stopGroqSummarySession===stop)stopGroqSummarySession=null;running=false;if(current())await render(finalNote).catch(async error=>{if(current()){const stored=await savedFailure();progress.textContent=stored??`${lastServerError?`마지막 서버 응답 ${lastServerError.stage} · ${lastServerError.code}. `:''}새 저장 상태 조회 실패. 자동 재전송은 없습니다. ${safeError(error)}`;}});}
    };host.append(run);return;
   }
-  const form=el('form',{className:'fields'}),labels=['Groq Free 조직과 결제 비활성을 확인했습니다.','raw:8 검증 실패·누락과 최종 보고서 미완료를 확인했습니다.','계정 잔여량 UNKNOWN, 표시된 호출·토큰 상한, 첫 429/불명확한 전송에서 중단을 확인했습니다.'];
+  const form=el('form',{className:'fields'}),labels=['Groq Free 조직과 결제 비활성을 확인했습니다.','대상 구간 검증 실패·누락과 최종 보고서 미완료를 확인했습니다.','계정 잔여량 UNKNOWN, 표시된 호출·토큰 상한, 첫 429/불명확한 전송에서 중단을 확인했습니다.'];
   const checks=labels.map(label=>{const input=el('input',{attrs:{type:'checkbox',required:'true'}}),row=el('label',{text:label});row.prepend(input);form.append(row);return input;});
   form.append(el('p',{text:`다음 ${scope.nextRawStage} · 최대 ${scope.maxRequests}회 · 입력 ${scope.maxInputTokensPerRequest} / 출력 ${scope.maxCompletionTokensPerRequest} 토큰/회 · 예약 상한 ${scope.totalTokenUpperBound}토큰. 새 창은 별도 승인이 필요합니다.`}));
   const approve=el('button',{className:'btn secondary small',text:'누락 공개 무료 범위 승인 저장'});form.append(approve);
@@ -527,7 +677,7 @@ function showGeminiTwoPassChoice(job,target,requestId){
   try{status=await api(base+'-status',{signal:typeof AbortSignal==='undefined'?undefined:AbortSignal.timeout(15000)});}
   catch(error){if(!current()||sequence!==statusSequence)return;throw error;}
   if(!current()||sequence!==statusSequence)return;if(activeRequest){pendingView(status.state);return;}if(status.state==='QUOTED'&&status.quote?.quoteSha256&&status.quote.expiresAt>Date.now()){quoteUncertain=false;quoteError='';}empty(host);
-  host.append(el('h2',{text:'Gemini 전체 전사 요약 + 원문 대조'}),el('p',{text:'저장된 전사만 사용합니다. 생성은 최대 2회, 자동 재시도와 자동 3차 호출은 없습니다. 2차 예약 전에 남은 승인을 취소할 수 있으며, 예약이 먼저 확정되면 그 호출은 취소할 수 없습니다. 대조 PASS도 사람의 의미 검토·원음과 구간 시각의 정확성·외부 사실을 보증하지 않습니다.'}),el('p',{text:'현재 확인된 Gemini 프로젝트는 Tier 1 유료입니다. 별도 무료 프로젝트의 결제 비활성 증거가 없으므로 무료 실행으로 분류할 수 없습니다. 견적 요청은 저장 키로 정확한 모델의 메타데이터와 토큰 계수 접근을 확인합니다. 이는 생성 성공·잔액·결제 가능성을 보증하지 않으며, 유료 실행은 표시한 최대액을 별도로 승인해야 합니다.'}));
+  host.append(el('h2',{text:'Gemini 전체 전사 요약 + 원문 대조'}),el('p',{text:'저장된 전사만 사용합니다. 생성은 최대 2회, 자동 재시도와 자동 3차 호출은 없습니다. 2차 예약 전에 남은 승인을 취소할 수 있으며, 예약이 먼저 확정되면 그 호출은 취소할 수 없습니다. 대조 PASS도 사람의 의미 검토·원음과 구간 시각의 정확성·외부 사실을 보증하지 않습니다.'}),el('p',{text:'현재 계정의 무료 등급과 과금 비활성 여부는 이 화면에서 확인되지 않았습니다. 공급자 콘솔의 최신 계정 증거를 확인하기 전에는 무료 처리를 승인하지 마세요. 계정 전체 잔여량은 UNKNOWN이며, 유료 경로는 별도 견적과 승인으로만 실행합니다.'}));
   if(status.state==='QUOTE_PENDING'||status.state==='QUOTE_UNCERTAIN_LEGACY'){
    host.append(el('p',{text:status.state==='QUOTE_PENDING'?'견적 계수 요청 기록이 남아 있습니다. 마지막 확인 단계: '+(status.quoteAttempt?.state??'UNKNOWN')+'. 결과가 불확실하므로 새 요청을 보내지 마세요.':'이 작업의 이전 견적 요청 결과가 불확실합니다. 저장 기록이 없어도 미전송으로 간주하지 않으며 새 요청은 차단됩니다.'}));
    const refresh=el('button',{className:'btn secondary small',text:'견적 상태 다시 조회'});refresh.onclick=()=>render().catch(showQuoteStatusFailure);host.append(refresh);return;
@@ -612,7 +762,7 @@ function showSummaryChoice(job,target,requestId){
   if(quote.paid.costEstimate){const e=quote.paid.costEstimate;host.append(el('p',{text:`이 영상 요청 본문 ${e.requestBytes} UTF-8바이트(전사·지시문·스키마 포함). 토크나이저 미호출 가정 시 입력 ${e.inputEstimateLowTokens}–${e.inputEstimateHighTokens}, 출력·thinking ${e.outputEstimateLowTokens}–${e.outputEstimateHighTokens}토큰의 세전 비용 시나리오 $${(e.estimatedPreTaxLowMicroUsd/1_000_000).toFixed(6)}–$${(e.estimatedPreTaxHighMicroUsd/1_000_000).toFixed(6)}. 실제 비용은 UNKNOWN이며 시나리오 밖일 수 있습니다. 입력 바이트×${e.inputByteMultiplier}+${e.inputOverheadBytes}는 요청 크기 검사에만 쓰고, 금액 승인에는 더 높은 공식 모델 전체 한도를 적용합니다. 100% 예산 완충은 실제 세율이 아닙니다.`}));}
   if(quote.transcription.complete&&!quote.summary.complete&&!quote.geminiQuote?.blocked&&quote.paid.quoteIssueReady){const issue=el('button',{className:'btn secondary small',text:'서버 유료 견적 발급 · 제공자 호출 없음'});issue.onclick=async()=>{issue.disabled=true;try{const issued=await api('/api/jobs/'+job.id+'/paid-summary-quote',{method:'POST',body:{}});if(current()){empty(target);showPaidSummaryQuote(job,target,requestId,issued,quote.paid.executionEnabled);}}catch(error){if(current()){toast(safeError(error));try{const status=await api('/api/jobs/'+job.id+'/paid-summary-status');if(current()&&status.issuedQuote){empty(target);showPaidSummaryQuote(job,target,requestId,status.issuedQuote,quote.paid.executionEnabled);}}catch{host.append(el('p',{text:'견적 발급 상태를 읽기로 확인할 수 없습니다. 새 요청을 자동 전송하지 않습니다.'}));}}}};host.append(issue);}
   api('/api/jobs/'+job.id+'/paid-summary-status').then(status=>{if(!current())return;if(status.approval){host.append(el('p',{text:`저장된 유료 승인 ${status.approval.state} · 예약 ${status.reservations.map(item=>item.state).join(', ')||'없음'} · 자동 재시도 없음 · 제공자 청구액 UNKNOWN.`}));offerPaidExecution(job,target,requestId,host,status);offerPaidRevalidation(job,target,requestId,host,status);if(status.approval.state==='APPROVED'){const cancel=el('button',{className:'btn secondary small',text:'유료 승인 취소 · 이미 보낸 호출은 환불 아님'});cancel.onclick=async()=>{cancel.disabled=true;try{await api('/api/jobs/'+job.id+'/paid-summary-cancel',{method:'POST',body:{}});}catch(error){toast(safeError(error));}const after=await api('/api/jobs/'+job.id+'/paid-summary-status').catch(()=>null);if(current()){if(after)offerPaidExecution(job,target,requestId,host,after);host.append(el('p',{text:after?`승인 상태 ${after.approval?.state??'미확인'} · 예약 상태 ${after.reservations.map(item=>item.state).join(', ')||'없음'}`:'승인 취소 결과를 읽기로 확인할 수 없습니다.'}));}};host.append(cancel);}}}).catch(()=>{if(current())host.append(el('p',{text:'저장된 유료 승인·복구 상태를 읽을 수 없습니다. 상태를 다시 확인하세요.'}));});
-  const gap=el('button',{className:'btn secondary small',text:'raw:8 보류 · 독립 구간 무료 진행 검토'});gap.onclick=()=>{if(current()){empty(target);showGroqGapChoice(job,target,requestId);}};host.append(gap);
+  const gap=el('button',{className:'btn secondary small',text:'대상 구간 보류 · 독립 구간 무료 진행 검토'});gap.onclick=()=>{if(current()){empty(target);showGroqGapChoice(job,target,requestId);}};host.append(gap);
   const bundle=el('button',{className:'btn secondary small',text:'구간별 묶음 별도 보기'});bundle.onclick=()=>{if(current()){empty(target);showGroqBundleChoice(job,target,requestId);}};host.append(bundle);
  }).catch(error=>{if(current()){host.append(el('p',{text:'남은 요약 견적을 읽을 수 없습니다.'}));toast(safeError(error));}});
 }
@@ -620,7 +770,7 @@ function showPaidSummaryQuote(job,target,requestId,issued,executionEnabled){
  const current=()=>detailCurrent(job.id,requestId,target),host=el('div'),q=issued.quote;target.append(host);
  host.append(el('h2',{text:'서버 발급 유료 전체 종합 요약 견적'}),el('p',{text:`견적 ID ${issued.quoteId} · 모델 ${q.model} · 가격 버전 ${q.priceVersion} · 입력 단가 $${q.priceInputMicroUsdPerMillion/1_000_000} / 출력·thinking 단가 $${q.priceOutputMicroUsdPerMillion/1_000_000} (각 100만 토큰당).`}),el('p',{text:`이 영상 전송 본문 ${q.requestBytes??'UNKNOWN'} UTF-8바이트 · 금액 승인 입력/출력 상한 ${q.inputTokensUpper}/${q.outputTokensUpper}은 공식 모델 전체 한도입니다. 요청의 maxOutputTokens는 8192이지만 이를 근거로 예약액을 낮추지 않습니다. 계획 ${q.plannedCalls}회, 자동 재시도 ${q.maxRetries}회. 세전 최대 예약 $${q.perCallMicroUsd/1_000_000}; 추가 청구·세금 대비 앱 예산 완충 ${q.maxTaxBps/100}%(실제 세율 아님)을 포함한 1회 최대 $${q.maxCallMicroUsd/1_000_000}, 총 승인 최대 $${q.maxMicroUsd/1_000_000} (${q.maxMicroUsd} microUSD). 승인 만료 ${fmtDate(new Date(q.expiresAt).toISOString())}. 모델 이용 가능성·잔액·실제 청구·세금·ETA는 실행 전 검증이 필요합니다.`}));
  if(q.costEstimate){const e=q.costEstimate;host.append(el('p',{text:`비검증 비용 시나리오: 입력 ${e.inputEstimateLowTokens}–${e.inputEstimateHighTokens}, 출력·thinking ${e.outputEstimateLowTokens}–${e.outputEstimateHighTokens}토큰이면 세전 $${(e.estimatedPreTaxLowMicroUsd/1_000_000).toFixed(6)}–$${(e.estimatedPreTaxHighMicroUsd/1_000_000).toFixed(6)}. UTF-8 요청 크기에서 산출한 가정이며 실제 토큰·청구액의 보장 범위가 아닙니다. 제공자 countTokens 호출은 하지 않았습니다.`}));}
- if(issued.firstTrialAvailable)host.append(el('p',{text:`승인 유형 FIRST_GENERATION_UNTESTED · 이 키의 실제 생성 성공은 아직 확인되지 않았습니다. 작업 ${job.id} · 전사 ${q.sourceSha256} · 요청 ${q.requestSha256} · 견적 ${q.quoteSha256} · 키 세대 ${q.credentialGeneration}에 묶인 최초 1회 시험만 승인합니다. 키·프로젝트 연결, ₩8,000 잔액·자동충전 OFF 및 모델 목록은 사용자 확인 사항입니다. 2026-10-11 선불 충전 ₩8,000=선불금 ₩7,273+VAT ₩727은 이 계정의 거래 관측입니다. 공식 모델 요금 상한 세전 $0.360448에 VAT 10%를 적용한 $0.3964928은 승인 USD 예약액 $0.720896 안입니다. 이 검토는 단일 텍스트 요청 범위이며 실제 청구서·KRW 확정액·모든 미래 수수료 검증이 아닙니다. metadata GET·실제 생성은 미실행, 사용분 세금 적용·환율은 미확인입니다. 새 충전·카드 결제는 승인하지 않습니다. 운영 시험·비용 검토 게이트가 켜지기 전에는 앱 승인·실행이 차단됩니다.`}));
+ if(issued.firstTrialAvailable)host.append(el('p',{text:'첫 실행 전 공급자 콘솔에서 현재 결제 방식, 선불 잔액, 세금·부가세와 자동 충전 설정을 확인하세요. 이 화면만으로 계정 잔액이나 결제 내역을 확인하지 않습니다. 실행에는 현재 원문에 발급된 유효한 견적과 별도 승인이 필요하며, 표시된 승인 상한과 재시도 조건을 검토하세요.'}));
  const status=el('button',{className:'btn secondary small',text:'승인·예약 상태 다시 확인'});status.onclick=async()=>{try{const result=await api('/api/jobs/'+job.id+'/paid-summary-status');if(current()){host.append(el('p',{text:`승인 ${result.approval?.state??'없음'} · 예약 ${result.reservations.map(item=>item.state).join(', ')||'없음'} · 제공자 청구액 UNKNOWN.`}));offerPaidExecution(job,target,requestId,host,result);offerPaidRevalidation(job,target,requestId,host,result);}}catch(error){if(current())toast(safeError(error));}};host.append(status);
  const form=el('form',{className:'fields'}),money=el('input',{attrs:{type:'number',min:String(q.maxCallMicroUsd),max:String(q.maxMicroUsd),value:String(q.maxMicroUsd),required:'true'}}),calls=el('input',{attrs:{type:'number',min:'1',max:String(q.maxCalls),value:'1',required:'true'}}),expiry=el('input',{attrs:{type:'number',min:String(Date.now()+1000),max:String(q.expiresAt),value:String(q.expiresAt),required:'true'}}),confirm=el('input',{attrs:{type:'checkbox',required:'true'}}),submit=el('button',{className:'btn secondary small',text:issued.firstTrialAvailable?'최초 생성 미검증 1회 시험 승인 · 자동 실행 없음':'표시한 금액·횟수·만료만 승인 · 자동 실행 없음'});
  for(const [input,label] of [[money,'총액 상한 (microUSD)'],[calls,'최대 호출 횟수'],[expiry,'승인 만료 Unix 밀리초']]){const row=el('label',{text:label});row.append(input);form.append(row);}const label=el('label',{text:'이 견적과 자동 유료 전환 없음, 실제 청구·잔액 미검증을 확인했습니다.'});label.prepend(confirm);form.append(label);
@@ -648,12 +798,12 @@ function showGroqCorrectionChoice(job,target,requestId){
  const post=async body=>{if(!current())return;try{await api(url,{method:'POST',body});if(current())await render();}catch(error){if(current()){toast(safeError(error));if(body.step==='execute')postUncertain=true;await refresh();}}};
  const render=async()=>{
   const state=await api(url);if(!current())return;empty(host);
-  host.append(el('h2',{text:'Groq Free raw:8 별도 1회 교정'}),el('p',{text:`원문 ${state.firstId}–${state.lastId}번 (${state.segmentCount}개) · 기존 응답의 근거 없는 수치 ${state.originalMismatchCount}건 · 기존 사용량 ${state.originalUsageTotalTokens}토큰은 그대로 보존됩니다. 이전 응답의 완전성과 제공자 영수증은 검증되지 않았습니다. 새 호출은 중복 사용을 일으킬 수 있고 계정 잔여량은 UNKNOWN입니다.`}));
+  host.append(el('h2',{text:'Groq Free 대상 구간 별도 1회 교정'}),el('p',{text:`원문 ${state.firstId}–${state.lastId}번 (${state.segmentCount}개) · 기존 응답의 근거 없는 수치 ${state.originalMismatchCount}건 · 기존 사용량 ${state.originalUsageTotalTokens}토큰은 그대로 보존됩니다. 이전 응답의 완전성과 제공자 영수증은 검증되지 않았습니다. 새 호출은 중복 사용을 일으킬 수 있고 계정 잔여량은 UNKNOWN입니다.`}));
   const reread=el('button',{className:'btn secondary small',text:'저장 상태 다시 확인'});reread.onclick=refresh;host.append(reread);
   if(state.attemptState||postUncertain){
-   const labels={CLAIMED:'새 교정 요청이 접수되어 처리 중입니다.',DONE:'새 교정 결과가 저장됐습니다. 다음 구간은 별도 승인 후 실행하세요.',FAILED_UNCERTAIN:'새 교정 호출의 결과가 불명확합니다. 기존 raw:8 실패와 별개의 실패입니다.',BLOCKED:'새 교정 요청은 전송 전에 차단됐습니다.'};
+   const labels={CLAIMED:'새 교정 요청이 접수되어 처리 중입니다.',DONE:'새 교정 결과가 저장됐습니다. 다음 구간은 별도 승인 후 실행하세요.',FAILED_UNCERTAIN:'새 교정 호출의 결과가 불명확합니다. 기존 대상 구간 실패와 별개의 실패입니다.',BLOCKED:'새 교정 요청은 전송 전에 차단됐습니다.'};
    host.append(el('p',{attrs:{role:'status'},text:`${labels[state.attemptState]??'새 교정 요청의 결과를 확인할 수 없습니다.'} 상태 ${state.attemptState??'UNKNOWN'}${state.attemptErrorCode?' · '+state.attemptErrorCode:''} · 자동 재시도는 없습니다. 저장 상태를 확인하세요.`}));
-   if(state.recoveryCandidate){const proof=state.recoveryCandidate,button=el('button',{className:'btn secondary small',text:'저장된 raw:8 응답 무호출 복구'});host.append(el('p',{text:`완전한 응답 SHA-256 ${proof.responseSha256} · 실제 사용량 ${proof.usageTotalTokens}토큰. 원 실패와 사용량은 남습니다.`}),button);button.onclick=async()=>{if(!confirm('보존된 응답과 사용량을 검토하고 제공자를 다시 호출하지 않고 복구할까요?'))return;button.disabled=true;await post({step:'recover',failedOperationId:proof.failedOperationId,responseSha256:proof.responseSha256,recordSha256:proof.recordSha256,usageTotalTokens:proof.usageTotalTokens,confirmNoProviderCall:true,confirmOriginalFailurePreserved:true});};}
+   if(state.recoveryCandidate){const proof=state.recoveryCandidate,button=el('button',{className:'btn secondary small',text:'저장된 대상 구간 응답 무호출 복구'});host.append(el('p',{text:`완전한 응답 SHA-256 ${proof.responseSha256} · 실제 사용량 ${proof.usageTotalTokens}토큰. 원 실패와 사용량은 남습니다.`}),button);button.onclick=async()=>{if(!confirm('보존된 응답과 사용량을 검토하고 제공자를 다시 호출하지 않고 복구할까요?'))return;button.disabled=true;await post({step:'recover',failedOperationId:proof.failedOperationId,responseSha256:proof.responseSha256,recordSha256:proof.recordSha256,usageTotalTokens:proof.usageTotalTokens,confirmNoProviderCall:true,confirmOriginalFailurePreserved:true});};}
    if(state.recoveredWithoutProviderCall)host.append(el('p',{text:'보존된 응답을 재호출 없이 복구했습니다. 교정 실패 기록과 실제 사용량은 보존됩니다.'}));
    return;
   }
@@ -661,8 +811,8 @@ function showGroqCorrectionChoice(job,target,requestId){
   if(state.approvalState==='APPROVED'){
    if(state.quoteExpired||!state.quote){host.append(el('p',{text:'승인된 견적이 만료되거나 확인되지 않습니다. 이 승인으로 새 호출을 실행할 수 없습니다. 이력을 검토하세요.'}));return;}
    const quote=state.quote?.contract;
-   host.append(el('p',{text:`승인된 교정은 raw:8 한 구간, ${quote?.model??'저장된 모델'}, 최대 1회 호출입니다. 실행 버튼을 누르면 전송될 수 있습니다.`}));
-   const run=el('button',{className:'btn secondary small',text:'승인된 raw:8 교정 1회 실행'});run.onclick=async()=>{run.disabled=true;await post({step:'execute',approvalId:state.approvalId,confirmExecuteOnce:true});};
+   host.append(el('p',{text:`승인된 교정은 대상 구간 한 구간, ${quote?.model??'저장된 모델'}, 최대 1회 호출입니다. 실행 버튼을 누르면 전송될 수 있습니다.`}));
+   const run=el('button',{className:'btn secondary small',text:'승인된 대상 구간 교정 1회 실행'});run.onclick=async()=>{run.disabled=true;await post({step:'execute',approvalId:state.approvalId,confirmExecuteOnce:true});};
    const cancel=el('button',{className:'btn secondary small',text:'전송 전 승인 취소'});cancel.onclick=()=>post({step:'cancel',confirmCancelBeforeSend:true});host.append(run,cancel);return;
   }
   if(!state.quote){const quoteButton=el('button',{className:'btn secondary small',text:state.quoteExpired?'만료된 견적 폐기 후 새 견적 만들기':'교정 1회 견적 만들기'});quoteButton.onclick=()=>post({step:'quote'});host.append(quoteButton);return;}
@@ -900,40 +1050,73 @@ function libraryCard(job){
   const card=el('article',{className:'library-item'}),top=el('div',{className:'library-top'}),info=el('div');
   info.append(el('div',{className:'library-title',text:job.title || job.video_id || '제목 없음'}),el('div',{className:'library-meta',text:`${fmtDate(job.created_at)} · ${Math.round(job.duration_seconds/60)}분 · ${job.source_type}`}));
   top.append(info,el('span',{className:'pill'+(job.status?.includes('PARTIAL')?' warning':''),text:job.status}));card.append(top);
+  const pipelineNotice=urlPipelineNotice(job);if(pipelineNotice)card.append(el('p',{className:'tip',text:pipelineNotice}));
   if(job.audioTranscriptComplete)card.append(el('p',{className:'tip',text:'오디오 전사 완료: 리포트 열기 → 원문·근거 보기에서 저장된 전사를 읽거나 TXT로 내보내세요.'}));
+  if(Number.isSafeInteger(job.importedSummaryCount)&&job.importedSummaryCount>0)card.append(el('p',{className:'tip',text:`기존 전사 기반 가져온 요약 ${job.importedSummaryCount}개 · 리포트 열기 → 가져온 요약 저장·보기` }));
   const actions=el('div',{className:'library-actions'}),open=el('button',{className:'btn secondary small',text:'리포트 열기'}),remove=el('button',{className:'btn secondary small',text:'삭제'});
   open.onclick=async()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);target.append(el('p',{text:'저장된 분석을 확인 중…'}));try{const data=await api(`/api/jobs/${encodeURIComponent(job.id)}`);if(!detailCurrent(job.id,detailRequest,target))return;showReport(data.job,target,true);showBoundaryReconcileChoice(data.job,target,detailRequest);if(data.job.source_type==='audio'&&!data.job.audit?.sourceSummaryOrigin){const p=await api('/api/jobs/'+job.id+'/audio-progress');if(!detailCurrent(job.id,detailRequest,target))return;audioPlanView(data.job,p,target);if(p.chunks.some(c=>c.state==='PLANNED')&&p.chunks.every(c=>['DONE','PLANNED'].includes(c.state)))showFreeBatchChoice(job,target,detailRequest);for(const chunk of p.chunks.filter(c=>c.uncertainFailure)){const button=el('button',{className:'btn secondary small',text:'조각 '+(chunk.index+1)+' 부분 출력 검토'});button.onclick=async()=>{try{const review=await api('/api/jobs/'+job.id+'/audio-review?index='+chunk.index);target.append(el('pre',{text:review.partialText}));review.disabled=true;}catch(error){toast(safeError(error));}};target.append(button);if(chunk.state==='UNCERTAIN'){const recover=el('button',{className:'btn secondary small',text:'조각 '+(chunk.index+1)+' Groq 무료 재개 검토'});recover.onclick=async()=>{recover.disabled=true;try{if(!detailCurrent(job.id,detailRequest,target))return;const evidence=await api('/api/jobs/'+job.id+'/audio-recovery?index='+chunk.index);if(!detailCurrent(job.id,detailRequest,target))return;const form=el('form',{className:'fields'}),usage=el('input',{attrs:{type:'checkbox',required:'true'}}),duplicate=el('input',{attrs:{type:'checkbox',required:'true'}}),submit=el('button',{className:'btn secondary small',text:'이 조각만 재개 승인'});form.append(el('p',{text:'Gemini 404 요청의 실제 사용량은 0이라고 단정할 수 없습니다. 기존 미확정 기록과 예약 사용량은 유지됩니다. Groq로 다시 전사하면 중복 사용이 생길 수 있습니다. 승인해도 즉시 전송하지 않으며, 새 무료 잔여량 확인 후 같은 MP3로 다시 시작해야 합니다.'}),el('p',{text:'대상 조각 '+(chunk.index+1)+' · 파일 SHA-256 '+evidence.fileSha256+' · Gemini 작업 '+evidence.geminiOperationId+' · Groq 429 작업 '+evidence.groq429OperationId}));const a=el('label',{text:'이전 Gemini 사용 가능성을 인정합니다.'}),b=el('label',{text:'중복 전사 위험을 인정하고 Groq 무료 재개를 선택합니다.'});a.prepend(usage);b.prepend(duplicate);form.append(a,b,submit);form.onsubmit=async ev=>{ev.preventDefault();if(!detailCurrent(job.id,detailRequest,target))return;submit.disabled=true;try{await api('/api/jobs/'+job.id+'/audio-recovery',{method:'POST',body:{index:chunk.index,fileSha256:evidence.fileSha256,geminiOperationId:evidence.geminiOperationId,groq429OperationId:evidence.groq429OperationId,acknowledgePossibleGeminiUsage:usage.checked,acknowledgeDuplicateTranscriptionRisk:duplicate.checked,chooseGroqFree:true}});if(detailCurrent(job.id,detailRequest,target))form.replaceWith(el('p',{text:'승인 기록 저장됨. 새 무료 용량 확인 후 같은 MP3와 Groq 제공자를 선택해 재개하세요.'}));toast('Groq 무료 재개 승인 기록을 저장했습니다.');}catch(error){toast(safeError(error));submit.disabled=false;}};target.append(form);}catch(error){toast(safeError(error));recover.disabled=false;}};target.append(recover);}}for(const chunk of p.chunks.filter(c=>c.reviewedFreeRetryApproved)){target.append(el('p',{text:'조각 '+(chunk.index+1)+'의 Groq 무료 재개 승인됨 · 무료 잔여량은 별도로 확인해야 합니다.'}));if(!chunk.unknownCapacityProbeApproved)showUnknownGroqProbeChoice(job,chunk,target,detailRequest);else target.append(el('p',{text:'조직 잔여량 UNKNOWN 1회 탐침 승인됨 · 동일 MP3와 Groq를 직접 선택해 재개하세요.'}));}}target.scrollIntoView({behavior:'smooth'});}catch(e){if(detailCurrent(job.id,detailRequest,target)){toast(safeError(e));target.append(el('p',{text:'이력 상세 내용을 확인하지 못했습니다. 다시 열어 주세요.'}));}}};
   remove.onclick=async()=>{if(!confirm('이 분석 기록과 저장된 리포트를 삭제할까요?'))return;try{await api(`/api/jobs/${encodeURIComponent(job.id)}`,{method:'DELETE'});await loadLibrary();toast('이력에서 삭제했습니다.');}catch(e){toast(safeError(e));}};
-  const actionsForJob=[...(job.source_type==='url'&&job.status==='NATIVE_PENDING'&&job.nativePollReady===true?[['native-poll','Supadata 자막 처리 상태 조회 · API 요청']]:[]),['summary',job.source_type==='audio'?'기존 Gemini 무료 요약 생성':'요약 생성'],['audio-finish','전사 병합'],...(job.source_type==='audio'?[['audio-cleanup','임시 전사 조각 정리']]:[])];
+  if(job.source_type==='audio'||job.source_type==='url'&&(urlCaptionState(job)==='NO_CAPTIONS'||job.audit?.localAsrReceipt)){
+   const bridge=el('button',{className:'btn secondary small',text:'오디오 요청·외부 ASR 결과 연결'});
+   bridge.onclick=async()=>{if(bridge.disabled||state.view!=='library'||document.hidden)return;bridge.disabled=true;const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);try{const detail=await api('/api/jobs/'+encodeURIComponent(job.id));if(!detailCurrent(job.id,detailRequest,target))return;if(detail.job?.id!==job.id)throw Error('분석 대상이 바뀌었습니다.');const entry=showReport(detail.job,target,true);if(entry)await entry.open();}catch(error){if(detailCurrent(job.id,detailRequest,target))toast(safeError(error));}finally{bridge.disabled=false;}};actions.append(bridge);
+  }
+  const urlWithoutSource=job.source_type==='url'&&!job.report&&['NEED_UPLOAD','NATIVE_PENDING'].includes(job.status);
+  const actionsForJob=[
+   ...(job.source_type==='url'&&job.nativeAcquisitionReady===true?[['native','기존 자막 조회·요청 상태 확인']]:[]),
+   ...(job.source_type==='url'&&job.status==='NATIVE_PENDING'&&job.nativePollReady===true?[['native-poll','Supadata 자막 처리 상태 조회 · API 요청']]:[]),
+   ...(!urlWithoutSource?[['summary-approved','승인한 네 부분 형식으로 요약'],['summary',job.source_type==='audio'?'기존 Gemini 무료 요약 생성':'기존 형식 요약 재개']]:[]),
+   ...(job.source_type==='audio'?[['audio-finish','전사 병합'],['audio-cleanup','임시 전사 조각 정리']]:[])
+  ];
   for(const [action,label] of actionsForJob){
     const b=el('button',{className:'btn secondary small',text:label});
     b.onclick=async()=>{
-      b.disabled=true;let target,detailRequest;
+      if(b.disabled||state.view!=='library'||document.hidden)return;
+      b.disabled=true;const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);
+      target.hidden=false;empty(target);target.append(el('p',{text:'저장된 작업 상태 확인 중…'}));
       try{
         let body={};
         if(action==='native-poll'){
-          target=$('#library-detail');detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);target.append(el('p',{text:'Supadata 자막 대기 작업을 다시 확인 중…'}));
           const fresh=(await api('/api/jobs/'+encodeURIComponent(job.id))).job;
           if(!detailCurrent(job.id,detailRequest,target))return;
-          if(fresh?.source_type!=='url'||fresh.status!=='NATIVE_PENDING'||typeof fresh.audit?.providerJobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(fresh.audit.providerJobId))throw Error('Supadata 자막 대기 작업이 더 이상 없습니다. 이력을 새로고침하세요.');
-          if(!confirm('Supadata API에 실제 처리 상태를 조회합니다. 앱의 무료 할당 1회를 예약하며 제공자 요청이 발생할 수 있습니다. 계속할까요?')){target.append(el('p',{text:'Supadata 조회를 취소했습니다. 제공자 요청은 보내지 않았습니다.'}));return;}
-          if(!detailCurrent(job.id,detailRequest,target))return;
+          if(fresh?.id!==job.id||fresh.source_type!=='url'||fresh.status!=='NATIVE_PENDING'||typeof fresh.audit?.providerJobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(fresh.audit.providerJobId))throw Error('Supadata 자막 대기 작업이 더 이상 없습니다. 이력을 새로고침하세요.');
+          if(!confirm('Supadata API에 실제 처리 상태를 조회합니다. 최초 요청의 예약은 유지되며 추가 크레딧을 예약하지 않습니다. 새 음성 전사·요약을 시작하지 않습니다. 계속할까요?')){target.append(el('p',{text:'Supadata 조회를 취소했습니다. 제공자 요청은 보내지 않았습니다.'}));return;}
         }
-        if(action==='summary'){
-          const p=await api('/api/jobs/'+job.id+'/summary-plan');
-          if(p.firstPassUnits>250000){if(!confirm('첫 단계 예약 상한 '+p.firstPassUnits+' 단위, 최종 합성 비용은 미정입니다. 무료 할당을 단계별로 확인하며 계속할까요?'))return;body={allowStaged:true};}
+        if(action==='native'){
+          const fresh=(await api('/api/jobs/'+encodeURIComponent(job.id))).job;
+          if(!detailCurrent(job.id,detailRequest,target))return;
+          assertUrlJobBinding(fresh,{durationSeconds:job.duration_seconds,title:String(job.title??'')},{videoId:job.video_id,durationSeconds:job.duration_seconds},job.id);
+          const saved=await api('/api/jobs/'+encodeURIComponent(job.id)+'/source');
+          if(!detailCurrent(job.id,detailRequest,target))return;
+          const source=confirmedUrlSource(saved);
+          if(fresh.report||source?.segments?.length){showReport(fresh,target,true);target.append(el('p',{className:'tip',text:'저장된 원문 또는 보고서가 있어 기존 자막 요청을 다시 보내지 않았습니다. 이력을 새로고침해 저장된 결과를 확인하세요.'}));return;}
+          if(urlCaptionState(fresh)!=='NO_STORED_RESULT'){showReport(fresh,target,true);target.append(el('p',{className:'tip',text:urlPipelineNotice(fresh)||'기존 자막 요청 상태가 달라졌습니다. 새 요청을 보내지 않았습니다.'}));return;}
+          if(!confirm('이 URL 작업의 기존 자막 요청 상태를 서버에서 확인합니다. 미확정 요청이 있으면 재전송이 차단되며, 요청이 없을 때만 현재 무료 승인·용량 검사 후 Supadata 자막 조회를 시작합니다. 자막이 없어도 자동 음성 전사는 시작하지 않습니다. 계속할까요?')){target.append(el('p',{text:'기존 자막 조회를 취소했습니다. 제공자 요청은 보내지 않았습니다.'}));return;}
+        }
+        if(action==='summary'||action==='summary-approved'){
+          const approved=action==='summary-approved';
+          body=approved?{formatProfile:'approved-four-part-v1'}:{};
+          const p=await api('/api/jobs/'+job.id+'/summary-plan'+(approved?'?formatProfile=approved-four-part-v1':''));
+          if(!detailCurrent(job.id,detailRequest,target))return;
+          if(approved&&p.formatProfile!=='approved-four-part-v1')throw Error('요약 계획의 형식이 선택한 형식과 다릅니다. 실행하지 않았습니다.');
+          if(p.firstPassUnits>250000){if(!confirm('첫 단계 예약 상한 '+p.firstPassUnits+' 단위, 최종 합성 비용은 미정입니다. 무료 할당을 단계별로 확인하며 계속할까요?')){target.append(el('p',{text:'요약 실행을 취소했습니다. 제공자 요청은 보내지 않았습니다.'}));return;}body={...body,allowStaged:true};}
         }
         if(action==='audio-cleanup'){
           if(!confirm('저장된 TXT 전사를 확인한 뒤 서비스의 임시 조각 전사 기록만 정리할까요? PC와 Library 원본은 유지됩니다.'))return;
           body={confirmTemporaryTranscriptCleanup:true};
         }
-        if(action!=='native-poll'){target=$('#library-detail');detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);target.append(el('p',{text:'저장된 작업 상태 확인 중…'}));}
-        const d=await api('/api/jobs/'+job.id+'/'+action,{method:'POST',body});
+        if(!detailCurrent(job.id,detailRequest,target)||document.hidden)return;
+        const d=await api('/api/jobs/'+job.id+'/'+(action==='summary-approved'?'summary':action),{method:'POST',body});
         if(!detailCurrent(job.id,detailRequest,target))return;
-        showReport(d.job,target,true);
-        if(d.pending)toast('요약 단계 저장됨. 약 '+d.minimumWaitSeconds+'초 뒤 다시 누르세요.');
+        if(d.job?.id!==job.id)throw Error('응답의 분석 대상이 현재 작업과 다릅니다. 이력을 다시 확인하세요.');
+        showReport(d.job,target,d.persisted===true);
+        if(d.formatMismatch){target.append(el('p',{className:'tip',text:'기존 저장 보고서를 보존해 열었습니다. 승인한 네 부분 형식으로 새로 생성하거나 기존 내용을 덮어쓰지 않았습니다.'}));return;}
+        if(action==='summary-approved'&&!d.pending){
+          if(approvedSummaryResultIssue(d,job.id)){target.append(el('p',{className:'tip',text:'요약의 저장·승인 형식·현재 전사 연결을 모두 확인하지 못했습니다. 새 형식 요약 완료로 판정하지 않습니다. 저장된 응답과 이력을 확인하세요.'}));return;}
+          toast(d.cached?'저장된 승인 형식 요약을 열었습니다.':'승인 형식 요약 저장과 현재 전사 연결을 확인했습니다.');
+        }
+        if(d.pending){if(action==='summary-approved'&&(d.persisted!==true||d.formatProfile!=='approved-four-part-v1')){target.append(el('p',{text:'저장된 중간 단계의 형식을 확인하지 못했습니다. 자동 재전송하지 않습니다.'}));return;}toast('요약 단계 저장됨. 약 '+d.minimumWaitSeconds+'초 뒤 다시 누르세요.');}
         else if(action==='audio-cleanup')toast(d.alreadyCleaned?'이미 정리됐습니다.':'임시 조각 전사 기록을 정리했습니다.');
-      }catch(e){toast(safeError(e));if(target&&detailCurrent(job.id,detailRequest,target))target.append(el('p',{text:'작업 결과를 확인하지 못했습니다. 이력에서 다시 확인하세요.'}));}
+      }catch(e){if(detailCurrent(job.id,detailRequest,target)){toast(safeError(e));target.append(el('p',{text:'작업 결과를 확인하지 못했습니다. 이력에서 다시 확인하세요.'}));}}
       finally{b.disabled=false;}
     };
     actions.append(b);
@@ -957,7 +1140,7 @@ function libraryCard(job){
     target.hidden=false;empty(target);target.append(el('p',{text:'새 작업 ID '+created.jobId+'. 기존 사용량은 옮기지 않았습니다. 각 제공자 호출은 별도 승인 후 실행됩니다.'}));showFullCoverageChoice(freshJob,target,detailRequest);
    }catch(error){toast(safeError(error));}finally{fresh.disabled=false;}};actions.append(fresh);
   }
-  if(job.source_type==='text'&&job.freshTranscriptJob===true&&!job.report){const whole=el('button',{className:'btn secondary small',text:'새 전사 기반 전체 요약 이어가기'});whole.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showFullCoverageChoice(job,target,detailRequest);};actions.append(whole);}  if(job.source_type==='audio'&&!job.report){const free=el('button',{className:'btn secondary small',text:'Groq Free 요약 승인·실행'});free.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqSummaryChoice(job,target,detailRequest);};actions.append(free);const pilot=el('button',{className:'btn secondary small',text:'실패한 첫 요약 1회 복구 검토'});pilot.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqPilotChoice(job,target,detailRequest);};actions.append(pilot);const correction=el('button',{className:'btn secondary small',text:'raw:8 무료 1회 교정 검토'});correction.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCorrectionChoice(job,target,detailRequest);};actions.append(correction);const gap=el('button',{className:'btn secondary small',text:'raw:8 보류 · 독립 구간 무료 진행 검토'});gap.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqGapChoice(job,target,detailRequest);};actions.append(gap);const recovered=el('button',{className:'btn secondary small',text:'Groq Free 첫 구간 저장 보고서 무호출 복구 검토'});recovered.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCheckpointRecoveryChoice(job,target,detailRequest);};actions.append(recovered);const bundle=el('button',{className:'btn secondary small',text:'구간별 요약 묶음 보기'});bundle.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqBundleChoice(job,target,detailRequest);};actions.append(bundle);const choice=el('button',{className:'btn secondary small',text:'전체 요약 선택·유료 견적'});choice.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showSummaryChoice(job,target,detailRequest);};actions.append(choice);}actions.append(open,remove);card.append(actions);return card;
+  if(job.source_type==='text'&&job.freshTranscriptJob===true&&!job.report){const whole=el('button',{className:'btn secondary small',text:'새 전사 기반 전체 요약 이어가기'});whole.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showFullCoverageChoice(job,target,detailRequest);};actions.append(whole);}  if(job.source_type==='audio'&&!job.report){const free=el('button',{className:'btn secondary small',text:'Groq Free 요약 승인·실행'});free.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqSummaryChoice(job,target,detailRequest);};actions.append(free);const pilot=el('button',{className:'btn secondary small',text:'실패한 첫 요약 1회 복구 검토'});pilot.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqPilotChoice(job,target,detailRequest);};actions.append(pilot);const correction=el('button',{className:'btn secondary small',text:'대상 구간 무료 1회 교정 검토'});correction.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCorrectionChoice(job,target,detailRequest);};actions.append(correction);const gap=el('button',{className:'btn secondary small',text:'대상 구간 보류 · 독립 구간 무료 진행 검토'});gap.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqGapChoice(job,target,detailRequest);};actions.append(gap);const recovered=el('button',{className:'btn secondary small',text:'Groq Free 첫 구간 저장 보고서 무호출 복구 검토'});recovered.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqCheckpointRecoveryChoice(job,target,detailRequest);};actions.append(recovered);const bundle=el('button',{className:'btn secondary small',text:'구간별 요약 묶음 보기'});bundle.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showGroqBundleChoice(job,target,detailRequest);};actions.append(bundle);const choice=el('button',{className:'btn secondary small',text:'전체 요약 선택·유료 견적'});choice.onclick=()=>{const target=$('#library-detail'),detailRequest=libraryDetailRequest=beginLibraryDetailAction(target,job.id);target.hidden=false;empty(target);showSummaryChoice(job,target,detailRequest);};actions.append(choice);}actions.append(open,remove);card.append(actions);return card;
 }
 function showFullCoverageChoice(job,target,requestId){
  const path='/api/jobs/'+job.id+'/groq-full-coverage',current=()=>detailCurrent(job.id,requestId,target),host=el('section'),detail=el('p',{className:'tip'}),buttons=el('div',{className:'library-actions'});
@@ -975,7 +1158,7 @@ function showFullCoverageChoice(job,target,requestId){
    if(state.stageState!=='PENDING'&&!blockedBeforeDispatch)return;
    if(state.approvalState!=='APPROVED'||Date.parse(state.approvalExpiresAt)<=Date.now()||blockedBeforeDispatch&&!state.blockedReopenReady){
    const approve=el('button',{className:'btn secondary small',text:state.freshTranscriptJob?'새 전사 요약의 Free 호출 승인':'기존 실패 기록을 보존한 새 Free 호출 승인'});
-   approve.onclick=async()=>{const notice=state.freshTranscriptJob?'이것은 별도 새 요약 작업입니다. 과거 작업과 사용량은 보존되고 요약 토큰은 중복될 수 있습니다. 원음 재전사는 하지 않습니다.':'기존 raw:8 불확실 호출과 사용량을 그대로 보존하고 새 요청을 별도로 승인합니다.';if(!confirm(notice+' Free 조직·결제 차단 증거와 계정 잔여량은 별도로 확인하세요. 최대 5개 단계만 승인할까요?'))return;approve.disabled=true;try{await api(path,{method:'POST',body:{step:'approve',planSha256:state.planSha256,maxRequests:Math.min(5,state.remainingNewRequests),confirmFreePlanAndBillingDisabled:true,acknowledgeAccountRemainingUnknown:true,acknowledgeNewCallForUncertainRaw8:!state.freshTranscriptJob,acknowledgeDuplicateSummaryTokens:state.freshTranscriptJob,noPaidFallback:true,noAutoRetry:true}});await refresh();}catch(e){toast(safeError(e));await refresh().catch(()=>{});}};buttons.append(approve);return;
+   approve.onclick=async()=>{const notice=state.freshTranscriptJob?'이것은 별도 새 요약 작업입니다. 과거 작업과 사용량은 보존되고 요약 토큰은 중복될 수 있습니다. 원음 재전사는 하지 않습니다.':'기존 대상 구간 불확실 호출과 사용량을 그대로 보존하고 새 요청을 별도로 승인합니다.';if(!confirm(notice+' Free 조직·결제 차단 증거와 계정 잔여량은 별도로 확인하세요. 최대 5개 단계만 승인할까요?'))return;approve.disabled=true;try{await api(path,{method:'POST',body:{step:'approve',planSha256:state.planSha256,maxRequests:Math.min(5,state.remainingNewRequests),confirmFreePlanAndBillingDisabled:true,acknowledgeAccountRemainingUnknown:true,acknowledgeNewCallForUncertainRaw8:!state.freshTranscriptJob,acknowledgeDuplicateSummaryTokens:state.freshTranscriptJob,noPaidFallback:true,noAutoRetry:true}});await refresh();}catch(e){toast(safeError(e));await refresh().catch(()=>{});}};buttons.append(approve);return;
   }
   if(blockedBeforeDispatch){const reopen=el('button',{className:'btn secondary small',text:'호출 전 차단 기록 후 재개 (provider 0)'});reopen.onclick=async()=>{if(!confirm('이 단계가 provider 호출 전에 차단되었고 새 승인이 있음을 확인했습니다. 차단 기록을 보존하고 다시 대기 상태로 전환할까요? 이 동작은 provider를 호출하지 않습니다.'))return;reopen.disabled=true;try{await api(path,{method:'POST',body:{step:'reopen-blocked',planSha256:state.planSha256,expectedStage:state.nextStage,confirmNoProviderCall:true}});await refresh();}catch(e){toast(safeError(e));await refresh().catch(()=>{});}};buttons.append(reopen);return;}
   const run=el('button',{className:'btn secondary small',text:'다음 단계 1회 실행'});run.disabled=state.admission?.allowed!==true;
@@ -1052,6 +1235,7 @@ function init(){
   $('#quota-form').onsubmit=async ev=>{ev.preventDefault();try{await api('/api/live/quota',{method:'PUT',body:{provider:$('#quota-provider').value,allowance:Number($('#quota-allowance').value),requestLimit:Number($('#quota-requests').value),billingDisabled:$('#quota-confirm').checked,freeOnly:$('#quota-confirm').checked}});await loadQuota();toast('본인 확인 기반 무료 할당을 저장했습니다.');}catch(e){toast(safeError(e));}};
   $('#capacity-form').onsubmit=async ev=>{ev.preventDefault();try{await api('/api/live/capacity',{method:'PUT',body:capacityPayload()});await loadCapacity();toast('공급자 잔여량 관측을 저장했습니다. 60초 뒤 다시 확인해야 합니다.');}catch(e){toast(safeError(e));}};
   $('#analyze-form').addEventListener('submit',handleAnalyze);
+  initLocalAsrInputs();
   $('#new-url-audio-job').onclick=startNewUrlAudioSubmission;
   $('#library-search').addEventListener('input',()=>{clearTimeout(init.searchTimer);init.searchTimer=setTimeout(()=>{state.page=0;loadLibrary().catch(e=>toast(safeError(e)));},320);});
   $('#reload-library').onclick=()=>loadLibrary().catch(e=>toast(safeError(e)));

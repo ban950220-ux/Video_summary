@@ -92,8 +92,18 @@ export async function runAudioChunks({chunks,getProgress,getCapacity,getQuota,ch
  }
  const progress=await getProgress();return {complete:progress.complete===true,reason:progress.complete?'COMPLETE':'COVERAGE_UNVERIFIED'};
 }
-export async function runSummaryStages({getProgress,getCapacity,getQuota,sendSummary,wait,now=Date.now,foreground=()=>true,onUpdate=()=>{}}){
+// Opt-in exact completion context keeps legacy runners compatible while the new
+// four-part flow requires a persisted, source-bound server projection.
+function summaryResultIssue(result,context){
+ if(result?.formatMismatch===true)return 'SUMMARY_FORMAT_MISMATCH';
+ if(!context)return result?.job?.report?.kind==='GEMINI_EVIDENCE_LINKED'?null:'SUMMARY_RESULT_UNVERIFIED';
+ const profile=context.formatProfile,job=result?.job,report=job?.report,approved=report?.approvedSummary,view=job?.approvedSummaryView;
+ const profileMatches=result?.cached===true?result.requestedFormatProfile===profile&&result.storedFormatProfile===profile:result?.formatProfile===profile;
+ return profile==='approved-four-part-v1'&&typeof context.jobId==='string'&&job?.id===context.jobId&&result.persisted===true&&profileMatches&&report?.kind==='GEMINI_EVIDENCE_LINKED'&&approved?.formatVersion===profile&&approved.structuralValidation==='REFERENCES_QUOTES_LINKS_ONLY'&&approved.semanticReview==='NOT_PERFORMED'&&approved.sourceBinding?.kind==='EXACT_TRANSCRIPT_SEGMENTS_V1'&&/^[a-f0-9]{64}$/.test(approved.sourceBinding.segmentsSha256??'')&&view?.formatVersion===profile&&view.origin==='APPROVED_STRUCTURED'&&view.sourceStatus==='MATCHED'&&view.semanticReview==='NOT_PERFORMED'&&Array.isArray(view.sources)&&view.sources.length>0?null:'SUMMARY_RESULT_UNVERIFIED';
+}
+export async function runSummaryStages({getProgress,getCapacity,getQuota,sendSummary,wait,completionContext=null,now=Date.now,foreground=()=>true,onUpdate=()=>{}}){
  for(let stage=0;stage<160;stage++){
+  if(!foreground())return {complete:false,reason:'FOREGROUND_REQUIRED'};
   const [progress,capacity,quota]=await Promise.all([getProgress(),getCapacity(),getQuota()]);const at=now();
   if(!capacityReady('gemini',0,capacity.snapshots,quota.grants,at))return {complete:false,reason:'GEMINI_SUMMARY_CAPACITY_REOBSERVATION_REQUIRED'};
   if(progress.operationInFlight?.gemini)return {complete:false,reason:'GEMINI_OPERATION_IN_FLIGHT_REVIEW_REQUIRED'};
@@ -108,7 +118,8 @@ export async function runSummaryStages({getProgress,getCapacity,getQuota,sendSum
    if(error?.code==='RATE_LIMIT_PENDING'){const refreshed=await getProgress();if(Number.isFinite(refreshed.nextEligibleAt?.gemini)&&refreshed.nextEligibleAt.gemini>now()){stage--;continue;}return {complete:false,reason:'GEMINI_SUMMARY_RATE_LIMIT_REVIEW_REQUIRED'};}
    return {complete:false,reason:error?.code||'SUMMARY_OUTCOME_UNKNOWN_REVIEW_REQUIRED'};
   }
-  if(!result?.pending)return result?.job?.report?.kind==='GEMINI_EVIDENCE_LINKED'?{complete:true,result}:{complete:false,reason:'SUMMARY_RESULT_UNVERIFIED'};
+  if(!result?.pending){const reason=summaryResultIssue(result,completionContext);return reason?{complete:false,reason,result}:{complete:true,result};}
+  if(completionContext&&(result.persisted!==true||result.job?.id!==completionContext.jobId||result.formatProfile!==completionContext.formatProfile))return {complete:false,reason:'SUMMARY_PENDING_CONTEXT_UNVERIFIED',result};
   onUpdate({stage,stageComplete:true});
  }
  return {complete:false,reason:'SUMMARY_STAGE_LIMIT_REACHED'};

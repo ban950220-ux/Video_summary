@@ -1,5 +1,8 @@
 // Reviewed Git blob bytes and their exact CRLF checkout representation.
-// Both hashes are fixed from PR29; runtime does NOT normalize arbitrary SQL.
+// The original fourteen files retain their PR29 provenance. The additional
+// 0021 bytes come from the reviewed PR41 pending file named below.
+// This activation is a local review candidate, not a production migration.
+// Runtime does NOT normalize arbitrary SQL.
 // No Git/network at runtime.
 // A new migration source needs a separately reviewed catalog change.
 import {readFileSync,readdirSync} from 'node:fs';
@@ -9,6 +12,15 @@ const reviewed={
   "kind": "REVIEWED_MIGRATION_SOURCE_V1",
   "sourceCommit": "043ba56ee716f044698a6de66f079a7c7bae8753",
   "sourceTree": "4e5eeda2d4781719af3e543d5eeaef62de342df0",
+  "fileCount": 15,
+  "additionalSources": [
+    {
+      "name": "0021_manual_summary_imports.sql",
+      "sourceCommit": "7af1e3aff1831faad37edc640242e387cf8e7bce",
+      "sourceTree": "d8cfae56d7fea4f048abf80c2dfca9c421934227",
+      "sourcePath": "migrations/pending/0021_manual_summary_imports.sql"
+    }
+  ],
   "files": [
     {
       "name": "0002_live.sql",
@@ -79,12 +91,18 @@ const reviewed={
       "name": "0020_local_runner_blocked_resume.sql",
       "sha256": "c26d29418a85121b7a0a770d2261a0f57a98eb342a0fa450066a360a312783ff",
       "crlfSha256": "a1e0b09aa47852196147e1173b6971a4af7b9324e2454be9c155070cacbf7b24"
+    },
+    {
+      "name": "0021_manual_summary_imports.sql",
+      "sha256": "04de16a15c295e1d1c172dcc799dc15d293b8721b5db58f9dae0d94ed9f21e01",
+      "crlfSha256": "c76eab87d0dcbf5ada0ed4597b1ab79b5ca3836f7f43d26bcc91d0b2e6621377"
     }
   ]
 };
 const directory=resolve(import.meta.dirname,'../migrations');
 export function reviewedMigrationSource(){return structuredClone(reviewed);}
 export function matchesReviewedMigrationSource(observed){
+ if(reviewed.files.length!==reviewed.fileCount)return false;
  if(JSON.stringify(observed)!==JSON.stringify(reviewed))return false;
  try{
   const files=readdirSync(directory,{withFileTypes:true}).filter(file=>file.name.endsWith('.sql')).sort((a,b)=>a.name.localeCompare(b.name));

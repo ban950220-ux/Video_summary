@@ -6,7 +6,7 @@ import {runNativeCaption,runNativePoll,runTranscriptSummary,runOwnedAudioTranscr
 import {normalizeSegments,auditGaps,validateAnalysis,reportPrompt,markdownReport} from './report.mjs';
 import {scanMp3,prepareMp3Chunk,mergeAudioSegments,boundaryMarkersFromRetained} from './audio.mjs';
 import {recordCapacity,reserveObservedCapacity,capacityBounds,persistWait,ensureCapacitySchema,capacityIdentityMatches,capacityIdentity} from './observed-capacity.mjs';
-import {partitionTranscript,partitionSynthesis,synthesisPrompt,summaryUnits,evidenceIds,assertGroupCoverage} from './summary-plan.mjs';
+import {partitionTranscript,partitionSynthesis,synthesisPrompt,summaryUnits,evidenceIds,assertGroupCoverage,summaryFormatOptions,summaryFingerprint,APPROVED_FORMAT_PROFILE,LEGACY_FORMAT_PROFILE} from './summary-plan.mjs';
 import {groqD1Budget} from './groq-d1-budget.mjs';
 import {handleGroqSummaryAction,prepareGroqSettlementsForDeletion,persistGroqSettlementsForDeletion,completeSource,validatedRecoveredFirstCheckpoint,partitionGroqTranscript,promptAudit,GROQ_SUMMARY_INPUT_BOUND,GROQ_SUMMARY_COMPLETION_CAP,GROQ_SUMMARY_MODEL} from './groq-summary.mjs';
 import {handleFullCoverageAction} from './groq-full-coverage-live.mjs';
@@ -15,6 +15,7 @@ import {handleFreshFullCoverage} from './groq-full-coverage-fresh.mjs';
 import {handlePaidSummaryAction} from './paid-summary.mjs';
 import {handleGeminiTwoPassAction,geminiQuoteAvailability} from './gemini-two-pass.mjs';
 import {PAID_SUMMARY_CATALOG,paidExecutionEnabled,fullSummaryRequest,paidRequestCostPreview} from './paid-summary-contract.mjs';
+import {projectApprovedSummary} from './approved-summary-format.mjs';
 const liveTables=['yta_sources','yta_quota','yta_operations','yta_audio'];
 export async function ensureLiveSchema(env){
  if(!env.DB)throw new ProviderError('DB_REQUIRED','D1 연결 필요');
@@ -395,6 +396,10 @@ export async function routeLive(request,env){
   if(runnerTables.some(row=>row.name==='yta_local_runner_audio_attempts'))scrubRunner.push(env.DB.prepare("UPDATE yta_local_runner_audio_attempts SET evidence_json=NULL WHERE job_id=? AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting'));
   if(runnerTables.some(row=>row.name==='yta_local_runner_audio_resumes'))scrubRunner.push(env.DB.prepare("UPDATE yta_local_runner_audio_resumes SET approval_json='{}',state='USED' WHERE job_id=? AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting'));
   if(scrubRunner.length)await env.DB.batch(scrubRunner);
+  // The existing explicit analysis-delete action also removes its separate
+  // imported attachments. The tombstone above blocks late import commits.
+  const importTables=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('yta_summary_imports','yta_summary_import_requests')").bind().all()).results||[];
+  for(const table of ['yta_summary_import_requests','yta_summary_imports'])if(importTables.some(row=>row.name===table))await env.DB.prepare('DELETE FROM '+table+" WHERE job_id=? AND owner_id='owner' AND EXISTS(SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(id,id+':deleting').run();
   const receiptTable=await env.DB.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='yta_paid_summary_receipts'").bind().first();
   if(receiptTable)await env.DB.prepare("UPDATE yta_paid_summary_receipts SET response_json=NULL,response_sha256=NULL,response_complete=0,state='SOURCE_DELETED',error_code='PAID_SOURCE_DELETED',updated_at=? WHERE job_id=? AND owner_id='owner'").bind(new Date().toISOString(),id).run();
   try{await persistGroqSettlementsForDeletion(env,id,job,settlements);}catch{} // A failed accounting seal must not retain private source content.
@@ -446,8 +451,8 @@ export async function routeLive(request,env){
   if(action==='native'&&request.method==='POST'){
    await admitNativeTranscript(env,job);
    const response=await execute(env,{id:id+':native',job:id,provider:'supadata',units:1},active=>runNativeCaption({env:active,url:job.source_url}));
-   if(response.status!=='TRANSCRIPT_AVAILABLE'||!response.segments.length){await commitNativeTranscript(env,job,response.status==='PENDING'?'NATIVE_PENDING':'NEED_UPLOAD',{...job.audit,status:response.status,reason:'기존 자막을 확보하지 못했습니다. 사용자가 보유한 음성/스크립트를 사용하세요.',providerJobId:response.jobId||null});return json({job:await ownedJob(env,id),persisted:true},202);}
-   return json(await storeTranscriptResult(env,job,response.segments,'SUPADATA_NATIVE', {providerCompleteness:'NOT_INDEPENDENTLY_VERIFIED'}));
+   if(response.status!=='TRANSCRIPT_AVAILABLE'||!response.segments.length){const pending=response.status==='PENDING';await commitNativeTranscript(env,job,pending?'NATIVE_PENDING':'NEED_UPLOAD',{...job.audit,status:response.status,nativeAcquisition:pending?'PENDING':'NO_CAPTIONS',automaticAudioAcquisition:'NOT_CONNECTED',reason:pending?'기존 자막 제공자의 처리가 대기 중입니다. 같은 작업의 처리 상태를 명시적으로 조회하세요. 자동 음성 전사는 시작하지 않았습니다.':'기존 자막을 확보하지 못했습니다. 자동 음성 취득 워커는 연결되지 않았으며 ASR 작업을 만들지 않았습니다. 적법하게 보유한 음성이나 자막을 별도로 사용할 수 있습니다.',providerJobId:pending?response.jobId||null:null});return json({job:await ownedJob(env,id),persisted:true},202);}
+   return json(await storeTranscriptResult(env,job,response.segments,'SUPADATA_NATIVE', {providerCompleteness:'NOT_INDEPENDENTLY_VERIFIED',nativeAcquisition:'CAPTIONS_STORED',automaticAudioAcquisition:'NOT_CONNECTED'}));
   }
   if(action==='native-poll'&&request.method==='POST'){
    if(job.source_type!=='url'||job.status!=='NATIVE_PENDING'||typeof job.audit?.providerJobId!=='string'||!/^[a-zA-Z0-9-]{1,100}$/.test(job.audit.providerJobId))throw new InputError('조회할 Supadata 자막 대기 작업이 없습니다.');
@@ -455,64 +460,87 @@ export async function routeLive(request,env){
    const active=await grantEnv(env,'supadata');
    // Provider job-status polling is free; the initial request already reserved its credit.
    const result=await runNativePoll({env:active,jobId:job.audit.providerJobId});
-   if(result.status==='TRANSCRIPT_AVAILABLE')return json(await storeTranscriptResult(env,job,result.segments,'SUPADATA_NATIVE',{providerCompleteness:'NOT_INDEPENDENTLY_VERIFIED'}));
-   if(result.status==='NO_CAPTIONS')await commitNativeTranscript(env,job,'NEED_UPLOAD',{...job.audit,status:'NO_CAPTIONS'});
+   if(result.status==='TRANSCRIPT_AVAILABLE')return json(await storeTranscriptResult(env,job,result.segments,'SUPADATA_NATIVE',{providerCompleteness:'NOT_INDEPENDENTLY_VERIFIED',nativeAcquisition:'CAPTIONS_STORED',automaticAudioAcquisition:'NOT_CONNECTED'}));
+   if(result.status==='NO_CAPTIONS')await commitNativeTranscript(env,job,'NEED_UPLOAD',{...job.audit,status:'NO_CAPTIONS',nativeAcquisition:'NO_CAPTIONS',automaticAudioAcquisition:'NOT_CONNECTED',providerJobId:null,reason:'기존 자막을 확보하지 못했습니다. 자동 음성 취득 워커는 연결되지 않았으며 ASR 작업을 만들지 않았습니다. 적법하게 보유한 음성이나 자막을 별도로 사용할 수 있습니다.'});
    return json({job:await ownedJob(env,id),persisted:true},202);
   }
   if(action==='summary-plan'&&request.method==='GET'){
    const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
-   const groups=partitionTranscript(source.segments,job.audit);
-   return json({stages:groups.length,firstPassUnits:groups.reduce((sum,group)=>sum+summaryUnits(reportPrompt(group,job.audit)),0),additionalSynthesisUnits:'UNKNOWN_UNTIL_STAGE_OUTPUT',segmentCount:source.segments.length,completeSourceRequired:true});
+   const options=summaryFormatOptions(url.searchParams.get('formatProfile')),groups=partitionTranscript(source.segments,job.audit,options);
+   return json({formatProfile:options.formatProfile??LEGACY_FORMAT_PROFILE,stages:groups.length,firstPassUnits:groups.reduce((sum,group)=>sum+summaryUnits(reportPrompt(group,job.audit,options)),0),additionalSynthesisUnits:'UNKNOWN_UNTIL_STAGE_OUTPUT',segmentCount:source.segments.length,completeSourceRequired:true});
   }
   if(action==='summary-review'&&request.method==='GET'){
-   const operations=(await env.DB.prepare("SELECT id,error_code,result_json FROM yta_operations WHERE job_id=? AND provider='gemini' AND state='FAILED_UNCERTAIN' AND id LIKE ? ORDER BY created_at DESC").bind(id,id+':summary:%').all()).results||[];
+   const operations=(await env.DB.prepare(`SELECT id,error_code,result_json FROM yta_operations WHERE job_id=? AND provider='gemini' AND state='FAILED_UNCERTAIN' AND id LIKE ? AND ${operationContentScope} ORDER BY created_at DESC`).bind(id,id+':summary:%').all()).results||[];
    const reviewed=operations.find(row=>{try{return typeof JSON.parse(row.result_json)?.partialText==='string';}catch{return false;}});
-   if(!reviewed)throw new ProviderError('SUMMARY_REVIEW_NOT_FOUND','보존된 요약 부분 출력이 없습니다.');
-   return json({operationId:reviewed.id,errorCode:reviewed.error_code,...JSON.parse(reviewed.result_json),state:'FAILED_UNCERTAIN'});
+   if(reviewed){const saved=JSON.parse(reviewed.result_json);return json({operationId:reviewed.id,errorCode:reviewed.error_code,provider:'gemini',partialText:saved.partialText,finishReason:typeof saved.finishReason==='string'&&saved.finishReason.length<=100?saved.finishReason:null,state:'FAILED_UNCERTAIN',reviewKind:'PARTIAL_PROVIDER_RESPONSE',responseComplete:false,reportValidation:'NOT_ASSERTED',providerCalls:0});}
+   // A complete provider response may have failed report validation. Read the
+   // preserved text without changing its DONE receipt or calling the provider.
+   // A completed raw stage can also be returned: this view makes no validation
+   // or final-report claim about that response.
+   const complete=await env.DB.prepare(`SELECT id,error_code,result_json FROM yta_operations WHERE job_id=? AND provider='gemini' AND state='DONE' AND id LIKE ? AND ${operationContentScope} ORDER BY created_at DESC LIMIT 1`).bind(id,id+':summary:%').first();
+   let stored;try{stored=JSON.parse(complete?.result_json||'null');}catch{}
+   if(typeof stored?.text!=='string'||!stored.text)throw new ProviderError('SUMMARY_REVIEW_NOT_FOUND','보존된 요약 응답이 없습니다.');
+   return json({operationId:complete.id,errorCode:complete.error_code,state:'DONE',reviewKind:'STORED_COMPLETE_RESPONSE',partialText:stored.text,responseComplete:true,reportValidation:'NOT_ASSERTED',currentJobHasSavedReport:Boolean(job.report&&job.report.kind!=='EXTRACTIVE_ONLY_NOT_AI'),providerCalls:0,warning:'보관된 제공자 응답입니다. 구간별 중간 응답이거나 보고서 형식 검증에 실패한 응답일 수 있습니다. 저장된 최종 요약 또는 의미 검증 완료를 뜻하지 않으며 재생성하지 않았습니다.'});
   }
   if(action==='summary'&&request.method==='POST'){
    const source=await sourceOf(env,id);if(!source?.segments.length)throw new InputError('전사 원문부터 확보하세요.');
-   if(job.report?.kind==='GEMINI_EVIDENCE_LINKED')return json({job,persisted:true,cached:true});
+   const payload=request.body===null?{}:await readJson(request);
+   if(!payload||typeof payload!=='object'||Array.isArray(payload))throw new InputError('요약 요청 객체가 필요합니다.');
+   const options=summaryFormatOptions(payload.formatProfile),approvedFormat=options.formatProfile===APPROVED_FORMAT_PROFILE;
+   if(job.report?.kind==='GEMINI_EVIDENCE_LINKED'){
+    const requestedFormatProfile=options.formatProfile??LEGACY_FORMAT_PROFILE,storedFormatProfile=job.report.approvedSummary?.formatVersion===APPROVED_FORMAT_PROFILE?APPROVED_FORMAT_PROFILE:LEGACY_FORMAT_PROFILE;
+    return json({job:projectApprovedSummary(job,source),persisted:true,cached:true,requestedFormatProfile,storedFormatProfile,formatMismatch:requestedFormatProfile!==storedFormatProfile});
+   }
    if(job.report&&job.report.kind!=='EXTRACTIVE_ONLY_NOT_AI')throw new ProviderError('SUMMARY_ALREADY_EXISTS','The saved summary is preserved. Start a separate summary job explicitly.');
+   const fingerprint=await summaryFingerprint(source.segments,job.audit,options);
+   const operationPrefix=id+':summary:'+(approvedFormat?APPROVED_FORMAT_PROFILE+':':'')+fingerprint+':';
+   // A different format is a different request contract. Preserve earlier
+   // checkpoints and usage; never silently start a second contract on that job.
+   // Exact prefixes avoid Workerd D1's bounded LIKE-pattern length and wildcard semantics.
+   const conflictingSummary=approvedFormat
+    ?"SELECT 1 FROM yta_operations WHERE job_id=? AND provider='gemini' AND instr(id,?)=1 AND instr(id,?)!=1 LIMIT 1"
+    :"SELECT 1 FROM yta_operations WHERE job_id=? AND provider='gemini' AND instr(id,?)=1 LIMIT 1";
+   const conflictingArgs=approvedFormat?[id,id+':summary:',operationPrefix]:[id,id+':summary:'+APPROVED_FORMAT_PROFILE+':'];
+   if(await env.DB.prepare(conflictingSummary).bind(...conflictingArgs).first())throw new ProviderError('SUMMARY_FORMAT_CHANGE_REQUIRES_NEW_ATTEMPT','기존 요약 단계와 사용량을 보존했습니다. 형식을 바꾸려면 별도 분석에서 원문과 요청 범위를 검토하세요.');
    const auditJson=JSON.stringify(job.audit),summarySourceChanged=()=>{const error=new ProviderError('SUMMARY_INPUT_CHANGED','요약 원본·경계 검토 정보 또는 무료 허가가 변경됐습니다. 새로 검토하세요.');error.preDispatchBlocked=true;throw error;};
    const assertSummarySource=async(operationId,requireClaimed,active)=>{
     const admission=requireClaimed?" AND EXISTS (SELECT 1 FROM yta_quota q JOIN yta_capacity c ON c.provider=q.provider WHERE q.provider='gemini' AND q.billing_disabled=1 AND q.confirmed_at=? AND q.expires_at=? AND q.expires_at>? AND c.model='gemini-2.5-flash' AND c.billing_disabled=1 AND c.version=? AND c.valid_until=? AND c.valid_until>? AND c.source=? AND NOT EXISTS (SELECT 1 FROM provider_credentials p WHERE p.owner_id='owner' AND p.provider='gemini' AND (COALESCE(p.updated_at=strftime('%Y-%m-%dT%H:%M:%fZ',p.updated_at),0)=0 OR p.updated_at>strftime('%Y-%m-%dT%H:%M:%fZ',q.confirmed_at/1000.0,'unixepoch'))))":"";
     const admissionArgs=requireClaimed?[active.quotaConfirmedAt,active.quotaExpiresAt,Date.now(),active.capacityVersion,active.capacityValidUntil,Date.now(),'AI_STUDIO_LIVE:'+await capacityIdentity(env,'gemini')]:[];
-    const row=await env.DB.prepare("SELECT 1 AS ok FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=? AND j.owner_id='owner' AND j.audit_json=? AND j.report_json=? AND s.raw=? AND s.segments_json=? AND NOT EXISTS (SELECT 1 FROM yta_operations d WHERE d.id=? AND d.provider='deletion' AND d.state='DELETING') AND EXISTS (SELECT 1 FROM yta_operations o WHERE o.id=? AND o.job_id=j.id AND o.provider='gemini' AND o.state=?)"+admission).bind(id,auditJson,job.report_json,source.raw,source.segments_json,id+':deleting',operationId,requireClaimed?'CLAIMED':'DONE',...admissionArgs).first();
+    const row=await env.DB.prepare("SELECT 1 AS ok FROM jobs j JOIN yta_sources s ON s.job_id=j.id WHERE j.id=? AND j.owner_id='owner' AND j.audit_json=? AND j.report_json IS ? AND s.raw=? AND s.segments_json=? AND NOT EXISTS (SELECT 1 FROM yta_operations d WHERE d.id=? AND d.provider='deletion' AND d.state='DELETING') AND EXISTS (SELECT 1 FROM yta_operations o WHERE o.id=? AND o.job_id=j.id AND o.provider='gemini' AND o.state=?)"+admission+' AND NOT EXISTS ('+conflictingSummary+')').bind(id,auditJson,job.report_json,source.raw,source.segments_json,id+':deleting',operationId,requireClaimed?'CLAIMED':'DONE',...admissionArgs,...conflictingArgs).first();
     if(!row)summarySourceChanged();
    };
-   const fingerprint=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([source.segments,job.audit]))))).map(x=>x.toString(16).padStart(2,'0')).join('');
    let newCall=false;
-   const pending=()=>json({job,persisted:true,pending:true,reason:'NEXT_STAGE_REQUIRES_SEPARATE_REQUEST',minimumWaitSeconds:13},202);
+   const pending=()=>json({job,persisted:true,pending:true,formatProfile:options.formatProfile??LEGACY_FORMAT_PROFILE,reason:'NEXT_STAGE_REQUIRES_SEPARATE_REQUEST',minimumWaitSeconds:13},202);
    const ask=async(key,prompt,allowed,stage)=>{
-    const operationId=id+':summary:'+fingerprint+':'+key;
+    const operationId=operationPrefix+key;
     const beforeSummaryFetch=async active=>{try{await assertGeminiBeforeFetch(env,active);await assertSummarySource(operationId,true,active);}catch(error){error.preDispatchBlocked=true;throw error;}};
     const response=await execute(env,{id:operationId,job:id,provider:'gemini',units:summaryUnits(prompt)},active=>runTranscriptSummary({env:{...active,SUMMARY_JSON:'true',SUMMARY_STAGE_OUTPUT_TOKENS:stage?'2048':'8192'},text:prompt,beforeDispatch:()=>beforeSummaryFetch(active),beforeFetch:()=>beforeSummaryFetch(active)}),()=>{newCall=true;});
     await assertSummarySource(operationId,false);
-    let result;try{if(response.text.length>12000&&stage)throw Error('STAGE_TOO_LONG');result=validateAnalysis(JSON.parse(response.text),allowed);}catch{throw new ProviderError('REPORT_VALIDATION_FAILED','요약 근거 형식 검증 실패. 원문은 보관됐으며 자동 재호출하지 않습니다.');}
+    let result;try{if(response.text.length>12000&&stage)throw Error('STAGE_TOO_LONG');result=validateAnalysis(JSON.parse(response.text),allowed,'gemini',options);}catch{throw new ProviderError('REPORT_VALIDATION_FAILED','요약 근거 형식 검증 실패. 원문은 보관됐으며 자동 재호출하지 않습니다.');}
     return result;
    };
-   const groups=partitionTranscript(source.segments,job.audit);
-   const firstPassUnits=groups.reduce((sum,group)=>sum+summaryUnits(reportPrompt(group,job.audit)),0);
-   if(firstPassUnits>250000){const body=await readJson(request);if(body.allowStaged!==true)throw new InputError('요약에 여러 차례 무료 할당 갱신이 필요합니다. 단계별 비용 상한을 확인하고 명시적으로 계속하세요.');}
+   const groups=partitionTranscript(source.segments,job.audit,options);
+   const firstPassUnits=groups.reduce((sum,group)=>sum+summaryUnits(reportPrompt(group,job.audit,options)),0);
+   if(firstPassUnits>250000&&payload.allowStaged!==true)throw new InputError('요약에 여러 차례 무료 할당 갱신이 필요합니다. 단계별 비용 상한을 확인하고 명시적으로 계속하세요.');
    let report;
-   if(groups.length===1)report=await ask('single',reportPrompt(groups[0],job.audit),groups[0],false);
+   if(groups.length===1)report=await ask('single',reportPrompt(groups[0],job.audit,options),groups[0],false);
    else{
     let parts=[];
     for(let i=0;i<groups.length;i++){
-     const chunk=groups[i],partial=await ask('raw:'+i,reportPrompt(chunk,job.audit),chunk,true);
-     parts.push({ids:evidenceIds(partial),startMs:chunk[0].startMs,endMs:chunk.at(-1).endMs,report:partial});
+     const chunk=groups[i],partial=await ask('raw:'+i,reportPrompt(chunk,job.audit,options),chunk,true);
+     parts.push({ids:approvedFormat?chunk.map(s=>s.id):evidenceIds(partial),startMs:chunk[0].startMs,endMs:chunk.at(-1).endMs,report:partial});
      if(newCall)return pending();
     }
     for(let level=0;parts.length>1;level++){
      if(level>12)throw new InputError('요약 단계가 너무 깊습니다.');
-     const batches=partitionSynthesis(parts,job.audit),next=[];
+     const batches=partitionSynthesis(parts,job.audit,options),next=[];
      for(let i=0;i<batches.length;i++){
-      const batch=batches[i],prompt=synthesisPrompt(batch,job.audit);
-      const allowed=[...new Set(batch.flatMap(part=>part.ids))].map(id=>({id}));
+      const batch=batches[i],prompt=synthesisPrompt(batch,job.audit,options);
+      const inputIds=[...new Set(batch.flatMap(part=>part.ids))];
+      const allowed=approvedFormat?source.segments.filter(segment=>inputIds.includes(segment.id)):inputIds.map(id=>({id}));
       const merged=await ask('merge:'+level+':'+i,prompt,allowed,batches.length>1);
       assertGroupCoverage(merged,batch);
-      next.push({ids:evidenceIds(merged),startMs:batch[0].startMs,endMs:batch.at(-1).endMs,report:merged});
+      next.push({ids:approvedFormat?inputIds:evidenceIds(merged),startMs:batch[0].startMs,endMs:batch.at(-1).endMs,report:merged});
       if(newCall&&!(batches.length===1&&parts.length===batch.length))return pending();
      }
      parts=next;
@@ -520,9 +548,9 @@ export async function routeLive(request,env){
     report=parts[0].report;
     assertGroupCoverage(report,groups.map(chunk=>({ids:chunk.map(s=>s.id)})));
    }
-   const updated=await env.DB.prepare("UPDATE jobs SET status=?,report_json=?,audit_json=?,updated_at=? WHERE id=? AND owner_id='owner' AND audit_json=? AND report_json=? AND EXISTS (SELECT 1 FROM yta_sources WHERE job_id=? AND raw=? AND segments_json=?) AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(job.status,JSON.stringify(report),JSON.stringify({...job.audit,summaryProvider:'gemini',externalFactCheck:'NOT_PERFORMED'}),new Date().toISOString(),id,auditJson,job.report_json,id,source.raw,source.segments_json,id+':deleting').run();
+   const updated=await env.DB.prepare("UPDATE jobs SET status=?,report_json=?,audit_json=?,updated_at=? WHERE id=? AND owner_id='owner' AND audit_json=? AND report_json IS ? AND EXISTS (SELECT 1 FROM yta_sources WHERE job_id=? AND raw=? AND segments_json=?) AND NOT EXISTS (SELECT 1 FROM yta_operations WHERE id=? AND provider='deletion' AND state='DELETING')").bind(job.status,JSON.stringify(report),JSON.stringify({...job.audit,summaryProvider:'gemini',externalFactCheck:'NOT_PERFORMED'}),new Date().toISOString(),id,auditJson,job.report_json,id,source.raw,source.segments_json,id+':deleting').run();
    if(updated.meta?.changes!==1)summarySourceChanged();
-   return json({job:await ownedJob(env,id),persisted:true});
+   return json({job:projectApprovedSummary(await ownedJob(env,id),source),persisted:true,formatProfile:options.formatProfile??LEGACY_FORMAT_PROFILE});
   }
   if(action==='audio-plan'&&request.method==='POST'){
    if(['GROQ_OWNED_AUDIO','GEMINI_OWNED_AUDIO','MIXED_OWNED_AUDIO'].includes((await sourceOf(env,id))?.provenance))throw new InputError('완료된 전사입니다. 저장된 TXT를 확인하세요.');
