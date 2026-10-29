@@ -496,10 +496,11 @@ export async function routeLive(request,env){
    const operationPrefix=id+':summary:'+(approvedFormat?APPROVED_FORMAT_PROFILE+':':'')+fingerprint+':';
    // A different format is a different request contract. Preserve earlier
    // checkpoints and usage; never silently start a second contract on that job.
+   // Exact prefixes avoid Workerd D1's bounded LIKE-pattern length and wildcard semantics.
    const conflictingSummary=approvedFormat
-    ?"SELECT 1 FROM yta_operations WHERE job_id=? AND provider='gemini' AND id LIKE ? AND id NOT LIKE ? LIMIT 1"
-    :"SELECT 1 FROM yta_operations WHERE job_id=? AND provider='gemini' AND id LIKE ? LIMIT 1";
-   const conflictingArgs=approvedFormat?[id,id+':summary:%',operationPrefix+'%']:[id,id+':summary:'+APPROVED_FORMAT_PROFILE+':%'];
+    ?"SELECT 1 FROM yta_operations WHERE job_id=? AND provider='gemini' AND instr(id,?)=1 AND instr(id,?)!=1 LIMIT 1"
+    :"SELECT 1 FROM yta_operations WHERE job_id=? AND provider='gemini' AND instr(id,?)=1 LIMIT 1";
+   const conflictingArgs=approvedFormat?[id,id+':summary:',operationPrefix]:[id,id+':summary:'+APPROVED_FORMAT_PROFILE+':'];
    if(await env.DB.prepare(conflictingSummary).bind(...conflictingArgs).first())throw new ProviderError('SUMMARY_FORMAT_CHANGE_REQUIRES_NEW_ATTEMPT','기존 요약 단계와 사용량을 보존했습니다. 형식을 바꾸려면 별도 분석에서 원문과 요청 범위를 검토하세요.');
    const auditJson=JSON.stringify(job.audit),summarySourceChanged=()=>{const error=new ProviderError('SUMMARY_INPUT_CHANGED','요약 원본·경계 검토 정보 또는 무료 허가가 변경됐습니다. 새로 검토하세요.');error.preDispatchBlocked=true;throw error;};
    const assertSummarySource=async(operationId,requireClaimed,active)=>{
@@ -791,7 +792,6 @@ export async function routeLive(request,env){
   }
   return json({error:{code:'METHOD_NOT_ALLOWED'}},405);
  }catch(error){
-  if(typeof env.__testOnlyErrorCapture==='function')env.__testOnlyErrorCapture(error);
   if(error instanceof InputError)return json({error:{code:error.code,message:error.message}},400);
   if(error instanceof ProviderError)return json({error:{code:error.code,message:error.message}},error.code==='NOT_FOUND'?404:409);
   if(/^SUMMARY_REVIEW_(SOURCE|PARTITION|OPERATIONS|APPROVAL|CHECKPOINT|CREDENTIAL)_INTERNAL$/.test(error?.safeReviewCode??''))return json({error:{code:error.safeReviewCode,message:error.message}},500);

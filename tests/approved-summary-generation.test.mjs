@@ -177,7 +177,7 @@ test('changed source or contract cannot silently reuse an earlier approved-forma
 test('a profile conflict appearing after preflight blocks dispatch and preserves both histories',async()=>{
  const f=fixture();let injected=false,calls=0;try{await withFetch(async()=>{calls++;throw Error('DISPATCH_MUST_BE_BLOCKED');},async()=>{
   f.grant();const DB=f.env.DB,legacyId=f.id+':summary:synthetic-older-contract:raw:0';
-  f.env.DB={...DB,prepare(sql){if(!injected&&sql.startsWith('SELECT 1 AS ok FROM jobs j JOIN yta_sources')&&sql.includes('id NOT LIKE ?')){injected=true;f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)').run(legacyId,f.id,'gemini',123,'DONE',new Date(Date.now()-60000).toISOString(),'{"synthetic":true}');}return DB.prepare(sql);}};
+  f.env.DB={...DB,prepare(sql){if(!injected&&sql.startsWith('SELECT 1 AS ok FROM jobs j JOIN yta_sources')){injected=true;f.db.prepare('INSERT INTO yta_operations(id,job_id,provider,units,state,created_at,result_json) VALUES(?,?,?,?,?,?,?)').run(legacyId,f.id,'gemini',123,'DONE',new Date(Date.now()-60000).toISOString(),'{"synthetic":true}');}return DB.prepare(sql);}};
   const before=f.jobSnapshot(),source=f.sourceSnapshot();const result=await routeApi(request(f.base+'/summary','POST',profile),f.env);
   assert.equal((await result.json()).error.code,'SUMMARY_INPUT_CHANGED');assert.equal(injected,true);assert.equal(calls,0);assert.deepEqual(f.jobSnapshot(),before);assert.deepEqual(f.sourceSnapshot(),source);
   assert.equal(f.db.prepare('SELECT result_json FROM yta_operations WHERE id=?').get(legacyId).result_json,'{"synthetic":true}');
