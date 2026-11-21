@@ -55,7 +55,8 @@ async function createJob(request, env, ctx, deps, jobs) {
   }
   const geminiOnly = body.transcriptMode === 'gemini';
   // A Gemini-only request is a deliberate re-test, so it never reuses an earlier job.
-  if (body.force !== true && !geminiOnly) {
+  // PC and Gemini-only requests are deliberate choices of method, so they never reuse an earlier job.
+  if (body.force !== true && !geminiOnly && body.transcriptMode !== 'pc') {
     const existing = await jobs.findReusable(videoId);
     if (existing) return json({job: existing, reused: true});
   }

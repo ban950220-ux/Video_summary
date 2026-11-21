@@ -52,12 +52,18 @@ function run(command, args) {
 }
 
 async function api(config, path, body) {
-  const response = await fetch(`${config.site}/api/v1/${path}`, {method: 'POST', headers: {
+  const response = await fetch(`${config.site}/api/v1/${path}`, {method: 'POST', redirect: 'manual', headers: {
     'content-type': 'application/json', origin: config.site, 'CF-Access-Client-Id': config.clientId,
     'CF-Access-Client-Secret': config.clientSecret}, body: JSON.stringify(body ?? {})});
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(`${path} ${response.status} ${data?.error?.code ?? ''}`);
-  return data;
+  if (response.ok) return data;
+  const code = data?.error?.code;
+  // No app error code means the request never reached the app: Cloudflare Access refused the token.
+  const hint = code ? '' : response.status === 403 || response.status === 401 || response.redirected
+    ? ' — Cloudflare Access가 토큰을 거부했습니다. CF_ACCESS_CLIENT_ID/SECRET 값, 정책의 Action(Service Auth)과 '
+      + '토큰 선택, 정책이 holy-rice-b914 앱에 연결됐는지 확인하세요.' : '';
+  const appHint = code === 'ACCESS_DENIED' ? ' — Worker 변수 V1_RUNNER_TOKEN_CLIENT_ID가 이 토큰의 Client ID와 같은지 확인하세요.' : '';
+  throw new Error(`${path} ${response.status} ${code ?? ''}${hint}${appHint}`);
 }
 
 async function transcribeChunk(config, file, prompt) {
@@ -127,11 +133,16 @@ export function configFromEnv(env = process.env) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const config = configFromEnv();
-  const watch = process.argv.includes('--watch');
-  do {
-    const done = await processOne(config);
-    if (!done && watch) await new Promise(resolve => setTimeout(resolve, 60_000));
-    if (!done && !watch) console.log('no waiting job');
-  } while (watch);
+  try {
+    const config = configFromEnv();
+    const watch = process.argv.includes('--watch');
+    do {
+      const done = await processOne(config);
+      if (!done && watch) await new Promise(resolve => setTimeout(resolve, 60_000));
+      if (!done && !watch) console.log('대기 중인 작업이 없습니다.');
+    } while (watch);
+  } catch (error) {
+    console.error(`실행기 오류: ${error.message}`);
+    process.exitCode = 1;
+  }
 }

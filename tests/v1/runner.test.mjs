@@ -49,10 +49,16 @@ test('runner helpers: safe command arguments and chunk offsets', () => {
 test('PC job: rights confirmation, single claim, transcript upload with flags, then summary', async () => {
   const e = env();
   const url = 'https://youtu.be/dQw4w9WgXcQ';
+  const earlier = await (await routeV1(post('/api/v1/jobs/upload', {filename: 'a.txt', text: '이전 요약', url}), e,
+    null, {fetchFn})).json();
+  await e.DB.prepare('DELETE FROM v1_jobs WHERE id != ?').bind(earlier.job.id).run();
   assert.equal((await routeV1(post('/api/v1/jobs', {url, transcriptMode: 'pc'}), e)).status, 400);
   const created = await (await routeV1(post('/api/v1/jobs', {url, transcriptMode: 'pc', rightsConfirmed: true}),
     e)).json();
   assert.equal(created.job.status, 'WAITING_PC');
+  // An earlier finished job for the same video must not be reused for a PC request.
+  const {results} = await e.DB.prepare('SELECT COUNT(*) AS n FROM v1_jobs').all();
+  assert.equal(results[0].n, 2);
   const claimed = await (await routeV1(post('/api/v1/runner/next'), e)).json();
   assert.equal(claimed.job.id, created.job.id);
   assert.equal((await (await routeV1(post('/api/v1/runner/next'), e)).json()).job, null);
