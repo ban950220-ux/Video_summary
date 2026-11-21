@@ -29,6 +29,11 @@
 | `src/v1/http.mjs` | JSON 응답, 요청 본문 제한, 동일 출처 검사 | 1단계 |
 | `src/v1/router.mjs` | `/api/v1/*` 라우터 (아직 운영 진입점에 연결 안 됨) | 1단계 |
 | `scripts/v1-lint.mjs` | 구문·파일 길이·줄 길이 검사 | 1단계 |
+| `src/v1/youtube.mjs`, `transcript.mjs`, `captions.mjs` | URL 해석, 공통 전사 형식, 업로드 파서 | 2단계 |
+| `src/v1/retry.mjs`, `usage.mjs` | 재시도 정책, 일일 상한 | 2단계 |
+| `src/v1/legacy-transcripts.mjs` | v0.7 전사 읽기 전용 재사용 | 2단계 |
+| `src/v1/providers/*.mjs` | Supadata(native 전용), Gemini(구간 전사, Flash 전용) | 2단계 |
+| `src/v1/acquire.mjs` | 전사 확보 순서 실행·기록 | 2단계 |
 
 ## 기존 v0.7 (운영 중, 유지)
 

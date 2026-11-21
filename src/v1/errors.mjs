@@ -12,6 +12,13 @@ export const ERRORS = Object.freeze({
   DAILY_LIMIT_REACHED: {status: 429, message: '오늘의 무료 사용 한도에 도달했습니다. 내일 다시 시도하세요.'},
   PROVIDER_KEY_MISSING: {status: 409, message: '설정에서 API 키를 먼저 등록하세요.'},
   PROVIDER_FAILED: {status: 502, message: '외부 서비스 응답에 실패했습니다.'},
+  PROVIDER_RATE_LIMITED: {status: 429, message: '외부 서비스의 무료 사용 한도에 걸렸습니다. 잠시 후 다시 시도합니다.'},
+  PROVIDER_INVALID_OUTPUT: {status: 502, message: '외부 서비스가 올바르지 않은 형식으로 응답했습니다.'},
+  INVALID_TRANSCRIPT: {status: 400, message: '자막 또는 전사 파일 형식을 확인해 주세요.'},
+  TRANSCRIPT_UNAVAILABLE: {
+    status: 422,
+    message: '이 영상의 자막·전사를 자동으로 가져오지 못했습니다. 자막 파일을 올리거나 PC 실행기를 사용하세요.',
+  },
   PERSISTENCE_UNAVAILABLE: {status: 503, message: '저장소(D1)가 연결되어 있지 않습니다.'},
   INTERNAL: {status: 500, message: '알 수 없는 오류가 발생했습니다.'},
 });
