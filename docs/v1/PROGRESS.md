@@ -12,4 +12,33 @@
   - 결정: 패키지는 저장소에 넣지 않음. 형식이 다른 새 검증기로 대체되므로 필요 없음. 예시 30쌍의 의미만 새 회귀 테스트로 옮김.
   - `docs/v1/NUMERIC_VERIFICATION_DESIGN.md` 초안 작성. 3단계 요약 스키마에 `facts`를 미리 넣는 안을 권장.
 - 남은 이슈: 설계 문서 7장 항목과 숫자 검증 설계에 대한 사용자 확인.
-- 상태: **사용자 확인 대기**
+- 상태: **승인됨** (2026-11-21, 설계·숫자 검증 설계·facts 선포함·이전 보고서 탭·Gemini 무료 데이터 정책·무결제 키 모두 확인)
+
+## 1단계 — 기반 구성 (2026-11-21)
+
+### 변경 내용
+- map-bot 방식 문서 추가: `AGENTS.md`(공통 규칙), `CLAUDE.md`(진입점), `AI_HANDOFF.md`, `TASKS.md`, `ARCHITECTURE.md`.
+- 기존 `docs/*.md|json` 42개를 `docs/legacy/`로 이동(내용 변경 없음). README·IMPLEMENTATION 링크 수정, README·START_HERE 맨 위에 v1 안내 추가.
+- v1 골격 `src/v1/`:
+  - `config.mjs`: 유료 API 항상 차단, 일일 상한은 낮추기만 가능
+  - `errors.mjs`: 오류 코드 12개
+  - `http.mjs`: JSON 응답, 본문 크기 제한, 동일 출처 검사
+  - `router.mjs`: `/api/v1/health`
+- `scripts/v1-lint.mjs`: 구문 검사, 파일 400줄 이하, 줄 120자 이하.
+- `tests/v1/foundation.test.mjs`: 9개.
+- `package.json`: `test`에 `tests/v1` 포함, `test:v1`·`lint:v1` 추가, `check`에 `lint:v1` 연결.
+- CI: 제한 시간 5분 → 15분(기존 실행이 약 4분이라 여유 부족), `test:v1` 단계 추가. `.node-version`=24.
+
+### 결정과 이유
+- v1 라우터는 아직 `src/site-worker.mjs`에 연결하지 않았다. 배포되더라도 운영 동작이 바뀌지 않게 하려는 것이다. 4단계에서 연결한다.
+- 수동 배포 워크플로(`deploy.yml`)는 6단계로 미뤘다. Cloudflare 토큰 Secret과 배포 승인이 필요한 일이기 때문이다.
+- 숫자 검증 원본 패키지는 넣지 않았다(0단계 결정 유지).
+
+### 검증 결과
+- `npm run check`: 통과 (v1 lint 6개 파일, 문제 0)
+- `npm test`: **974/974 통과** (기존 965 + 신규 9), 로컬 Node 22
+- `npm run release:gate`: 종료 코드 2(배포 차단 유지, 기존과 같음)
+- GitHub CI: 푸시 후 확인 (아래 기록)
+
+### 남은 이슈
+- 로컬은 Node 22, CI는 Node 24다. CI 결과로 Node 24 통과를 확인한다.

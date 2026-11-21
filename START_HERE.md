@@ -1,3 +1,5 @@
+> 이 문서는 기존 v0.7 기준입니다. 현재 작업은 [AI_HANDOFF.md](AI_HANDOFF.md)를 보세요.
+
 # v0.7 배포 후보
 
 현재 기능·검증·제한은 IMPLEMENTATION-v0.7.md를 확인하세요.

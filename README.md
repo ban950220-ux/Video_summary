@@ -1,4 +1,8 @@
-# YouTube AI Analyzer v0.7 candidate
+# YouTube 영상요약
+
+> **v1 재구성 진행 중.** 개발 규칙은 [AGENTS.md](AGENTS.md), 현재 상태는 [AI_HANDOFF.md](AI_HANDOFF.md), 설계는 [docs/v1/DESIGN.md](docs/v1/DESIGN.md)를 보세요. 아래는 운영 중인 기존 v0.7 설명입니다.
+
+## YouTube AI Analyzer v0.7 candidate
 
 Owner-only Cloudflare Worker/D1 app. The current implementation and limitations are documented in [IMPLEMENTATION-v0.7.md](IMPLEMENTATION-v0.7.md). Paid API budget remains $0; real providers are disabled by default.
 
@@ -16,11 +20,11 @@ Owner-only Cloudflare Worker/D1 app. The current implementation and limitations 
 
 `npm run build:dashboard` generates the single Worker bundle used by local tests.
 The Wrangler configuration now targets the existing protected `holy-rice-b914`
-Worker and its existing D1 database. See [the Git Build handoff](docs/production-git-build.md)
+Worker and its existing D1 database. See [the Git Build handoff](docs/legacy/production-git-build.md)
 for the guarded production command and required Cloudflare settings. This branch
 does not deploy. The CI release gate remains blocked pending remote evidence.
 
-For 2hUkTmwYm3A, the existing production job has completed 20/20 real transcription chunks. Its 1,226 timed segments and combined TXT were saved to D1 and read back. The first Groq summary call returned a schema-invalid response and remains `FAILED_UNCERTAIN`; the final summary and end-to-end login/reopen/export acceptance are pending. Continue from the preserved D1 source rather than repeating MP3 upload or transcription. See [full-video acceptance](docs/example-2hUkTmwYm3A-acceptance.md).
+For 2hUkTmwYm3A, the existing production job has completed 20/20 real transcription chunks. Its 1,226 timed segments and combined TXT were saved to D1 and read back. The first Groq summary call returned a schema-invalid response and remains `FAILED_UNCERTAIN`; the final summary and end-to-end login/reopen/export acceptance are pending. Continue from the preserved D1 source rather than repeating MP3 upload or transcription. See [full-video acceptance](docs/legacy/example-2hUkTmwYm3A-acceptance.md).
 
 ## Current limitations
 

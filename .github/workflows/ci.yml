@@ -11,7 +11,7 @@ concurrency:
 jobs:
   local-validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,6 +19,7 @@ jobs:
           node-version: '24'
       - run: npm ci
       - run: npm run check
+      - run: npm run test:v1
       - run: npm test
       - run: node --check dist/dashboard-worker.mjs
       - name: Confirm deployment remains blocked pending remote evidence
