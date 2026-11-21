@@ -38,7 +38,7 @@
 | `src/v1/providers/llm.mjs` | Gemini·Groq JSON 출력 모델 | 3단계 |
 | `src/v1/db/*.mjs`, `keys.mjs` | v1 테이블, 작업 저장소, D1 일일 상한, 키 읽기 | 4단계 |
 | `src/v1/pipeline.mjs`, `workflow-entry.mjs` | 작업 단계 실행(Workflow/인라인) | 4단계 |
-| `src/v1/router.mjs`, `export.mjs` | `/api/v1/*` (운영 진입점에 연결됨), 내보내기 | 4단계 |
+| `src/v1/entry.mjs`, `router.mjs`, `export.mjs` | v1 진입점(Access 검사 후 `/api/v1/*`, 나머지는 v0.7로), API, 내보내기 | 4단계 |
 
 ## 기존 v0.7 (운영 중, 유지)
 

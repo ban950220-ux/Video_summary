@@ -1,8 +1,8 @@
 // Production Worker entry for v1 (switch wrangler `main` to this file in stage 6, with approval).
-// It keeps the existing site handler and adds the durable Workflow class. Not imported by Node tests
-// because `cloudflare:workers` only exists in the Workers runtime.
+// It serves the v1 API plus the existing site (src/v1/entry.mjs) and adds the durable Workflow class.
+// Not imported by Node tests because `cloudflare:workers` only exists in the Workers runtime.
 import {WorkflowEntrypoint} from 'cloudflare:workers';
-import site from '../site-worker.mjs';
+import site from './entry.mjs';
 import {runSummaryJob} from './pipeline.mjs';
 
 export class SummaryWorkflow extends WorkflowEntrypoint {

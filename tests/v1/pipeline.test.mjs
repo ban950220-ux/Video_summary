@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
-import {handleSiteRequest} from '../../src/site-worker.mjs';
+import {handleV1Site} from '../../src/v1/entry.mjs';
 import {jobRepository} from '../../src/v1/db/jobs.mjs';
 import {createD1Usage} from '../../src/v1/db/usage.mjs';
 import {runSummaryJob} from '../../src/v1/pipeline.mjs';
@@ -202,7 +202,7 @@ test('D1 usage caps are atomic per key and refund partial reservations', async (
 
 test('v1 API sits behind Cloudflare Access and the same-origin check', async () => {
   const {env} = environment();
-  const unauth = await handleSiteRequest(new Request(`${BASE}/api/v1/health`), {...env,
+  const unauth = await handleV1Site(new Request(`${BASE}/api/v1/health`), {...env,
     ACCESS_TEAM_DOMAIN: 'https://team.cloudflareaccess.com', ACCESS_AUD: 'aud-123456789012',
     ACCESS_OWNER_EMAIL: 'o@x.io'});
   assert.equal(unauth.status, 401);

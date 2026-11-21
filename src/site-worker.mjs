@@ -1,6 +1,5 @@
 import {verifyOwnerAccess,sameOriginMutation,authConfigured} from './access.mjs';
 import {routeApi} from './worker.mjs';
-import {routeV1} from './v1/router.mjs';
 
 const HEADERS={
   'x-content-type-options':'nosniff',
@@ -24,7 +23,6 @@ export async function handleSiteRequest(request,env,dependencies){
   if(!access.ok)return respond({code:access.reason,message:'본인 인증이 필요합니다.'},401);
   if(!sameOriginMutation(request))return respond({code:'CSRF_BLOCKED',message:'현재 사이트에서 보낸 JSON 요청만 허용합니다.'},403);
   const url=new URL(request.url);
-  if(url.pathname.startsWith('/api/v1/'))return secured(await routeV1(request,env,dependencies));
   if(url.pathname.startsWith('/api/'))return secured(await routeApi(request,env));
   if(request.method!=='GET' && request.method!=='HEAD')return respond({code:'METHOD_NOT_ALLOWED'},405);
   if(!env.ASSETS?.fetch)return respond({code:'ASSETS_NOT_CONFIGURED'},503);

@@ -142,7 +142,7 @@
 | `src/v1/workflow-entry.mjs` | Cloudflare Workflow 클래스 + 기존 사이트 진입점. **6단계 배포 때 wrangler `main`으로 전환 예정** |
 | `src/v1/export.mjs` | Markdown/TXT 내보내기(전사 출처·범위·자동 생성 여부, 화자/AI 해석 표시, 챕터 시각 링크) |
 | `src/v1/router.mjs` | `POST /api/v1/jobs`, `POST /api/v1/jobs/upload`, `GET /api/v1/jobs`(검색), `GET/DELETE /api/v1/jobs/:id`, `GET /api/v1/jobs/:id/export`, `GET /api/v1/usage`, `GET /api/v1/health` |
-| `src/site-worker.mjs` | `/api/v1/*`를 v1 라우터로 연결(Access·동일 출처 검사 이후). 기존 `/api/*`는 그대로 |
+| `src/v1/entry.mjs` | v1 진입점: v0.7과 같은 Access·동일 출처 검사 후 `/api/v1/*` 처리, 나머지는 v0.7 처리기로 전달. **v0.7 `src/site-worker.mjs`는 변경 없음** |
 | `src/v1/summary/engine.mjs` | 단계별 실행이 가능하도록 함수 분리(동작은 같음) |
 | `tests/v1/pipeline.test.mjs` | 7개 추가(총 66개) |
 
@@ -160,7 +160,10 @@
 - 완료 기준 ③ 기존 v0.7 테이블 정의 변경 없음(실제 SQLite에서 전후 비교), v1 테이블 4개만 추가
 - `/api/v1/*`는 Access 인증 없이 401, 다른 출처 쓰기는 거부
 - `npm run check` 통과(v1 검사 37개 파일)
-- 전체 `npm test`·GitHub CI: 아래 기록
+- 전체 `npm test` 1차: 1029개 중 1개 실패(`tests/durable-sqlite.test.mjs`)
+  - 원인: v0.7 단일 파일 번들러(`scripts/build-dashboard.mjs`)는 고정 모듈 목록만 묶는다. `site-worker.mjs`에 v1 import를 넣자 번들(`dist/dashboard-worker.mjs`)이 깨졌다.
+  - 조치: `site-worker.mjs`를 원래대로 되돌리고, v1은 별도 진입점 `src/v1/entry.mjs`로 분리했다. v0.7 운영 코드와 번들이 그대로 유지된다.
+  - 재검증: 해당 테스트 + v1 69개 통과. 전체·CI는 아래 기록
 
 ### 남은 이슈
 - **Workers 무료 플랜 CPU 한도**: 요청당 CPU 10ms가 한도다. 긴 전사(수천 구간)의 JSON 처리가 한도에 걸릴 수 있다. 6단계 실측으로 확인하고, 필요하면 구간 분할 저장으로 바꾼다.
