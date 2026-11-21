@@ -281,3 +281,5 @@
 ### 남은 이슈
 - GitHub Secrets가 실제로 동작하는지는 이 세션에서 읽을 수 없다. `check` 모드 실행으로 확인한다.
 - `vujhk4dNlGA`는 자동 생성 자막 영상이라 Supadata native로 처리될 수 있다. 그 경우 Gemini 전사 경로는 실제로 검증되지 않으므로, 결과의 전사 출처를 기록하고 필요하면 자막 없는 영상을 추가로 받는다.
+- PR 생성(사용자 승인): https://github.com/ban950220-ux/Video_summary/pull/42 — main에 `deploy-v1.yml` 1개만 추가(버튼 표시용). 브랜치 `claude/serene-cori-0jdusg-deploy-workflow`.
+- 자막이 전혀 없는 공개 영상은 찾기 어렵다는 사용자 의견. Gemini 경로의 실제 검증 방법은 별도로 정한다.
