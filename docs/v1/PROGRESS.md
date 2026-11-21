@@ -598,3 +598,5 @@
 - 관찰: 불확실성(UNCERTAINTY) 항목이 0개였다. 인터뷰에 전망·가정 발언이 있었다면 누락일 수 있다. 추후 확인 항목으로 남긴다.
 - 연계 마무리 배포: Deploy #16(`ec64686`, AI 실행). 읽기 토큰·게시일 기능 반영. 사용자의 토큰 설정 전까지 읽기 토큰 경로는 꺼져 있다.
 - 사용자 확인(2026-11-21): 결과 화면(배지, 접히는 카드, 검토할 곳, JSON 버튼) 정상. Android YouTube 공유 목록에 영상요약이 표시됨(앱 재설치 후 반영). 후속 개선 1·5·4·3·2 완료.
+- 사용자 보고(2026-11-21): PC 실행기 `git pull` 완료(`9adab0d`). BANSIGHT용 읽기 토큰(`bansight-reader`) 생성, 정책 연결, `holy-rice-b914` 변수 `V1_READER_TOKEN_CLIENT_ID` 설정, `bansight-owner-private`에 Secret 2개(`VIDEO_SUMMARY_CLIENT_ID`, `VIDEO_SUMMARY_CLIENT_SECRET`) 등록 완료. 실제 호출 확인(curl)과 BANSIGHT 쪽 호출 코드는 아직 남아 있다.
+- 미확인: Gemini 키가 속한 Google 프로젝트의 결제 연결 여부. v0.7 변수에 유료 승인 흔적(`PAID_APPROVED`, 10/12)이 있어 사용자에게 AI Studio에서 Free/Paid tier 확인을 요청했다.
