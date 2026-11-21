@@ -103,9 +103,29 @@ async function libraryView() {
   await load();
 }
 
+function legacySourceItem(source) {
+  const button = h('button', {type: 'button', class: 'secondary', onclick: async () => {
+    button.disabled = true;
+    try {
+      const {job} = await api('/api/v1/jobs/from-legacy', {method: 'POST', body: {legacyJobId: source.legacyJobId}});
+      location.hash = `#job/${job.id}`;
+    } catch (error) {
+      toast(error.message);
+      button.disabled = false;
+    }
+  }}, '이 전사로 v1 요약');
+  const label = source.title ?? source.videoId ?? (source.sourceType === 'audio' ? 'MP3 업로드 전사' : source.legacyJobId);
+  return h('li', {class: 'row'}, h('span', {}, label), h('span', {class: 'muted'},
+    `${date(source.createdAt)} · ${Math.round(source.bytes / 1024)}KB`), button);
+}
+
 async function legacyView() {
-  const {jobs} = await api('/api/jobs?limit=50');
-  show(h('section', {class: 'card'}, h('h1', {}, '이전 보고서 (v0.7)'),
+  const [{jobs}, {sources}] = await Promise.all([api('/api/jobs?limit=50'), api('/api/v1/legacy-sources')]);
+  show(h('section', {class: 'card'}, h('h1', {}, '저장된 기존 전사'),
+    h('p', {class: 'muted'}, 'v0.7에서 전사해 둔 원문입니다. 다시 전사하지 않고 v1으로 요약할 수 있습니다.'),
+    h('ul', {class: 'list', id: 'legacy-sources'}, sources.length ? sources.map(legacySourceItem)
+      : h('li', {class: 'muted'}, '저장된 전사가 없습니다.'))),
+  h('section', {class: 'card'}, h('h1', {}, '이전 보고서 (v0.7)'),
     h('p', {class: 'muted'}, '기존 앱에서 만든 보고서입니다. 읽기 전용이며 열면 기존 화면으로 이동합니다.'),
     h('ul', {class: 'list', id: 'legacy-list'}, jobs.length ? jobs.map(job => h('li', {}, h('a', {href: '/#library'},
       h('span', {}, job.title ?? job.video_id ?? job.id), h('span', {class: 'muted'}, date(job.created_at)))))

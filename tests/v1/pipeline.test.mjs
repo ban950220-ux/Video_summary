@@ -288,3 +288,27 @@ test('a retry after a summary failure reuses the saved v1 transcript without cap
   assert.equal(done.job.attempts[0].step, 'saved');
   assert.equal(done.job.attempts[0].fromJobId, first.job.id);
 });
+
+test('a v0.7 transcript without a video ID can be picked and summarized with no transcript calls', async () => {
+  const {db, env} = environment();
+  db.prepare(`INSERT INTO jobs(id, owner_id, video_id, title, source_url, source_type, status, duration_seconds,
+    created_at, updated_at) VALUES('legacy-mp3', 'owner', NULL, NULL, NULL, 'audio', 'TRANSCRIPT_UNVERIFIED', 600,
+    '2026-10-14T00:00:00Z', '2026-10-14T00:00:00Z')`).run();
+  const segments = [1, 2, 3].map(i => ({id: i, startMs: (i - 1) * 200_000, endMs: i * 200_000, text: `원문 ${i}`}));
+  db.prepare('INSERT INTO yta_sources(job_id, raw, segments_json, provenance, updated_at) VALUES(?,?,?,?,?)')
+    .run('legacy-mp3', 'x', JSON.stringify(segments), 'AUDIO', '2026-10-14T00:00:00Z');
+  const {fetchFn, count} = providers();
+  const list = await (await routeV1(new Request(`${BASE}/api/v1/legacy-sources`), env)).json();
+  assert.deepEqual(list.sources.map(s => [s.legacyJobId, s.videoId, s.sourceType]), [['legacy-mp3', null, 'audio']]);
+  assert.equal(JSON.stringify(list).includes('원문'), false);
+  const created = await (await routeV1(post('/api/v1/jobs/from-legacy', {legacyJobId: 'legacy-mp3',
+    url: `https://youtu.be/${ID}`}), env, null, {fetchFn})).json();
+  const detail = await (await routeV1(new Request(`${BASE}/api/v1/jobs/${created.job.id}`), env, null, {})).json();
+  assert.equal(detail.job.status, 'DONE');
+  assert.equal(detail.job.videoId, ID);
+  assert.equal(detail.transcript.source, 'legacy-d1');
+  assert.equal(detail.transcript.legacyJobId, 'legacy-mp3');
+  assert.deepEqual(count, {supadata: 0, gemini: 1, oembed: 0});
+  const missing = await routeV1(post('/api/v1/jobs/from-legacy', {legacyJobId: 'nope'}), env);
+  assert.equal(missing.status, 404);
+});

@@ -69,6 +69,10 @@ function mockApi(req, res, url, body) {
     return send(res, 200, {jobs: [{id: 'old-1', video_id: VIDEO, title: '예전 보고서',
       created_at: '2026-10-20T00:00:00Z'}]});
   }
+  if (url.pathname === '/api/v1/legacy-sources') {
+    return send(res, 200, {sources: [{legacyJobId: 'old-2', title: null, videoId: null, sourceType: 'audio',
+      createdAt: '2026-10-14T00:00:00Z', bytes: 116145}]});
+  }
   if (url.pathname === '/api/v1/usage') {
     return send(res, 200, {usage: {day: '2026-11-21', items: [{key: 'geminiCalls', used: 9, limit: 200}]},
       keys: {supadata: true, gemini: true, groq: false}});
@@ -164,6 +168,8 @@ test('library search, previous reports and settings', async () => {
   await p.click('a[data-tab="legacy"]');
   await p.waitForSelector('#legacy-list a');
   assert.match(await p.textContent('#legacy-list'), /예전 보고서/);
+  assert.match(await p.textContent('#legacy-sources'), /MP3 업로드 전사.*113KB/);
+  assert.equal(await p.$eval('#legacy-sources button', b => b.textContent), '이 전사로 v1 요약');
   await p.click('a[data-tab="settings"]');
   await p.waitForSelector('#usage');
   assert.match(await p.textContent('#keys'), /groq: 없음/);

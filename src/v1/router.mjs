@@ -8,6 +8,7 @@ import {AppError} from './errors.mjs';
 import {exportMarkdown, exportText} from './export.mjs';
 import {assertSameOrigin, errorResponse, json, readJson} from './http.mjs';
 import {keyStatus, loadProviderKeys} from './keys.mjs';
+import {listLegacySources, loadLegacyTranscript} from './legacy-transcripts.mjs';
 import {inlineStep, runSummaryJob} from './pipeline.mjs';
 import {parseYouTubeUrl} from './youtube.mjs';
 
@@ -54,6 +55,23 @@ async function createJob(request, env, ctx, deps, jobs) {
   return json({job: await jobs.get(job.id), reused: false, runner}, 202);
 }
 
+async function legacyJob(request, env, ctx, deps, jobs) {
+  assertSameOrigin(request);
+  const body = await readJson(request);
+  if (typeof body.legacyJobId !== 'string' || body.legacyJobId.length > 100) throw new AppError('BAD_REQUEST');
+  const legacy = await loadLegacyTranscript(env.DB, body.legacyJobId);
+  if (!legacy) throw new AppError('NOT_FOUND', 'legacy transcript');
+  const video = body.url ? parseYouTubeUrl(body.url) : {videoId: null, canonicalUrl: null};
+  const title = typeof body.title === 'string' && body.title.trim() ? body.title.slice(0, 300) : legacy.title;
+  const job = await jobs.create({videoId: video.videoId, url: video.canonicalUrl, title,
+    options: {legacyJobId: legacy.legacyJobId}});
+  await jobs.saveTranscript(job.id, legacy.transcript, {legacyJobId: legacy.legacyJobId});
+  await jobs.update(job.id, {transcriptSource: legacy.transcript.source,
+    attempts: [{step: 'legacy', outcome: 'used', fromJobId: legacy.legacyJobId}]});
+  const runner = await startJob(job.id, env, ctx, deps);
+  return json({job: await jobs.get(job.id), runner}, 202);
+}
+
 async function uploadJob(request, env, ctx, deps, jobs) {
   assertSameOrigin(request);
   const body = await readJson(request, 2_500_000);
@@ -79,13 +97,16 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
         paidApiRequested: config.paidApiRequested, liveProvidersEnabled: config.liveProvidersEnabled,
         persistence: Boolean(env.DB), durableJobs: Boolean(env.SUMMARY_WORKFLOW)});
     }
-    const known = path === 'jobs' || path === 'jobs/upload' || path === 'usage' || JOB_PATH.test(path);
+    const known = ['jobs', 'jobs/upload', 'jobs/from-legacy', 'legacy-sources', 'usage'].includes(path)
+      || JOB_PATH.test(path);
     if (!known) throw new AppError('NOT_FOUND');
     if (!env.DB) throw new AppError('PERSISTENCE_UNAVAILABLE');
     const jobs = jobRepository(env.DB, deps);
 
     if (path === 'jobs' && method === 'POST') return await createJob(request, env, ctx, deps, jobs);
     if (path === 'jobs/upload' && method === 'POST') return await uploadJob(request, env, ctx, deps, jobs);
+    if (path === 'jobs/from-legacy' && method === 'POST') return await legacyJob(request, env, ctx, deps, jobs);
+    if (path === 'legacy-sources' && method === 'GET') return json({sources: await listLegacySources(env.DB)});
     if (path === 'jobs' && method === 'GET') {
       const items = await jobs.list({q: url.searchParams.get('q') ?? '', limit: url.searchParams.get('limit'),
         offset: url.searchParams.get('offset')});

@@ -63,3 +63,24 @@ export async function findSavedV1Transcript(db, videoId) {
     return null;
   }
 }
+
+// v0.7 jobs that have a saved transcript, so the owner can pick one that has no video ID
+// (e.g. an MP3 upload) and summarize it with v1. Read-only; transcript text is not returned.
+export async function listLegacySources(db, {limit = 50} = {}) {
+  if (!db || !(await legacyTablesExist(db))) return [];
+  const {results = []} = await db.prepare(`SELECT j.id, j.title, j.video_id, j.source_type, j.duration_seconds,
+      j.created_at, length(s.segments_json) AS bytes
+    FROM jobs j JOIN yta_sources s ON s.job_id = j.id WHERE j.owner_id = 'owner'
+    ORDER BY j.created_at DESC LIMIT ?`).bind(Math.min(Math.max(Number(limit) || 50, 1), 100)).all();
+  return results.map(r => ({legacyJobId: r.id, title: r.title ?? null, videoId: r.video_id ?? null,
+    sourceType: r.source_type, durationSec: r.duration_seconds ?? null, createdAt: r.created_at,
+    bytes: Number(r.bytes)}));
+}
+
+export async function loadLegacyTranscript(db, legacyJobId) {
+  if (!db || !(await legacyTablesExist(db))) return null;
+  const row = await db.prepare(`SELECT j.id AS job_id, j.title, j.duration_seconds, s.segments_json, s.provenance
+    FROM jobs j JOIN yta_sources s ON s.job_id = j.id WHERE j.id = ? AND j.owner_id = 'owner'`)
+    .bind(legacyJobId).first();
+  return row ? candidateFrom(row) : null;
+}
