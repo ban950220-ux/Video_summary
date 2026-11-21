@@ -45,42 +45,71 @@ function placeChapters(chapters, transcript) {
   });
 }
 
-export async function summarizeTranscript({transcript, title = null, models, usage, sleep,
-  chunkSec = CHUNK_SEC, chunkChars = CHUNK_CHARS, singleCallChars = SINGLE_CALL_CHARS}) {
+export function summaryPlan(transcript, {chunkSec = CHUNK_SEC, chunkChars = CHUNK_CHARS,
+  singleCallChars = SINGLE_CALL_CHARS} = {}) {
+  if (totalChars(transcript) <= singleCallChars) return {mode: 'single', chunks: []};
+  const chunks = chunkTranscript(transcript, {chunkSec, chunkChars});
+  return {mode: 'map-reduce', chunks: chunks.map(({index, fromId, toId}) => ({index, fromId, toId}))};
+}
+
+function requireModels(models) {
   if (!Array.isArray(models) || models.length === 0) throw new AppError('PROVIDER_KEY_MISSING', 'no summary model');
+}
+
+function finalValidator(transcript) {
   const segmentIds = transcript.segments.map(s => s.id);
-  const log = [];
-  const common = {models, usage, sleep, log};
-  const finalValidate = data => validateFinal(data, {segmentIds});
-  let mode;
-  let final;
-  let chunkCount = 1;
+  return data => validateFinal(data, {segmentIds});
+}
 
-  if (totalChars(transcript) <= singleCallChars) {
-    mode = 'single';
-    final = await callModels({...common, label: 'single', schema: FINAL_SCHEMA, validate: finalValidate,
-      prompt: singlePrompt({title, segments: transcript.segments})});
-  } else {
-    mode = 'map-reduce';
-    const chunks = chunkTranscript(transcript, {chunkSec, chunkChars});
-    chunkCount = chunks.length;
-    const partials = [];
-    for (const chunk of chunks) {
-      const output = await callModels({...common, label: `map#${chunk.index + 1}`, schema: MAP_SCHEMA,
-        validate: data => validateMapOutput(data, chunk),
-        prompt: mapPrompt({title, chunk, total: chunks.length})});
-      partials.push({fromId: chunk.fromId, toId: chunk.toId, output});
-    }
-    final = await callModels({...common, label: 'reduce', schema: FINAL_SCHEMA, validate: finalValidate,
-      prompt: reducePrompt({title, partials, firstId: segmentIds[0], lastId: segmentIds.at(-1)})});
-  }
+// One step each: summarizeSingle, summarizeChunk (map), combinePartials (reduce).
+export function summarizeSingle({transcript, title = null, models, usage, sleep, log = []}) {
+  requireModels(models);
+  return callModels({models, usage, sleep, log, label: 'single', schema: FINAL_SCHEMA,
+    validate: finalValidator(transcript), prompt: singlePrompt({title, segments: transcript.segments})});
+}
 
+export async function summarizeChunk({transcript, chunk, total, title = null, models, usage, sleep, log = []}) {
+  requireModels(models);
+  const segments = transcript.segments.filter(s => s.id >= chunk.fromId && s.id <= chunk.toId);
+  const full = {...chunk, segments, startMs: segments[0].startMs,
+    endMs: segments.at(-1).endMs ?? segments.at(-1).startMs};
+  const output = await callModels({models, usage, sleep, log, label: `map#${chunk.index + 1}`, schema: MAP_SCHEMA,
+    validate: data => validateMapOutput(data, chunk), prompt: mapPrompt({title, chunk: full, total})});
+  return {fromId: chunk.fromId, toId: chunk.toId, output};
+}
+
+export function combinePartials({transcript, partials, title = null, models, usage, sleep, log = []}) {
+  requireModels(models);
+  const ids = transcript.segments.map(s => s.id);
+  const prompt = reducePrompt({title, partials, firstId: ids[0], lastId: ids.at(-1)});
+  return callModels({models, usage, sleep, log, label: 'reduce', schema: FINAL_SCHEMA,
+    validate: finalValidator(transcript), prompt});
+}
+
+export function finalizeSummary({final, transcript, plan, calls}) {
   const summary = {...final, chapters: placeChapters(final.chapters, transcript)};
   return {
     version: SUMMARY_VERSION,
     language: 'ko',
     ...summary,
     warnings: numberWarnings(summary),
-    generation: {mode, chunkCount, calls: log},
+    generation: {mode: plan.mode, chunkCount: plan.mode === 'single' ? 1 : plan.chunks.length, calls},
   };
+}
+
+// Convenience: the whole engine in one call (used by tests and small inline jobs).
+export async function summarizeTranscript({transcript, title = null, models, usage, sleep, ...planOptions}) {
+  requireModels(models);
+  const plan = summaryPlan(transcript, planOptions);
+  const log = [];
+  const common = {transcript, title, models, usage, sleep, log};
+  let final;
+  if (plan.mode === 'single') {
+    final = await summarizeSingle(common);
+  } else {
+    const partials = [];
+    for (const chunk of plan.chunks) partials.push(await summarizeChunk({...common, chunk, total: plan.chunks.length}));
+    final = await combinePartials({...common, partials});
+  }
+  return finalizeSummary({final, transcript, plan, calls: log});
 }

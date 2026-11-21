@@ -128,3 +128,41 @@
 ### 남은 이슈
 - 실제 모델 출력 품질(요약 정확도, facts를 빠짐없이 넣는지)은 가짜 모델로는 알 수 없다. 6단계 실제 영상과 8단계 숫자 검증에서 확인한다.
 - 2시간 영상의 구간 요약 + 합치기는 Gemini 무료 호출 9회다. 무료 분당 요청 한도에 걸리면 재시도 대기가 생긴다.
+
+## 4단계 — 파이프라인·저장·API (2026-11-21)
+
+### 변경 내용
+| 파일 | 내용 |
+|---|---|
+| `src/v1/db/schema.mjs` | `v1_jobs`, `v1_transcripts`, `v1_summaries`, `v1_usage` (추가만, `CREATE ... IF NOT EXISTS`) |
+| `src/v1/db/jobs.mjs` | 작업 저장소: 생성·조회·검색·갱신·삭제, 전사·요약 저장/조회, 같은 영상 작업 재사용 |
+| `src/v1/db/usage.mjs` | D1 일일 상한: 키마다 조건부 UPDATE로 동시 실행에도 상한 초과 방지, 일부 실패 시 되돌림 |
+| `src/v1/keys.mjs` | 기존 v0.7 암호화 키 금고 → Worker Secret 순으로 키 읽기. 키 값은 응답에 포함하지 않고 등록 여부만 표시 |
+| `src/v1/pipeline.mjs` | 작업 단계: acquire → plan → (single 또는 map-1..n → reduce) → save. 단계 결과는 작게 유지하고 본문은 D1에 저장. 플랫폼 자동 재시도는 끔(승인된 정책만 적용) |
+| `src/v1/workflow-entry.mjs` | Cloudflare Workflow 클래스 + 기존 사이트 진입점. **6단계 배포 때 wrangler `main`으로 전환 예정** |
+| `src/v1/export.mjs` | Markdown/TXT 내보내기(전사 출처·범위·자동 생성 여부, 화자/AI 해석 표시, 챕터 시각 링크) |
+| `src/v1/router.mjs` | `POST /api/v1/jobs`, `POST /api/v1/jobs/upload`, `GET /api/v1/jobs`(검색), `GET/DELETE /api/v1/jobs/:id`, `GET /api/v1/jobs/:id/export`, `GET /api/v1/usage`, `GET /api/v1/health` |
+| `src/site-worker.mjs` | `/api/v1/*`를 v1 라우터로 연결(Access·동일 출처 검사 이후). 기존 `/api/*`는 그대로 |
+| `src/v1/summary/engine.mjs` | 단계별 실행이 가능하도록 함수 분리(동작은 같음) |
+| `tests/v1/pipeline.test.mjs` | 7개 추가(총 66개) |
+
+### 결정과 이유
+- **v1 테이블을 `migrations/`에 넣지 않음**: 기존 테스트와 배포 가드가 v0.7 마이그레이션 목록을 고정해 검사한다. 코드에서 추가 전용으로 생성하며, 운영 D1 적용은 6단계 배포 승인 때 함께 한다.
+- **`wrangler.toml` 변경은 6단계로 미룸**: Workflow 바인딩과 `main` 전환은 운영 설정 변경이고, 배포 가드 테스트가 이 파일을 검사한다. 바인딩이 없으면 요청 처리 후 백그라운드(`waitUntil`)로 실행되므로 짧은 영상은 바로 쓸 수 있다.
+- **구간 요약마다 별도 단계**: 중간에 실패해도 끝난 단계는 다시 하지 않아 무료 할당을 아낀다.
+- **같은 영상은 기존 작업 재사용**: 다시 만들려면 `force: true`.
+- **제목은 YouTube oEmbed**(무료, 키 불필요)에서 가져오고, 실패해도 작업은 계속한다.
+
+### 검증 결과
+- v1 테스트 66/66 통과 (Node 22, Node 24.22.3)
+- 완료 기준 ① URL 제출 → 자막 → 요약 저장 → 재조회·검색·내보내기·삭제 전 과정 통과
+- 완료 기준 ② 2시간 영상 map-3에서 실패 → 재실행 시 acquire·plan·map-1·map-2를 건너뛰고 map-3부터 완료(자막 추가 호출 0, Gemini 7회)
+- 완료 기준 ③ 기존 v0.7 테이블 정의 변경 없음(실제 SQLite에서 전후 비교), v1 테이블 4개만 추가
+- `/api/v1/*`는 Access 인증 없이 401, 다른 출처 쓰기는 거부
+- `npm run check` 통과(v1 검사 37개 파일)
+- 전체 `npm test`·GitHub CI: 아래 기록
+
+### 남은 이슈
+- **Workers 무료 플랜 CPU 한도**: 요청당 CPU 10ms가 한도다. 긴 전사(수천 구간)의 JSON 처리가 한도에 걸릴 수 있다. 6단계 실측으로 확인하고, 필요하면 구간 분할 저장으로 바꾼다.
+- **일일 상한 기준**: UTC 날짜다. 제공자 한도의 초기화 시각과 다를 수 있다.
+- 실제 Workflow 동작(재개 포함)은 Node 가짜 단계로만 시험했다. 실제 Cloudflare에서는 6단계에서 확인한다.

@@ -1,0 +1,49 @@
+// v1 tables. Additive only (CREATE ... IF NOT EXISTS); never touches v0.7 tables.
+// Kept in code rather than migrations/ because the v0.7 migration catalog is pinned by tests
+// and release guards. Applying it to production D1 happens with the stage 6 deploy approval.
+export const V1_SCHEMA = Object.freeze([
+  `CREATE TABLE IF NOT EXISTS v1_jobs (
+    id TEXT PRIMARY KEY,
+    video_id TEXT,
+    url TEXT,
+    title TEXT,
+    status TEXT NOT NULL,
+    transcript_source TEXT,
+    error_code TEXT,
+    attempts_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  'CREATE INDEX IF NOT EXISTS v1_jobs_created ON v1_jobs(created_at DESC)',
+  'CREATE INDEX IF NOT EXISTS v1_jobs_video ON v1_jobs(video_id)',
+  `CREATE TABLE IF NOT EXISTS v1_transcripts (
+    job_id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    language TEXT,
+    duration_sec REAL,
+    coverage_json TEXT NOT NULL,
+    segments_json TEXT NOT NULL,
+    legacy_job_id TEXT,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS v1_summaries (
+    job_id TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    summary_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS v1_usage (
+    day TEXT NOT NULL,
+    key TEXT NOT NULL,
+    units INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, key)
+  )`,
+]);
+
+const ready = new WeakSet();
+
+export async function ensureV1Schema(db) {
+  if (ready.has(db)) return;
+  for (const sql of V1_SCHEMA) await db.prepare(sql).run();
+  ready.add(db);
+}

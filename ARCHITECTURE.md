@@ -36,6 +36,9 @@
 | `src/v1/acquire.mjs` | 전사 확보 순서 실행·기록 | 2단계 |
 | `src/v1/summary/*.mjs` | 구간 나누기, 지시문, 출력 스키마·검증, 요약 엔진 | 3단계 |
 | `src/v1/providers/llm.mjs` | Gemini·Groq JSON 출력 모델 | 3단계 |
+| `src/v1/db/*.mjs`, `keys.mjs` | v1 테이블, 작업 저장소, D1 일일 상한, 키 읽기 | 4단계 |
+| `src/v1/pipeline.mjs`, `workflow-entry.mjs` | 작업 단계 실행(Workflow/인라인) | 4단계 |
+| `src/v1/router.mjs`, `export.mjs` | `/api/v1/*` (운영 진입점에 연결됨), 내보내기 | 4단계 |
 
 ## 기존 v0.7 (운영 중, 유지)
 
