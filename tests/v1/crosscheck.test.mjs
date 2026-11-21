@@ -82,3 +82,12 @@ test('cross-check API: runs per window, stores result, counts usage, guards re-e
   await routeV1(post(noUrl.id), env, null, {fetchFn});
   assert.equal((await jobs.loadSummary(noUrl.id)).crossCheck.status, 'FAILED');
 });
+
+test('numbers as written in the summary count when heard as Korean number words', () => {
+  const t = makeTranscript({source: SOURCES.SUPADATA_NATIVE, segments: [{startMs: 0, endMs: 5000,
+    text: '상장사 10곳 중 4곳이 대상입니다'}]});
+  const verification = {items: [{surface: '10곳 중 4곳', value: 40, unit: 'PERCENT', segmentIds: [1],
+    status: 'VERIFIED'}]};
+  const clips = [{startSec: 0, endSec: 20, segments: [{startMs: 1000, endMs: 4000, text: '상장사 열 곳 중 네 곳이 대상입니다'}]}];
+  assert.equal(compareFacts(verification, t, clips).items[0].result, 'CONFIRMED');
+});

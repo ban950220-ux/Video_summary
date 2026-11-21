@@ -64,7 +64,10 @@ export function compareFacts(verification, transcript, clips, limits = LIMITS) {
       continue;
     }
     const numbers = extractNumbers(heard.map(s => s.text).join(' '));
-    if (numbers.some(n => sameAtPrecision(n.value, fact.value))) {
+    const written = extractNumbers(fact.surface ?? '').map(n => n.value);
+    const heardHas = value => numbers.some(n => sameAtPrecision(n.value, value));
+    // The fact value may be derived ("10곳 중 4곳" stored as 40%); the numbers as written also count.
+    if (heardHas(fact.value) || (written.length > 0 && written.every(heardHas))) {
       items.push({...base, result: 'CONFIRMED'});
       continue;
     }

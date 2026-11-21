@@ -39,8 +39,8 @@ export async function runAnalysisJob({jobId, env, step = inlineStep, deps = {}})
       result = reduced.value;
     }
     await durable('analysis-save', async () => {
-      const summary = await jobs.loadSummary(jobId);
-      await jobs.saveSummary(jobId, {...summary, analysis: finalizeAnalysis({result, plan, calls})});
+      const [summary, transcript] = await Promise.all([jobs.loadSummary(jobId), jobs.loadTranscript(jobId)]);
+      await jobs.saveSummary(jobId, {...summary, analysis: finalizeAnalysis({result, plan, calls, transcript})});
     });
     return {status: 'DONE'};
   } catch (error) {

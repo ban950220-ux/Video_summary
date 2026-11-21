@@ -59,7 +59,8 @@ function evidence(ids, transcript, videoId) {
 function point(p, transcript, videoId) {
   const speaker = p.attribution === 'SPEAKER';
   return h('li', {},
-    h('span', {class: `badge ${speaker ? 'speaker' : 'ai'}`}, speaker ? '화자' : 'AI 해석'), ' ', p.text,
+    h('span', {class: `badge ${speaker ? 'speaker' : 'ai'}`}, speaker ? '화자' : 'AI 해석'),
+    p.synthesized ? h('span', {class: 'badge ai'}, '여러 구간 종합') : null, ' ', p.text,
     evidence(p.segmentIds, transcript, videoId));
 }
 

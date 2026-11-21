@@ -104,3 +104,12 @@ test('Groq text model: allowlisted free models, JSON mode, schema in the system 
     message: {content: '{'}}]})]).fetchFn});
   await assert.rejects(cut.generateJson({system: '', prompt: '', schema: {}}), {code: 'PROVIDER_INVALID_OUTPUT'});
 });
+
+test('analysis: speaker items built from distant segments are marked as synthesis', async () => {
+  const {markSynthesis} = await import('../../src/v1/summary/analysis.mjs');
+  const transcript = {segments: [{id: 1, startMs: 0}, {id: 2, startMs: 60_000}, {id: 3, startMs: 900_000}]};
+  const item = (segmentIds, attribution = 'SPEAKER') => ({type: 'CAUSE', text: 't', attribution, segmentIds,
+    facts: []});
+  const out = markSynthesis([item([1, 2]), item([1, 3]), item([1, 3], 'INTERPRETATION')], transcript);
+  assert.deepEqual(out.map(i => Boolean(i.synthesized)), [false, true, false]);
+});
