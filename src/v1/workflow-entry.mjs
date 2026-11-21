@@ -4,10 +4,12 @@
 import {WorkflowEntrypoint} from 'cloudflare:workers';
 import site from './entry.mjs';
 import {runSummaryJob} from './pipeline.mjs';
+import {runAnalysisJob} from './pipeline-analysis.mjs';
 
 export class SummaryWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
-    return runSummaryJob({jobId: event.payload.jobId, env: this.env, step});
+    const run = event.payload.task === 'analysis' ? runAnalysisJob : runSummaryJob;
+    return run({jobId: event.payload.jobId, env: this.env, step});
   }
 }
 

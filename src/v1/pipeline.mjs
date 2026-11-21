@@ -45,7 +45,8 @@ export function decodeStepError(error) {
   return match ? new AppError(match[1], match[2]) : new AppError('INTERNAL', safeReason(error?.message));
 }
 
-export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) {
+// Per-job helpers shared by the summary and analysis pipelines.
+export function jobContext({env, step = inlineStep, deps = {}}) {
   const fetchFn = deps.fetchFn ?? fetch;
   const sleep = deps.sleep;
   const config = readConfig(env);
@@ -80,6 +81,12 @@ export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) 
       throw decodeStepError(error);
     }
   };
+
+  return {fetchFn, sleep, config, jobs, usage, modelsFor, durable};
+}
+
+export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) {
+  const {fetchFn, sleep, config, jobs, usage, modelsFor, durable} = jobContext({env, step, deps});
 
   try {
     const acquired = await durable('acquire', async () => {

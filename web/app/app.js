@@ -75,13 +75,21 @@ function newView() {
 async function jobView(id) {
   const render = async () => {
     const detail = await api(`/api/v1/jobs/${encodeURIComponent(id)}`);
-    show(renderResult(detail, {onDelete: async () => {
+    show(renderResult(detail, {onAnalyze: async () => {
+      try {
+        await api(`/api/v1/jobs/${encodeURIComponent(id)}/analysis`, {method: 'POST'});
+        await render();
+      } catch (error) {
+        toast(error.message);
+      }
+    }, onDelete: async () => {
       if (!confirm('이 요약을 삭제할까요?')) return;
       await api(`/api/v1/jobs/${encodeURIComponent(id)}`, {method: 'DELETE'});
       toast('삭제했습니다.');
       location.hash = '#library';
     }}));
-    if (!['DONE', 'FAILED'].includes(detail.job.status)) pollTimer = setTimeout(() => render().catch(fail), POLL_MS);
+    const busy = !['DONE', 'FAILED'].includes(detail.job.status) || detail.summary?.analysis?.status === 'RUNNING';
+    if (busy) pollTimer = setTimeout(() => render().catch(fail), POLL_MS);
   };
   await render();
 }

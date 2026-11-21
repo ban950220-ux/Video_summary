@@ -74,7 +74,36 @@ function verificationCard(verification, transcript, videoId) {
       item.segmentIds?.length ? evidence(item.segmentIds, transcript, videoId) : null))));
 }
 
-export function renderResult({job, transcript, summary, verification}, {onDelete}) {
+const TYPE_TEXT = {CLAIM: '주장', CAUSE: '인과', CONTEXT: '맥락', UNCERTAINTY: '불확실성·예측'};
+
+function analysisCard(analysis, transcript, videoId, onAnalyze) {
+  const card = h('section', {class: 'card', id: 'analysis'}, h('h2', {}, '상세 분석'));
+  if (!analysis || analysis.status === 'FAILED') {
+    card.append(h('p', {class: 'muted'}, '주장·인과·맥락·불확실성을 근거 구간과 함께 정리합니다. 무료 한도에서 요약과 비슷한 수의 '
+      + 'Gemini 호출을 씁니다.'));
+    if (analysis?.status === 'FAILED') {
+      card.append(h('p', {class: 'warn'}, `지난 분석 실패: ${analysis.code} — ${analysis.detail ?? ''}`));
+    }
+    card.append(h('button', {type: 'button', id: 'analyze', onclick: event => {
+      event.target.disabled = true;
+      onAnalyze();
+    }}, analysis ? '상세 분석 다시 만들기' : '상세 분석 만들기'));
+    return card;
+  }
+  if (analysis.status === 'RUNNING') {
+    card.append(h('p', {class: 'muted'}, '분석 중입니다… 화면이 자동으로 갱신됩니다.'));
+    return card;
+  }
+  for (const type of Object.keys(TYPE_TEXT)) {
+    const items = analysis.items.filter(item => item.type === type);
+    if (!items.length) continue;
+    card.append(h('h3', {}, TYPE_TEXT[type]),
+      h('ul', {class: 'points'}, items.map(p => point(p, transcript, videoId))));
+  }
+  return card;
+}
+
+export function renderResult({job, transcript, summary, verification}, {onDelete, onAnalyze}) {
   const nodes = [h('section', {class: 'card'},
     h('h1', {}, job.title ?? job.videoId ?? '영상 요약'),
     h('p', {class: 'muted'}, date(job.createdAt), job.url ? ' · ' : '',
@@ -110,6 +139,7 @@ export function renderResult({job, transcript, summary, verification}, {onDelete
             h('div', {}, h('strong', {}, c.title), h('p', {}, c.summary)));
         })),
     );
+    nodes.push(analysisCard(summary.analysis, transcript, job.videoId, onAnalyze));
     if (verification?.counts.total) nodes.push(verificationCard(verification, transcript, job.videoId));
     if (summary.warnings?.length) {
       nodes.push(h('section', {class: 'card warn'}, h('h2', {}, '확인 필요'),

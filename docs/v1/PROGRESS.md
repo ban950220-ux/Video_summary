@@ -443,3 +443,12 @@
   - 전사: 1,226구간. 외부 전사 호출 0. 영상 길이를 알아 범위 "처음~끝"(비율 0.9997)
   - 요약: 구간 7개 + 합치기, 챕터 20개
 - 9번 완료 기준 충족.
+
+## 8-B — 상세 분석 (2026-11-21)
+- `src/v1/summary/analysis.mjs`: 주장(CLAIM)·인과(CAUSE)·맥락(CONTEXT)·불확실성(UNCERTAINTY) 항목. 항목마다 근거 구간, 화자/AI 해석 구분, facts. 외부 지식 금지, 예측·가정 구분. 짧으면 1회, 길면 구간 분석 후 합치기.
+- `src/v1/summary/schema.mjs`: `ANALYSIS_SCHEMA`, `validateAnalysis`(기존 근거·facts 검증 재사용).
+- `src/v1/pipeline-analysis.mjs`: 요청 시 실행. 결과는 `summary.analysis`(상태 RUNNING/DONE/FAILED, 실패 사유 포함)에 저장한다. 요약 파이프라인과 같은 도우미(`jobContext`: 단계 오류 코드 보존·모델 구성)를 쓴다.
+- API: `POST /api/v1/jobs/:id/analysis`(동일 출처, 실행 중이면 다시 시작하지 않음). Workflow 인스턴스 ID는 분석마다 고유하게 만든다. `workflow-entry`는 `task`로 분기한다.
+- 화면: "상세 분석 만들기" 버튼 → 분석 중 표시(자동 갱신) → 종류별 목록. 실패하면 사유와 다시 만들기 버튼.
+- 숫자 검증(8-A)이 `analysis.items`의 facts도 대조한다.
+- 테스트: API 1개(저장, 중복 실행 방지, 다른 출처 차단, 검증 포함), 화면 버튼. v1 88/88, 화면 5/5.

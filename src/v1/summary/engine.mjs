@@ -9,7 +9,7 @@ import {FINAL_SCHEMA, MAP_SCHEMA, numberWarnings, validateFinal, validateMapOutp
 
 export const SUMMARY_VERSION = 'v1-summary-1';
 
-async function callModels({label, models, prompt, schema, validate, usage, sleep, log}) {
+export async function callModels({label, models, prompt, schema, validate, usage, sleep, log}) {
   let lastError = null;
   for (const model of models) {
     const tries = [];

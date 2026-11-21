@@ -10,19 +10,23 @@ import {assertSameOrigin, errorResponse, json, readJson} from './http.mjs';
 import {keyStatus, loadProviderKeys} from './keys.mjs';
 import {listLegacySources, loadLegacyTranscript} from './legacy-transcripts.mjs';
 import {inlineStep, runSummaryJob} from './pipeline.mjs';
+import {runAnalysisJob} from './pipeline-analysis.mjs';
 import {verifySummary} from './verify/facts.mjs';
 import {parseYouTubeUrl} from './youtube.mjs';
 
 export const API_PREFIX = '/api/v1/';
-const JOB_PATH = /^jobs\/([0-9a-f-]{36})(\/export)?$/;
+const JOB_PATH = /^jobs\/([0-9a-f-]{36})(\/export|\/analysis)?$/;
 
 // Durable Workflow when bound (production), otherwise inline in the background or awaited (tests).
-async function startJob(jobId, env, ctx, deps) {
+async function startJob(jobId, env, ctx, deps, task = 'summary') {
   if (env.SUMMARY_WORKFLOW?.create) {
-    await env.SUMMARY_WORKFLOW.create({id: jobId, params: {jobId}});
+    // Workflow instance IDs must be unique, so analysis runs get their own suffix.
+    const id = task === 'summary' ? jobId : `${jobId}-a${Date.now().toString(36)}`;
+    await env.SUMMARY_WORKFLOW.create({id, params: {jobId, task}});
     return 'workflow';
   }
-  const run = runSummaryJob({jobId, env, step: inlineStep, deps});
+  const runner = task === 'analysis' ? runAnalysisJob : runSummaryJob;
+  const run = runner({jobId, env, step: inlineStep, deps});
   if (ctx?.waitUntil) {
     ctx.waitUntil(run);
     return 'background';
@@ -122,7 +126,17 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
 
     const match = path.match(JOB_PATH);
     if (match && !match[2] && method === 'GET') return json(await jobDetail(jobs, match[1]));
-    if (match && match[2] && method === 'GET') {
+    if (match && match[2] === '/analysis' && method === 'POST') {
+      assertSameOrigin(request);
+      const summary = await jobs.loadSummary(match[1]);
+      if (!summary) throw new AppError('NOT_FOUND', 'summary not ready');
+      if (summary.analysis?.status === 'RUNNING') return json({analysis: summary.analysis, started: false});
+      const analysis = {status: 'RUNNING', startedAt: new Date().toISOString()};
+      await jobs.saveSummary(match[1], {...summary, analysis});
+      const runner = await startJob(match[1], env, ctx, deps, 'analysis');
+      return json({analysis: (await jobs.loadSummary(match[1])).analysis, started: true, runner}, 202);
+    }
+    if (match && match[2] === '/export' && method === 'GET') {
       const detail = await jobDetail(jobs, match[1]);
       if (!detail.summary) throw new AppError('NOT_FOUND', 'summary not ready');
       const txt = url.searchParams.get('format') === 'txt';

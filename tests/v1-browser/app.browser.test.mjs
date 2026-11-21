@@ -139,6 +139,7 @@ for (const [name, viewport] of [['desktop', {width: 1280, height: 900}], ['phone
     assert.match(await p.textContent('main'), /YouTube 기존 자막/);
     assert.match(await p.textContent('main'), /확인 필요/);
     assert.match(await p.textContent('#verification'), /숫자 2개: 원문 확인 1 · 불일치 1/);
+    assert.equal(await p.textContent('#analyze'), '상세 분석 만들기');
     assert.match(await p.textContent('#verification .verify-MISMATCH'), /1003개사 — 값이 원문과 다름 \(원문: 103개사\)/);
     assert.ok(await p.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       'no horizontal scroll');

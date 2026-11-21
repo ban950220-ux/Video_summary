@@ -178,3 +178,27 @@ export function numberWarnings(summary) {
   summary.chapters.forEach((c, i) => check(c, `chapters[${i}]`));
   return warnings;
 }
+
+// Stage 8-B analysis items: claims, causes, context and uncertainty, each with evidence.
+export const ANALYSIS_TYPES = Object.freeze(['CLAIM', 'CAUSE', 'CONTEXT', 'UNCERTAINTY']);
+const ANALYSIS_ITEM = {
+  type: 'OBJECT',
+  properties: {type: {type: 'STRING', enum: [...ANALYSIS_TYPES]}, text: S,
+    attribution: {type: 'STRING', enum: [...ATTRIBUTION]}, segmentIds: IDS, facts: FACTS},
+  required: ['type', 'text', 'attribution', 'segmentIds', 'facts'],
+};
+export const ANALYSIS_SCHEMA = Object.freeze({
+  type: 'OBJECT', properties: {items: {type: 'ARRAY', items: ANALYSIS_ITEM}}, required: ['items'],
+});
+
+export function validateAnalysis(raw, allowedIds, {min = 1, max = 24} = {}) {
+  const allowed = typeof allowedIds === 'function' ? allowedIds : id => allowedIds.has(id);
+  const value = object(raw, 'analysis');
+  if (!Array.isArray(value.items) || value.items.length < min || value.items.length > max) {
+    throw bad('items', `${min}-${max}`);
+  }
+  return {items: value.items.map((item, i) => {
+    if (!ANALYSIS_TYPES.includes(item?.type)) throw bad(`items[${i}]`, 'type');
+    return {type: item.type, ...point(item, `items[${i}]`, allowed)};
+  })};
+}

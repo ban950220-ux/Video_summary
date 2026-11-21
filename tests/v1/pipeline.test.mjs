@@ -44,7 +44,15 @@ function providers({captions = 3, failMap = null} = {}) {
     }
     if (u.includes('generativelanguage.googleapis.com')) {
       count.gemini += 1;
-      const prompt = JSON.parse(init.body).contents[0].parts[0].text;
+      const request = JSON.parse(init.body);
+      const prompt = request.contents[0].parts[0].text;
+      if (request.generationConfig?.responseSchema?.properties?.items) {
+        count.analysis = (count.analysis ?? 0) + 1;
+        return jsonResponse(geminiBody({items: [
+          {type: 'CLAIM', text: '화자의 주장', attribution: 'SPEAKER', segmentIds: [1], facts: []},
+          {type: 'CAUSE', text: 'AI가 추론한 인과', attribution: 'INTERPRETATION', segmentIds: [2], facts: []},
+        ]}));
+      }
       const range = prompt.match(/구간 #(\d+)~#(\d+)/);
       if (range) {
         if (failMap && Number(range[1]) === failMap.fromId && failMap.remaining-- > 0) return jsonResponse({}, 403);
@@ -311,4 +319,29 @@ test('a v0.7 transcript without a video ID can be picked and summarized with no 
   assert.deepEqual(count, {supadata: 0, gemini: 1, oembed: 0});
   const missing = await routeV1(post('/api/v1/jobs/from-legacy', {legacyJobId: 'nope'}), env);
   assert.equal(missing.status, 404);
+});
+
+test('analysis on request: stored as summary.analysis, guarded while running, covered by verification', async () => {
+  const {env} = environment();
+  const {fetchFn, count} = providers();
+  const created = await routeV1(post('/api/v1/jobs', {url: `https://youtu.be/${ID}`}), env, null, {fetchFn});
+  const {job} = await created.json();
+  const started = await routeV1(new Request(`${BASE}/api/v1/jobs/${job.id}/analysis`, {method: 'POST',
+    headers: {origin: BASE}}), env, null, {fetchFn});
+  assert.equal(started.status, 202);
+  const detail = await (await routeV1(new Request(`${BASE}/api/v1/jobs/${job.id}`), env, null, {})).json();
+  assert.equal(detail.summary.analysis.status, 'DONE');
+  assert.deepEqual(detail.summary.analysis.items.map(i => [i.type, i.attribution]), [['CLAIM', 'SPEAKER'],
+    ['CAUSE', 'INTERPRETATION']]);
+  assert.equal(count.analysis, 1);
+  assert.ok(detail.verification);
+  const jobs = jobRepository(env.DB);
+  await jobs.saveSummary(job.id, {...detail.summary, analysis: {status: 'RUNNING'}});
+  const again = await (await routeV1(new Request(`${BASE}/api/v1/jobs/${job.id}/analysis`, {method: 'POST',
+    headers: {origin: BASE}}), env, null, {fetchFn})).json();
+  assert.equal(again.started, false);
+  assert.equal(count.analysis, 1);
+  const crossSite = await routeV1(new Request(`${BASE}/api/v1/jobs/${job.id}/analysis`, {method: 'POST',
+    headers: {origin: 'https://evil.test'}}), env);
+  assert.equal(crossSite.status, 403);
 });
