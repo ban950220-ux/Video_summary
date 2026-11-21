@@ -51,7 +51,7 @@ export function jobContext({env, step = inlineStep, deps = {}}) {
   const sleep = deps.sleep;
   const config = readConfig(env);
   const jobs = jobRepository(env.DB, deps);
-  const usage = createD1Usage(env.DB, config.dailyLimits, deps);
+  const usage = createD1Usage(env.DB, config.dailyLimits, {...deps, budget: config.budget});
   const modelsFor = async () => {
     const keys = await loadProviderKeys(env);
     const geminiModel = env.V1_GEMINI_MODEL || DEFAULT_GEMINI_MODEL;

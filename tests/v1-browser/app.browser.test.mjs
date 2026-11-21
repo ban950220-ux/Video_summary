@@ -83,7 +83,8 @@ function mockApi(req, res, url, body) {
       createdAt: '2026-10-14T00:00:00Z', bytes: 116145}]});
   }
   if (url.pathname === '/api/v1/usage') {
-    return send(res, 200, {usage: {day: '2026-11-21', items: [{key: 'geminiCalls', used: 9, limit: 200}]},
+    return send(res, 200, {usage: {day: '2026-11-21', items: [{key: 'geminiCalls', used: 9, limit: 200}],
+      spend: {month: '2026-11', spentKrw: 764, budgetKrw: 3000, estimated: true}},
       keys: {supadata: true, gemini: true, groq: false}});
   }
   if (url.pathname === '/api/v1/health') return send(res, 200, {paidApiAllowed: false, liveProvidersEnabled: true});
@@ -199,7 +200,8 @@ test('library search, previous reports and settings', async () => {
   assert.match(await p.textContent('#keys'), /groq: 없음/);
   assert.match(await p.textContent('#usage'), /Gemini 호출: 9 \/ 200/);
   assert.equal(await p.$eval('#usage .meter span', el => el.style.width), '4.5%');
-  assert.match(await p.textContent('main'), /유료 API 차단됨/);
+  assert.match(await p.textContent('#spend'), /약 764원 \/ 예산 3,000원/);
+  assert.match(await p.textContent('main'), /Flash 계열 모델만/);
   assert.deepEqual(p.errors, []);
   await p.context().close();
 });

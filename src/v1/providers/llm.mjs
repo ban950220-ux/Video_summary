@@ -3,7 +3,7 @@
 // Gemini (primary, Flash family only) and Groq (fallback, allowlisted free models only).
 import {AppError} from '../errors.mjs';
 import {toJsonSchema} from '../summary/schema.mjs';
-import {assertFreeModel, DEFAULT_GEMINI_MODEL, GEMINI_BASE} from './gemini.mjs';
+import {assertFreeModel, billedOutput, DEFAULT_GEMINI_MODEL, GEMINI_BASE} from './gemini.mjs';
 import {failedResponse, providerFetch, readProviderJson} from './http.mjs';
 
 export const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -48,7 +48,7 @@ export function geminiTextModel({apiKey, model = DEFAULT_GEMINI_MODEL, fetchFn =
       return {
         data: parseJsonText(raw, 'gemini'),
         usage: {promptTokens: json?.usageMetadata?.promptTokenCount ?? null,
-          outputTokens: json?.usageMetadata?.candidatesTokenCount ?? null},
+          outputTokens: billedOutput(json?.usageMetadata)},
       };
     },
   };

@@ -32,8 +32,10 @@ export async function runCrossCheckJob({jobId, env, step = inlineStep, deps = {}
         const {keys, geminiModel} = await modelsFor();
         const clip = await withRetry(`cross ${window.startSec}-${window.endSec}s`, async () => {
           await usage.consume({geminiCalls: 1, geminiVideoSeconds: window.endSec - window.startSec});
-          return transcribeClip({canonicalUrl: job.url, startSec: window.startSec, endSec: window.endSec,
-            apiKey: keys.gemini, model: geminiModel, fetchFn});
+          const heard = await transcribeClip({canonicalUrl: job.url, startSec: window.startSec,
+            endSec: window.endSec, apiKey: keys.gemini, model: geminiModel, fetchFn});
+          await usage.charge(heard.usage);
+          return heard;
         }, {sleep});
         return {...window, segments: clip.segments.map(({startMs, endMs, text}) => ({startMs, endMs, text})),
           promptTokens: clip.usage.promptTokens};

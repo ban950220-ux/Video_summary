@@ -177,7 +177,7 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
       return json({jobs: items});
     }
     if (path === 'usage' && method === 'GET') {
-      const usage = await createD1Usage(env.DB, config.dailyLimits, deps).snapshot();
+      const usage = await createD1Usage(env.DB, config.dailyLimits, {...deps, budget: config.budget}).snapshot();
       return json({usage, keys: keyStatus(await loadProviderKeys(env))});
     }
 

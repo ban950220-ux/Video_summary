@@ -11,9 +11,9 @@
   - 숫자 검증 설계: `docs/v1/NUMERIC_VERIFICATION_DESIGN.md`
 - 현재 단계는 `docs/v1/PROGRESS.md`의 마지막 항목을 본다.
 
-## ⚠ 미해결: Gemini 키가 유료 등급(Tier 1)
+## Gemini 비용 (2026-11-21 결정)
 
-- 2026-11-21 사용자가 AI Studio에서 확인. 무료 키로 교체(또는 유료 유지 결정) 전까지 AI는 Gemini를 쓰는 실행을 하지 않는다. `docs/v1/PROGRESS.md` 마지막 절 참고.
+- 키는 유료 등급(Tier 1)이다. 사용자가 유지를 결정했고, 앱에 월 3,000원 상한을 두었다(`docs/v1/PROGRESS.md` "월 예산" 절). AI의 검증용 Gemini 호출도 이 예산 안에서 최소한으로 한다.
 
 ## 사용자 확정 사항 (2026-11-21)
 

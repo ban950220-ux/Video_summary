@@ -10,6 +10,7 @@ export const ERRORS = Object.freeze({
   NOT_FOUND: {status: 404, message: '요청한 항목을 찾을 수 없습니다.'},
   PAID_API_BLOCKED: {status: 403, message: '유료 API 사용은 차단되어 있습니다.'},
   DAILY_LIMIT_REACHED: {status: 429, message: '오늘의 무료 사용 한도에 도달했습니다. 내일 다시 시도하세요.'},
+  MONTHLY_BUDGET_REACHED: {status: 429, message: '이번 달 Gemini 예산에 도달했습니다. 다음 달에 다시 사용할 수 있습니다.'},
   PROVIDER_KEY_MISSING: {status: 409, message: '설정에서 API 키를 먼저 등록하세요.'},
   PROVIDER_FAILED: {status: 502, message: '외부 서비스 응답에 실패했습니다.'},
   PROVIDER_RATE_LIMITED: {status: 429, message: '외부 서비스의 무료 사용 한도에 걸렸습니다. 잠시 후 다시 시도합니다.'},

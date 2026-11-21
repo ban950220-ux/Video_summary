@@ -21,7 +21,7 @@
 
 ## 변경하면 안 되는 것
 
-- **무료 유지**: 유료 API를 호출하는 코드 경로를 만들지 않는다. `paidApiAllowed`는 코드에서 항상 `false`다. Supadata는 항상 `mode=native`로 요청한다.
+- **비용 상한**(2026-11-21 사용자 결정): Gemini 키는 유료 등급(Tier 1)이다. Flash 계열 모델만 쓰고, 앱의 월 예산 상한(`V1_MONTHLY_BUDGET_KRW`, 기본 3,000원)을 없애거나 우회하지 않는다. Supadata는 항상 `mode=native`로 요청한다. 예산을 올리거나 다른 유료 서비스를 쓰려면 사용자 승인이 필요하다. AI가 검증 목적으로 Gemini를 호출할 때도 이 예산 안에서만, 필요한 만큼만 한다.
 - **운영 대상 보존**: Worker `holy-rice-b914`, D1 `youtube-ai-analyzer-private-db`, Cloudflare Access 설정, Worker Secret을 바꾸거나 지우지 않는다.
 - **D1**: 기존 테이블(`jobs`, `provider_credentials`, `yta_*` 등)과 이미 적용된 migration 파일을 수정하지 않는다. v1은 `v1_` 접두사 테이블을 추가만 한다.
 - **비밀값**: API 키, Access 값, 암호화 루트 키, 쿠키, 실제 전사 원문을 GitHub, PR, CI 로그, 테스트 fixture에 넣지 않는다. 테스트는 합성 자료만 쓴다.

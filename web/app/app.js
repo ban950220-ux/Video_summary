@@ -198,12 +198,18 @@ async function settingsView() {
     groqCalls: 'Groq 호출'};
   show(
     h('section', {class: 'card'}, h('h1', {}, '설정'),
-      h('p', {}, health.paidApiAllowed ? '유료 API 허용' : '유료 API 차단됨 (무료 전용)'),
+      h('p', {}, 'Gemini는 Flash 계열 모델만 사용합니다. 요금은 등록한 키의 Google 프로젝트 등급에 따릅니다(앱은 등급을 알 수 없음).'),
       h('p', {class: health.liveProvidersEnabled ? '' : 'warn'}, health.liveProvidersEnabled
         ? '외부 서비스 호출 사용 중' : '외부 서비스 호출이 꺼져 있습니다 (자막 업로드만 가능).')),
     h('section', {class: 'card', id: 'keys'}, h('h2', {}, 'API 키 등록 상태'),
       h('ul', {}, Object.entries(keys).map(([name, ok]) => h('li', {}, `${name}: ${ok ? '등록됨' : '없음'}`))),
       h('p', {class: 'muted'}, '키 등록·교체는 ', h('a', {href: '/#settings'}, '기존 설정 화면'), '에서 합니다. 키 값은 표시하지 않습니다.')),
+    usage.spend ? h('section', {class: 'card', id: 'spend'}, h('h2', {}, `이번 달 Gemini 비용 (${usage.spend.month})`),
+      h('p', {}, `약 ${usage.spend.spentKrw.toLocaleString('ko-KR')}원 / 예산 `
+        + `${usage.spend.budgetKrw.toLocaleString('ko-KR')}원`),
+      h('div', {class: 'meter'}, meterBar(usage.spend.spentKrw, usage.spend.budgetKrw)),
+      h('p', {class: 'muted'}, '앱이 토큰 수로 계산한 추정치입니다. 예산에 가까워지면 Gemini 호출을 멈추고 요약은 무료 Groq로 '
+        + '넘어갑니다. 실제 청구액은 Google Cloud 결제 화면에서 확인하세요.')) : null,
     h('section', {class: 'card', id: 'usage'}, h('h2', {}, `오늘 사용량 (${usage.day}, UTC)`),
       usage.items.map(item => h('div', {}, h('p', {class: 'muted'}, `${LABEL[item.key] ?? item.key}: ${item.used} / `
         + `${item.limit}`), h('div', {class: 'meter'}, meterBar(item.used, item.limit))))),

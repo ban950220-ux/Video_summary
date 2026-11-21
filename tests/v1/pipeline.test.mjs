@@ -345,3 +345,48 @@ test('analysis on request: stored as summary.analysis, guarded while running, co
     headers: {origin: 'https://evil.test'}}), env);
   assert.equal(crossSite.status, 403);
 });
+
+test('monthly Gemini budget: spend is tracked from tokens and Gemini stops near the budget', async () => {
+  const {env} = environment();
+  const budget = {monthlyKrw: 3000, reserveKrw: 150, krwPerUsd: 1500, usdPerMInput: 0.75, usdPerMOutput: 3.75,
+    offset: '2026-11:900'};
+  const at = {now: () => '2026-11-21T10:00:00Z', budget};
+  const usage = createD1Usage(env.DB, {geminiCalls: 1000, groqCalls: 10}, at);
+  await usage.consume({geminiCalls: 1});
+  await usage.charge({promptTokens: 1_000_000, outputTokens: 100_000});
+  // 1M in * $0.75 + 0.1M out * $3.75 = $1.125 -> 1,687.5 KRW, plus the 900 KRW offset
+  assert.deepEqual((await usage.snapshot()).spend, {month: '2026-11', spentKrw: 2587.5, budgetKrw: 3000,
+    estimated: true});
+  await usage.consume({geminiCalls: 1});
+  // +337.5 KRW -> 2,925 KRW, above budget minus the 150 KRW reserve
+  await usage.charge({promptTokens: 300_000, outputTokens: 0});
+  await assert.rejects(usage.consume({geminiCalls: 1}), {code: 'MONTHLY_BUDGET_REACHED'});
+  await usage.consume({groqCalls: 1});
+  const december = createD1Usage(env.DB, {geminiCalls: 1000}, {now: () => '2026-12-01T00:00:01Z', budget});
+  await december.consume({geminiCalls: 1});
+  assert.equal((await december.snapshot()).spend.spentKrw, 0);
+});
+
+test('when the budget is reached a summary falls back to Groq instead of spending more', async () => {
+  const {env} = environment();
+  env.GROQ_API_KEY = 'gq-key-123';
+  env.V1_MONTHLY_BUDGET_KRW = '0';
+  const seen = [];
+  const fetchFn = async (url, init) => {
+    seen.push(new URL(url).hostname);
+    if (String(url).includes('groq.com')) {
+      const content = JSON.stringify(summaryFor([1, 2, 3]));
+      return jsonResponse({choices: [{finish_reason: 'stop', message: {content}}],
+        usage: {prompt_tokens: 10, completion_tokens: 5}});
+    }
+    return jsonResponse({title: '제목'});
+  };
+  const srt = [1, 2, 3].map(i => `${i}\n00:00:0${i},000 --> 00:00:0${i + 1},000\n문장 ${i}\n`).join('\n');
+  const created = await (await routeV1(post('/api/v1/jobs/upload', {filename: 'a.srt', text: srt}), env, null,
+    {fetchFn})).json();
+  const detail = await (await routeV1(new Request(`${BASE}/api/v1/jobs/${created.job.id}`), env)).json();
+  assert.equal(detail.job.status, 'DONE');
+  assert.deepEqual(detail.summary.generation.calls.map(c => `${c.provider}:${c.code ?? c.outcome}`),
+    ['gemini:MONTHLY_BUDGET_REACHED', 'groq:ok']);
+  assert.ok(!seen.includes('generativelanguage.googleapis.com'));
+});

@@ -17,6 +17,7 @@ export async function callModels({label, models, prompt, schema, validate, usage
       const result = await withRetry(`${label}@${model.provider}`, async () => {
         await usage?.consume({[model.usageKey]: 1});
         const {data, usage: tokens} = await model.generateJson({system: SYSTEM_RULES, prompt, schema});
+        if (model.provider === 'gemini') await usage?.charge?.(tokens ?? {});
         return {value: validate(data), tokens};
       }, {sleep, attempts: tries});
       log.push({label, provider: model.provider, model: model.model, outcome: 'ok', tries, ...result.tokens});

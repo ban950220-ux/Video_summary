@@ -15,6 +15,15 @@ export const DEFAULT_CLIP_SEC = 15 * 60;
 export const MAX_VIDEO_SEC = 2 * 60 * 60;
 const EDGE_SLACK_SEC = 5;
 
+// Output is billed including thinking tokens, which candidatesTokenCount leaves out.
+export function billedOutput(meta) {
+  if (!meta) return null;
+  if (Number.isFinite(meta.totalTokenCount) && Number.isFinite(meta.promptTokenCount)) {
+    return Math.max(0, meta.totalTokenCount - meta.promptTokenCount);
+  }
+  return meta.candidatesTokenCount ?? null;
+}
+
 export function assertFreeModel(model) {
   if (typeof model !== 'string' || !FREE_MODEL.test(model)) throw new AppError('PAID_API_BLOCKED', `model ${model}`);
   return model;
@@ -116,7 +125,7 @@ export async function transcribeClip({canonicalUrl, startSec, endSec, apiKey, mo
     language: typeof parsed.language === 'string' ? parsed.language.slice(0, 16) : null,
     usage: {
       promptTokens: body?.usageMetadata?.promptTokenCount ?? null,
-      outputTokens: body?.usageMetadata?.candidatesTokenCount ?? null,
+      outputTokens: billedOutput(body?.usageMetadata),
       totalTokens: body?.usageMetadata?.totalTokenCount ?? null,
     },
   };
@@ -142,7 +151,9 @@ export async function transcribeVideo({canonicalUrl, apiKey, model = DEFAULT_GEM
     const end = Math.min(start + clipSec, limit);
     const clip = await withRetry(`gemini ${start}-${end}s`, async () => {
       await usage?.consume({geminiCalls: 1, geminiVideoSeconds: end - start});
-      return transcribeClip({canonicalUrl, startSec: start, endSec: end, apiKey, model, fetchFn});
+      const heard = await transcribeClip({canonicalUrl, startSec: start, endSec: end, apiKey, model, fetchFn});
+      await usage?.charge?.(heard.usage);
+      return heard;
     }, {sleep, attempts});
     calls.push({startSec: start, endSec: end, ...clip.usage});
     segments.push(...dropBoundaryDuplicates(segments, clip.segments));
