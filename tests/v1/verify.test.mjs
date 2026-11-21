@@ -22,6 +22,9 @@ test('number extraction: digits, Korean scales and numerals, English words, unit
   assert.deepEqual(get('1.5 million dollars'), [[1_500_000, 'USD']]);
   assert.deepEqual(get('2024년에 3,500명'), [[2024, 'YEAR'], [3500, 'PEOPLE']]);
   assert.deepEqual(get('구조개혁과 임금 구조 개편'), []);
+  assert.deepEqual(get('1만 3,000원에 사들여'), [[13_000, 'KRW']]);
+  assert.deepEqual(get('1억 2천만 원'), [[120_000_000, 'KRW']]);
+  assert.deepEqual(get('3조 원, 5명'), [[3e12, 'KRW'], [5, 'PEOPLE']]);
 });
 
 test('same fact, same meaning is verified (incl. spoken numerals and English source)', () => {

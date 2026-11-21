@@ -55,7 +55,9 @@ export function compareFacts(verification, transcript, clips, limits = LIMITS) {
     seen.add(key);
     const from = Math.min(...segs.map(s => s.startMs)) - limits.padSec * 1000;
     const to = Math.max(...segs.map(s => s.endMs ?? s.startMs)) + limits.padSec * 1000;
-    const heard = clips.flatMap(c => c.segments).filter(s => s.endMs >= from && s.startMs <= to);
+    // Timestamps inside a re-listened clip are approximate, so the whole clip that covers the evidence
+    // is compared (clips are short), not only the segments at the exact time.
+    const heard = clips.filter(c => c.endSec * 1000 >= from && c.startSec * 1000 <= to).flatMap(c => c.segments);
     const base = {surface: fact.surface, value: fact.value, unit: fact.unit, segmentIds: fact.segmentIds};
     if (!heard.length) {
       items.push({...base, result: 'NOT_CHECKED'});
@@ -68,7 +70,9 @@ export function compareFacts(verification, transcript, clips, limits = LIMITS) {
     }
     const sameUnit = numbers.filter(n => n.unit === fact.unit);
     const heardValues = [...new Set((sameUnit.length ? sameUnit : numbers).map(n => n.raw))].slice(0, 5);
-    items.push({...base, result: 'DIFFERS', heardValues});
+    const nearest = heard.filter(s => s.endMs >= from && s.startMs <= to);
+    const heardText = (nearest.length ? nearest : heard).map(s => s.text).join(' ').slice(0, 300);
+    items.push({...base, result: 'DIFFERS', heardValues, heardText});
   }
   const count = result => items.filter(i => i.result === result).length;
   return {items, counts: {total: items.length, confirmed: count('CONFIRMED'), differs: count('DIFFERS'),

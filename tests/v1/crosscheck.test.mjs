@@ -43,7 +43,8 @@ test('second listen confirms matching numbers and reports what it heard for the 
   const result = compareFacts(verification, transcript, clips);
   assert.deepEqual(result.counts, {total: 4, confirmed: 3, differs: 1, notChecked: 0});
   assert.deepEqual(result.items.find(i => i.result === 'DIFFERS'), {surface: '1003개사', value: 1003, unit: 'COUNT',
-    segmentIds: [2], result: 'DIFFERS', heardValues: ['2521개', '1053개', '10곳', '4곳']});
+    segmentIds: [2], result: 'DIFFERS', heardValues: ['2521개', '1053개', '10곳', '4곳'],
+    heardText: '상장사는 2521개사 중 1053개사였습니다. 10곳 중 4곳입니다'});
   assert.equal(compareFacts(verification, transcript, []).counts.notChecked, 4);
 });
 

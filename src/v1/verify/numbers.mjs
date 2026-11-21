@@ -117,12 +117,28 @@ const KO_NATIVE_RUN = new RegExp(`(?<![가-힣])${KO_NATIVE_WORDS}\\s?(?=${KO_CO
 export function extractNumbers(text) {
   const out = [];
   const source = String(text ?? '');
+  const consumed = [];
   for (const m of source.matchAll(DIGITS)) {
+    if (consumed.some(([from, to]) => m.index >= from && m.index < to)) continue;
     let value = Number(m[0].replace(/,/g, ''));
     let end = m.index + m[0].length;
     const {scale, length} = scaleAfter(source, end);
     value *= scale;
     end += length;
+    // "1만 3,000원", "1억 2천만 원": lower-order parts continue the same number.
+    let lowest = scale;
+    while (lowest >= 1e4) {
+      const next = source.slice(end).match(/^\s?(\d{1,3}(?:,\d{3})+|\d+)/);
+      if (!next) break;
+      const part = Number(next[1].replace(/,/g, ''));
+      const partScale = scaleAfter(source, end + next[0].length);
+      const partValue = part * partScale.scale;
+      if (!(partValue < lowest)) break;
+      value += partValue;
+      end += next[0].length + partScale.length;
+      consumed.push([end - next[0].length - partScale.length, end]);
+      lowest = partScale.scale;
+    }
     const unit = unitAt(source, end);
     let kind = unit.unit;
     if (kind === 'YEAR' && !(value >= 1900 && value <= 2100 && scale === 1)) kind = 'DURATION';

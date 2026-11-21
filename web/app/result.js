@@ -86,7 +86,8 @@ function crossCheckBlock(cross, canRun, onCrossCheck) {
     if (differs.length) {
       box.append(h('ul', {class: 'points'}, differs.map(item => h('li', {class: 'verify-MISMATCH'},
         h('span', {class: 'badge'}, '⚠'), ' ', h('strong', {}, item.surface ?? String(item.value)),
-        ` — 다시 들은 값: ${item.heardValues?.join(', ') || '숫자 없음'}`))));
+        ` — 다시 들은 값: ${item.heardValues?.join(', ') || '숫자 없음'}`,
+        item.heardText ? h('p', {class: 'quote'}, item.heardText) : null))));
     }
     return box;
   }
