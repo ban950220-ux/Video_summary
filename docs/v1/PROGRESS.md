@@ -205,3 +205,29 @@
 ### 남은 이슈
 - **실제 Android 설치·전체 화면 실행·로그인 유지**는 6단계 배포 후 사용자 기기에서 확인해야 한다. 그 전에는 PWA 완료로 보지 않는다.
 - PR #41의 수동 요약 가져오기 데이터는 main에 없어서 "이전 보고서"에 포함하지 않았다. 운영 D1에 `0021` 테이블이 있으면 6단계에서 추가한다.
+
+## 6단계 준비 — 배포 설정·절차서 (2026-11-21, 배포 전)
+
+사용자 지시: "작업 진행". 실제 배포와 운영 D1 변경은 하지 않았다(별도 승인 대상).
+
+### 변경 내용
+| 파일 | 내용 |
+|---|---|
+| `wrangler.v1.toml` | 같은 Worker·D1·변수·관측 설정. 차이: 진입점 `src/v1/workflow-entry.mjs`, 정적 파일 `dist/v1-assets`, Workflow `video-summary-v1`(`SUMMARY_WORKFLOW`). 기존 `wrangler.toml`은 변경하지 않음 |
+| `scripts/v1-build-assets.mjs` | v0.7 `web/site`(/)와 v1 `web/app`(/v1/)을 합친 정적 파일 폴더 생성 |
+| `src/v1/entry.mjs` | `/v1` → `/v1/` 이동, `/v1/` 페이지에만 `manifest-src`·`worker-src`를 허용한 CSP 적용 |
+| `.github/workflows/deploy-v1.yml` | 수동 배포(Worker 이름 입력 확인, Cloudflare Secret 필요). 푸시·병합으로는 배포되지 않음 |
+| `docs/v1/DEPLOY.md` | 바뀌는 것·그대로인 것, 배포 전 확인, 배포 방법 2가지, 배포 후 확인 8항목, 되돌리기 |
+| `tests/v1/deploy-config.test.mjs` | 4개: 기존 설정과 같은 대상·변수·관측 설정, Workflow 연결, 정적 파일 구성(v0.7 파일 동일), `/v1` 이동·인증·CSP |
+
+### 발견한 문제와 조치
+- v0.7 사이트 CSP에 `manifest-src`가 없어 `default-src 'none'`으로 막힌다. 그대로 배포하면 **PWA 매니페스트가 차단돼 설치가 안 된다**. `/v1/` 페이지에만 허용 범위를 넓혀 해결했다. v0.7 페이지의 CSP는 그대로다.
+- 처음 만든 v1 설정은 관측(로그) 설정을 단순화해서, 배포하면 기존 로그 설정이 바뀔 수 있었다. 기존 값을 그대로 복사하고 테스트로 고정했다.
+
+### 검증 결과
+- `npx wrangler deploy -c wrangler.v1.toml --dry-run`(실제 배포 없음): 번들 생성 성공. Workflow·D1·정적 파일 바인딩 인식, 업로드 크기 952.63 KiB(gzip 205.24 KiB)
+- v1 테스트 70/70, 화면 테스트 5/5, `npm run check` 통과(v1 검사 45개 파일)
+- 전체 `npm test`·GitHub CI: 아래 기록
+
+### 배포 전 사용자 확인 필요 (DEPLOY.md 2장)
+- 현재 운영 버전 ID·배포 시각, D1 테이블 목록(`0021` 유무), 키 등록 여부, 배포 방법(A 직접 / B GitHub Actions), 검증 영상 URL 2개

@@ -1,0 +1,55 @@
+# v1 deploy configuration for the SAME existing Worker and D1 as wrangler.toml.
+# Deploy only after owner approval, following docs/v1/DEPLOY.md:
+#   node scripts/v1-build-assets.mjs && npx wrangler deploy -c wrangler.v1.toml
+# Differences from wrangler.toml: v1 entry (keeps every v0.7 route), combined assets (/ and /v1/),
+# and the durable Workflow binding. Vars, Secrets, Access and the D1 binding are unchanged.
+name = "holy-rice-b914"
+main = "src/v1/workflow-entry.mjs"
+compatibility_date = "2026-10-10"
+workers_dev = true
+preview_urls = false
+keep_vars = true
+
+[observability]
+# Preserve the observed API shape: no destinations or issues configuration.
+enabled = true
+head_sampling_rate = 1
+redact_query_string = false
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[observability.traces]
+enabled = false
+head_sampling_rate = 1
+persist = true
+
+[assets]
+directory = "./dist/v1-assets"
+binding = "ASSETS"
+run_worker_first = true
+
+[vars]
+ENABLE_LIVE_FREE = "true"
+ALLOW_PAID_API = "false"
+SITE_DEPLOYED = "true"
+# ACCESS_* and KEY_ENCRYPTION_KEY_B64 stay as existing dashboard variables / Worker Secrets.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "youtube-ai-analyzer-private-db"
+database_id = "d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34"
+
+[[workflows]]
+name = "video-summary-v1"
+binding = "SUMMARY_WORKFLOW"
+class_name = "SummaryWorkflow"
+
+# Previews stay disabled (preview_urls = false); same safe defaults as wrangler.toml.
+[previews.vars]
+ENABLE_LIVE_FREE = "false"
+ALLOW_PAID_API = "false"
+SITE_DEPLOYED = "false"
