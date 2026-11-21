@@ -25,19 +25,23 @@ function show(...nodes) {
 function newView() {
   const url = h('input', {type: 'url', name: 'url', required: true, placeholder: 'https://www.youtube.com/watch?v=…',
     'aria-label': 'YouTube 주소'});
+  const geminiOnly = h('input', {type: 'checkbox', name: 'geminiOnly'});
+  const geminiLabel = h('label', {class: 'muted check'}, geminiOnly,
+    ' 기존 자막 건너뛰고 Gemini로 전사 (시험용, 무료 한도에서 영상 길이만큼 사용)');
   const submit = h('button', {type: 'submit'}, '요약 시작');
   const urlForm = h('form', {id: 'url-form', onsubmit: async event => {
     event.preventDefault();
     submit.disabled = true;
     try {
-      const {job, reused} = await api('/api/v1/jobs', {method: 'POST', body: {url: url.value.trim()}});
+      const body = {url: url.value.trim(), ...(geminiOnly.checked ? {transcriptMode: 'gemini'} : {})};
+      const {job, reused} = await api('/api/v1/jobs', {method: 'POST', body});
       if (reused) toast('이미 요약한 영상이라 기존 결과를 엽니다.');
       location.hash = `#job/${job.id}`;
     } catch (error) {
       toast(error.message);
       submit.disabled = false;
     }
-  }}, url, submit);
+  }}, url, geminiLabel, submit);
 
   const file = h('input', {type: 'file', accept: '.srt,.vtt,.txt', 'aria-label': '자막 파일'});
   const fileUrl = h('input', {type: 'url', placeholder: '영상 주소 (선택)', 'aria-label': '영상 주소 (선택)'});

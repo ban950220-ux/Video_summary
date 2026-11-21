@@ -21,25 +21,33 @@ export function acquireFromUpload({url = null, filename, text, durationSec = nul
 }
 
 export async function acquireTranscript({url, db = null, keys = {}, liveProvidersEnabled = false,
-  usage, fetchFn = fetch, sleep, geminiModel = DEFAULT_GEMINI_MODEL, durationSec = null}) {
+  usage, fetchFn = fetch, sleep, geminiModel = DEFAULT_GEMINI_MODEL, durationSec = null, geminiOnly = false}) {
   const {videoId, canonicalUrl} = parseYouTubeUrl(url);
   const attempts = [];
   const done = (transcript, extra = {}) => ({videoId, canonicalUrl, transcript, method: transcript.source,
     attempts, ...extra});
 
   let legacy = null;
-  try {
-    legacy = await findLegacyTranscript(db, videoId);
-    attempts.push({step: 'legacy', outcome: legacy ? 'found' : 'none', complete: legacy?.transcript.coverage.complete});
-  } catch (error) {
-    attempts.push({step: 'legacy', outcome: 'error', code: codeOf(error)});
+  if (geminiOnly) {
+    // Owner-chosen test mode: skip saved transcripts and existing captions, transcribe with Gemini.
+    attempts.push({step: 'legacy', outcome: 'skipped', reason: 'GEMINI_ONLY'});
+  } else {
+    try {
+      legacy = await findLegacyTranscript(db, videoId);
+      attempts.push({step: 'legacy', outcome: legacy ? 'found' : 'none',
+        complete: legacy?.transcript.coverage.complete});
+    } catch (error) {
+      attempts.push({step: 'legacy', outcome: 'error', code: codeOf(error)});
+    }
   }
   if (legacy?.transcript.coverage.complete) return done(legacy.transcript, {legacyJobId: legacy.legacyJobId});
 
   if (!liveProvidersEnabled) {
     attempts.push({step: 'providers', outcome: 'skipped', reason: 'LIVE_DISABLED'});
   } else {
-    if (keys.supadata) {
+    if (geminiOnly) {
+      attempts.push({step: 'supadata', outcome: 'skipped', reason: 'GEMINI_ONLY'});
+    } else if (keys.supadata) {
       const tries = [];
       try {
         const captions = await withRetry('supadata', async () => {

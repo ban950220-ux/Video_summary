@@ -283,3 +283,12 @@
 - `vujhk4dNlGA`는 자동 생성 자막 영상이라 Supadata native로 처리될 수 있다. 그 경우 Gemini 전사 경로는 실제로 검증되지 않으므로, 결과의 전사 출처를 기록하고 필요하면 자막 없는 영상을 추가로 받는다.
 - PR 생성(사용자 승인): https://github.com/ban950220-ux/Video_summary/pull/42 — main에 `deploy-v1.yml` 1개만 추가(버튼 표시용). 브랜치 `claude/serene-cori-0jdusg-deploy-workflow`.
 - 자막이 전혀 없는 공개 영상은 찾기 어렵다는 사용자 의견. Gemini 경로의 실제 검증 방법은 별도로 정한다.
+
+## 6단계 — check 실행 결과와 후속 조치 (2026-11-21)
+
+- PR #42 병합(사용자). Deploy v1 #1(`check`): **성공**. 토큰 인증·D1 접근·복원 지점 기록·배포 리허설 통과, 실제 배포 단계는 건너뜀.
+- **개인정보 노출(내 실수)**: check 단계의 `wrangler whoami`가 Cloudflare 계정 이름(사용자 이메일 포함)을 공개 저장소의 Actions 로그에 출력했다. `whoami`를 제거하고, 신원 출력 명령을 막는 테스트를 추가했다(`a9f87a4`). main에 병합된 사본에는 아직 `whoami`가 남아 있다. 실행 시 반드시 `claude/serene-cori-0jdusg`를 선택해야 하며, main 사본 수정 PR이 필요하다. 사용자에게 #1·#2 실행 기록 삭제를 요청했다.
+- **Gemini 전용 전사 옵션(사용자 요청)**: 새 요약 화면 체크박스 "기존 자막 건너뛰고 Gemini로 전사".
+  - API `transcriptMode: 'gemini'`. 기존 전사·자막 단계를 건너뛰고 기록하며, 기존 작업을 재사용하지 않는다.
+  - `v1_jobs.options_json` 열 추가(운영 D1에는 아직 v1 테이블이 없음).
+  - 테스트 2개 추가(v1 75/75), 화면 테스트 5/5.

@@ -211,3 +211,28 @@ test('v1 API sits behind Cloudflare Access and the same-origin check', async () 
   assert.equal((await crossSite.json()).error.code, 'FORBIDDEN_ORIGIN');
   assert.equal((await routeV1(new Request(`${BASE}/api/v1/jobs`), {})).status, 503);
 });
+
+test('transcriptMode gemini creates a new job and never calls Supadata', async () => {
+  const {env} = environment();
+  const {fetchFn, count} = providers();
+  const gem = async (url, init) => {
+    if (String(url).includes('generativelanguage') && JSON.parse(init.body).contents[0].parts[0].fileData) {
+      count.gemini += 1;
+      return jsonResponse(geminiBody({endOfVideo: true, segments: [1, 2, 3].map(i => ({start: i, end: i + 1,
+        text: `문장 ${i}`}))}));
+    }
+    return fetchFn(url, init);
+  };
+  const first = await (await routeV1(post('/api/v1/jobs', {url: `https://youtu.be/${ID}`}), env, null,
+    {fetchFn: gem})).json();
+  const second = await (await routeV1(post('/api/v1/jobs', {url: `https://youtu.be/${ID}`, transcriptMode: 'gemini'}),
+    env, null, {fetchFn: gem, sleep: async () => {}})).json();
+  assert.notEqual(second.job.id, first.job.id);
+  const detail = await (await routeV1(new Request(`${BASE}/api/v1/jobs/${second.job.id}`), env, null, {})).json();
+  assert.equal(detail.job.status, 'DONE');
+  assert.equal(detail.job.transcriptSource, 'gemini-video');
+  assert.deepEqual(detail.job.options, {geminiOnly: true});
+  assert.equal(count.supadata, 1);
+  const bad = await routeV1(post('/api/v1/jobs', {url: `https://youtu.be/${ID}`, transcriptMode: 'paid'}), env);
+  assert.equal(bad.status, 400);
+});

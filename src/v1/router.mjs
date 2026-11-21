@@ -40,11 +40,16 @@ async function createJob(request, env, ctx, deps, jobs) {
   assertSameOrigin(request);
   const body = await readJson(request);
   const {videoId, canonicalUrl} = parseYouTubeUrl(body.url);
-  if (body.force !== true) {
+  if (body.transcriptMode !== undefined && !['auto', 'gemini'].includes(body.transcriptMode)) {
+    throw new AppError('BAD_REQUEST', 'transcriptMode');
+  }
+  const geminiOnly = body.transcriptMode === 'gemini';
+  // A Gemini-only request is a deliberate re-test, so it never reuses an earlier job.
+  if (body.force !== true && !geminiOnly) {
     const existing = await jobs.findReusable(videoId);
     if (existing) return json({job: existing, reused: true});
   }
-  const job = await jobs.create({videoId, url: canonicalUrl});
+  const job = await jobs.create({videoId, url: canonicalUrl, options: geminiOnly ? {geminiOnly: true} : {}});
   const runner = await startJob(job.id, env, ctx, deps);
   return json({job: await jobs.get(job.id), reused: false, runner}, 202);
 }

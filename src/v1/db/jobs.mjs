@@ -26,6 +26,7 @@ function jobFromRow(row) {
   return {
     id: row.id, videoId: row.video_id, url: row.url, title: row.title, status: row.status,
     transcriptSource: row.transcript_source, errorCode: row.error_code, attempts: parse(row.attempts_json, []),
+    options: parse(row.options_json, {}),
     createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
@@ -33,12 +34,13 @@ function jobFromRow(row) {
 export function jobRepository(db, {now = () => new Date().toISOString(), newId = () => crypto.randomUUID()} = {}) {
   const ready = async () => ensureV1Schema(requireDb(db));
   return {
-    async create({videoId = null, url = null, title = null}) {
+    async create({videoId = null, url = null, title = null, options = {}}) {
       await ready();
       const id = newId();
       const at = now();
-      await db.prepare(`INSERT INTO v1_jobs(id, video_id, url, title, status, created_at, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?)`).bind(id, videoId, url, title, STATUS.QUEUED, at, at).run();
+      await db.prepare(`INSERT INTO v1_jobs(id, video_id, url, title, status, options_json, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, videoId, url, title, STATUS.QUEUED, JSON.stringify(options), at, at)
+        .run();
       return this.get(id);
     },
     async get(id) {

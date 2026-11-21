@@ -11,6 +11,7 @@ export const V1_SCHEMA = Object.freeze([
     transcript_source TEXT,
     error_code TEXT,
     attempts_json TEXT,
+    options_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,

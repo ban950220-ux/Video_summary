@@ -119,3 +119,19 @@ test('transient Supadata failures are retried at most twice', async () => {
   assert.equal(calls.length, 3);
   assert.equal(usage.totals.supadataCalls, 3);
 });
+
+test('Gemini-only mode skips saved transcripts and captions', async () => {
+  const db = legacyDb();
+  addLegacy(db, {jobId: 'full', duration: 600, lastSec: 600});
+  const gemini = jsonResponse(geminiBody({endOfVideo: true, segments: [{start: 0, end: 5, text: '제미나이'}]}));
+  const {fetchFn, calls} = scriptedFetch([gemini]);
+  const usage = createMemoryUsage(limits);
+  const result = await acquireTranscript({url: URL_, db: d1(db), keys, liveProvidersEnabled: true, fetchFn, usage,
+    sleep: noSleep, geminiOnly: true});
+  assert.equal(result.method, 'gemini-video');
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /generativelanguage/);
+  assert.equal(usage.totals.supadataCalls, undefined);
+  assert.deepEqual(result.attempts.map(a => `${a.step}:${a.outcome}`), ['legacy:skipped', 'supadata:skipped',
+    'gemini:found']);
+});

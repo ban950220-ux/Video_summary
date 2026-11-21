@@ -58,6 +58,7 @@ export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) 
       const {keys, geminiModel} = await modelsFor();
       try {
         const result = await acquireTranscript({url: job.url, db: env.DB, keys, usage, fetchFn, sleep, geminiModel,
+          geminiOnly: job.options?.geminiOnly === true,
           liveProvidersEnabled: config.liveProvidersEnabled});
         await jobs.saveTranscript(jobId, result.transcript, {legacyJobId: result.legacyJobId ?? null});
         const title = job.title ?? await fetchTitle(result.canonicalUrl, fetchFn);
