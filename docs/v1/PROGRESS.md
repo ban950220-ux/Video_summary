@@ -465,3 +465,28 @@
   - 분석 항목이 모두 SPEAKER로 표시됐다. 인과 항목 중 AI 추론이 섞였을 수 있어 지시문 보강을 검토한다.
   - 분석에서 늘어난 불일치 4건은 사람 검토 대상이다.
   - 운영 중 API로 POST할 때는 `content-type: application/json`이 필요하다(동일 출처 검사). 이번 실검증 중 한 번 빠뜨려 CSRF 차단을 확인했다.
+
+## 7단계 — PC 실행기(Groq Whisper)와 전사 불확실성 표시 (2026-11-21, 구현·테스트. 실기기 검증 전)
+
+사용자 지시: "진행하고 불확실한 음성전사를 개선할 방법들을 재고". 개선 방안은 `docs/v1/TRANSCRIPT_UNCERTAINTY.md`에 정리했고, 그중 비용 없는 A안과 C안을 이번에 넣었다.
+
+### 변경 내용
+- 작업 상태 `WAITING_PC` / `PC_RUNNING` 추가. `POST /api/v1/jobs {transcriptMode:'pc', rightsConfirmed:true}`로 만든다(권리 확인이 없으면 400).
+- 실행기 API(`/api/v1/runner/*`):
+  - `next`: 대기 작업 1건을 원자적으로 가져간다. 30분 동안 응답이 없으면 다시 내놓는다.
+  - `jobs/:id/transcript`: 전사 업로드 → 요약 파이프라인 시작
+  - `jobs/:id/fail`: 실패 사유 기록
+- 인증: PC 전용 Access 서비스 토큰(`V1_RUNNER_TOKEN_CLIENT_ID`). **`/api/v1/runner/*`만 허용**하고 다른 v1 API는 403, 운영 화면은 401이다.
+- `scripts/v1-pc-runner.mjs`: yt-dlp(설정·쿠키 미사용, `--` 뒤에 URL) → ffmpeg 16kHz 모노 10분 조각 → Groq `whisper-large-v3-turbo`(verbose_json, 제목을 용어 힌트로 전달, 429·5xx는 대기 후 최대 2회 재시도) → 업로드. 임시 파일은 끝나면 삭제한다. 비밀값은 환경 변수로만 받는다.
+- 전사 불확실성(`src/v1/uncertainty.mjs`):
+  - Whisper 점수 기준으로 `REPETITIVE` / `LOW_CONFIDENCE` / `LIKELY_NO_SPEECH` 표시
+  - 같은 문장 3회 이상 연속이면 `REPEAT`
+  - Gemini `[불명확]`은 `UNCLEAR_MARK`
+  - 30초 이상 공백 감지
+  - 전사 구간에 `flags`로 저장한다.
+- 화면: "PC 실행기로 전사" 선택(이용약관 확인 창), PC 대기·진행 표시, 불확실 구간 수 표시, 근거 구간을 열면 ⚠ 표시.
+- 테스트: 실행기·불확실성 4개, 실행기 토큰 범위 1개. v1 93/93, 화면 5/5.
+
+### 남은 것
+- 운영 배포 후 사용자 PC에서 실제 1건 검증(완료 기준). PC 준비: Node 24, yt-dlp, ffmpeg, PC용 서비스 토큰·정책·변수 `V1_RUNNER_TOKEN_CLIENT_ID`, Groq 키.
+- 불확실 구간을 인용한 요약 항목 자동 표시(A-5), 숫자 구간 교차 확인(B), 구간 교정(D)은 실제 Whisper 결과를 본 뒤 진행한다.

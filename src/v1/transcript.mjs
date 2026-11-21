@@ -31,7 +31,10 @@ export function makeTranscript({source, language = null, segments, durationSec =
     const endMs = finiteMs(segment.endMs);
     if (startMs !== null && endMs !== null && endMs < startMs) throw new AppError('INVALID_TRANSCRIPT', 'end < start');
     chars += text.length;
-    cleaned.push({startMs, endMs, text});
+    // Optional uncertainty flags (e.g. LOW_CONFIDENCE, REPEAT) from the transcription engine.
+    const flags = Array.isArray(segment.flags)
+      ? [...new Set(segment.flags.filter(f => typeof f === 'string' && /^[A-Z_]{2,32}$/.test(f)))].slice(0, 5) : [];
+    cleaned.push(flags.length ? {startMs, endMs, text, flags} : {startMs, endMs, text});
   }
   if (!cleaned.length) throw new AppError('INVALID_TRANSCRIPT', 'empty transcript');
   if (chars > MAX_TEXT_CHARS) throw new AppError('PAYLOAD_TOO_LARGE');

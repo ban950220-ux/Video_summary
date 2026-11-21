@@ -4,6 +4,7 @@
 import {AppError} from '../errors.mjs';
 import {makeTranscript, SOURCES} from '../transcript.mjs';
 import {withRetry} from '../retry.mjs';
+import {markUnclear} from '../uncertainty.mjs';
 import {failedResponse, providerFetch, readProviderJson} from './http.mjs';
 
 export const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -154,7 +155,7 @@ export async function transcribeVideo({canonicalUrl, apiKey, model = DEFAULT_GEM
   const transcript = makeTranscript({
     source: SOURCES.GEMINI_VIDEO,
     language,
-    segments,
+    segments: markUnclear(segments),
     durationSec: durationSec ?? (modelEnded && lastEnd ? lastEnd : null),
     partial: reachedCap,
   });

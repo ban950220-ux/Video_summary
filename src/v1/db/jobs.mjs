@@ -4,8 +4,10 @@ import {ensureV1Schema} from './schema.mjs';
 
 export const STATUS = Object.freeze({
   QUEUED: 'QUEUED', ACQUIRING: 'ACQUIRING', SUMMARIZING: 'SUMMARIZING', DONE: 'DONE', FAILED: 'FAILED',
+  WAITING_PC: 'WAITING_PC', PC_RUNNING: 'PC_RUNNING',
 });
-const ACTIVE = [STATUS.QUEUED, STATUS.ACQUIRING, STATUS.SUMMARIZING, STATUS.DONE];
+const ACTIVE = [STATUS.QUEUED, STATUS.ACQUIRING, STATUS.SUMMARIZING, STATUS.DONE, STATUS.WAITING_PC, STATUS.PC_RUNNING];
+export const PC_LEASE_MS = 30 * 60_000;
 
 function requireDb(db) {
   if (!db) throw new AppError('PERSISTENCE_UNAVAILABLE');
@@ -34,12 +36,25 @@ function jobFromRow(row) {
 export function jobRepository(db, {now = () => new Date().toISOString(), newId = () => crypto.randomUUID()} = {}) {
   const ready = async () => ensureV1Schema(requireDb(db));
   return {
-    async create({videoId = null, url = null, title = null, options = {}}) {
+    // The PC runner takes the oldest waiting job; a job whose runner went silent for PC_LEASE_MS is
+    // offered again. The conditional UPDATE makes the claim atomic across runners.
+    async claimPcJob() {
+      await ready();
+      const stale = new Date(Date.parse(now()) - PC_LEASE_MS).toISOString();
+      const row = await db.prepare(`SELECT id, status FROM v1_jobs WHERE status = ? OR (status = ? AND updated_at < ?)
+        ORDER BY created_at ASC LIMIT 1`).bind(STATUS.WAITING_PC, STATUS.PC_RUNNING, stale).first();
+      if (!row) return null;
+      const result = await db.prepare(`UPDATE v1_jobs SET status = ?, updated_at = ? WHERE id = ? AND status = ?
+        AND (status = ? OR updated_at < ?)`).bind(STATUS.PC_RUNNING, now(), row.id, row.status, STATUS.WAITING_PC,
+        stale).run();
+      return Number(result?.meta?.changes ?? 0) === 1 ? this.get(row.id) : null;
+    },
+    async create({videoId = null, url = null, title = null, options = {}, status = STATUS.QUEUED}) {
       await ready();
       const id = newId();
       const at = now();
       await db.prepare(`INSERT INTO v1_jobs(id, video_id, url, title, status, options_json, created_at, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, videoId, url, title, STATUS.QUEUED, JSON.stringify(options), at, at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, videoId, url, title, status, JSON.stringify(options), at, at)
         .run();
       return this.get(id);
     },

@@ -2,7 +2,7 @@
 // before any /api/ route, so every handler here already runs as the owner.
 import {acquireFromUpload} from './acquire.mjs';
 import {readConfig} from './config.mjs';
-import {jobRepository} from './db/jobs.mjs';
+import {jobRepository, STATUS} from './db/jobs.mjs';
 import {createD1Usage} from './db/usage.mjs';
 import {AppError} from './errors.mjs';
 import {exportMarkdown, exportText} from './export.mjs';
@@ -11,6 +11,8 @@ import {keyStatus, loadProviderKeys} from './keys.mjs';
 import {listLegacySources, loadLegacyTranscript} from './legacy-transcripts.mjs';
 import {inlineStep, runSummaryJob} from './pipeline.mjs';
 import {runAnalysisJob} from './pipeline-analysis.mjs';
+import {makeTranscript, SOURCES} from './transcript.mjs';
+import {uncertaintyReport} from './uncertainty.mjs';
 import {verifySummary} from './verify/facts.mjs';
 import {parseYouTubeUrl} from './youtube.mjs';
 
@@ -48,7 +50,7 @@ async function createJob(request, env, ctx, deps, jobs) {
   assertSameOrigin(request);
   const body = await readJson(request);
   const {videoId, canonicalUrl} = parseYouTubeUrl(body.url);
-  if (body.transcriptMode !== undefined && !['auto', 'gemini'].includes(body.transcriptMode)) {
+  if (body.transcriptMode !== undefined && !['auto', 'gemini', 'pc'].includes(body.transcriptMode)) {
     throw new AppError('BAD_REQUEST', 'transcriptMode');
   }
   const geminiOnly = body.transcriptMode === 'gemini';
@@ -57,9 +59,50 @@ async function createJob(request, env, ctx, deps, jobs) {
     const existing = await jobs.findReusable(videoId);
     if (existing) return json({job: existing, reused: true});
   }
+  if (body.transcriptMode === 'pc') {
+    // Downloading YouTube audio may conflict with YouTube's terms; the owner confirms each time.
+    if (body.rightsConfirmed !== true) throw new AppError('BAD_REQUEST', 'rightsConfirmed required for PC runner');
+    const job = await jobs.create({videoId, url: canonicalUrl, status: STATUS.WAITING_PC,
+      options: {pcRunner: true, rightsConfirmedAt: new Date().toISOString()}});
+    return json({job, reused: false, runner: 'pc'}, 202);
+  }
   const job = await jobs.create({videoId, url: canonicalUrl, options: geminiOnly ? {geminiOnly: true} : {}});
   const runner = await startJob(job.id, env, ctx, deps);
   return json({job: await jobs.get(job.id), reused: false, runner}, 202);
+}
+
+// PC runner API (/api/v1/runner/*): claim a waiting job, then upload its transcript or a failure.
+const RUNNER_JOB = /^runner\/jobs\/([0-9a-f-]{36})\/(transcript|fail)$/;
+
+async function runnerRoute(request, env, ctx, deps, jobs, path) {
+  if (path === 'runner/next' && request.method === 'POST') {
+    assertSameOrigin(request);
+    const job = await jobs.claimPcJob();
+    return json({job: job ? {id: job.id, url: job.url, videoId: job.videoId, title: job.title} : null});
+  }
+  const match = path.match(RUNNER_JOB);
+  if (!match || request.method !== 'POST') throw new AppError('NOT_FOUND');
+  assertSameOrigin(request);
+  const job = await jobs.get(match[1]);
+  if (!job || job.status !== STATUS.PC_RUNNING) throw new AppError('NOT_FOUND', 'job is not claimed');
+  const body = await readJson(request, 2_500_000);
+  if (match[2] === 'fail') {
+    const detail = typeof body.detail === 'string' ? body.detail.slice(0, 240) : null;
+    const code = /^[A-Z_]{2,40}$/.test(body.code ?? '') ? body.code : 'PC_RUNNER_FAILED';
+    await jobs.update(job.id, {status: STATUS.FAILED, errorCode: 'TRANSCRIPT_UNAVAILABLE',
+      attempts: [...job.attempts, {step: 'pc', outcome: 'error', code, detail}]});
+    return json({ok: true});
+  }
+  const transcript = makeTranscript({source: SOURCES.PC_WHISPER, language: body.language ?? null,
+    segments: Array.isArray(body.segments) ? body.segments : [], durationSec: Number(body.durationSec) || null});
+  await jobs.saveTranscript(job.id, transcript);
+  const report = uncertaintyReport(transcript);
+  await jobs.update(job.id, {status: STATUS.QUEUED, transcriptSource: transcript.source,
+    title: job.title ?? (typeof body.title === 'string' ? body.title.slice(0, 300) : null),
+    attempts: [...job.attempts, {step: 'pc', outcome: 'found', engine: String(body.engine ?? '').slice(0, 60),
+      uncertainSegments: report.uncertainSegments, gaps: report.gaps.length}]});
+  const runner = await startJob(job.id, env, ctx, deps);
+  return json({ok: true, runner, uncertainSegments: report.uncertainSegments}, 202);
 }
 
 async function legacyJob(request, env, ctx, deps, jobs) {
@@ -103,6 +146,10 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
       return json({ok: true, version: config.version, paidApiAllowed: config.paidApiAllowed,
         paidApiRequested: config.paidApiRequested, liveProvidersEnabled: config.liveProvidersEnabled,
         persistence: Boolean(env.DB), durableJobs: Boolean(env.SUMMARY_WORKFLOW)});
+    }
+    if (path.startsWith('runner/')) {
+      if (!env.DB) throw new AppError('PERSISTENCE_UNAVAILABLE');
+      return await runnerRoute(request, env, ctx, deps, jobRepository(env.DB, deps), path);
     }
     const known = ['jobs', 'jobs/upload', 'jobs/from-legacy', 'legacy-sources', 'usage'].includes(path)
       || JOB_PATH.test(path);

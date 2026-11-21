@@ -52,3 +52,16 @@ test('the service token opens only /api/v1, never the production pages', async (
   const legacyApi = await handleV1Site(req(service, '/api/jobs'), env);
   assert.equal(legacyApi.status, 401);
 });
+
+test('the PC runner token opens only /api/v1/runner/*', async () => {
+  const RUNNER = `${'c'.repeat(32)}.access`;
+  const e = {...env, V1_RUNNER_TOKEN_CLIENT_ID: RUNNER};
+  const jwt = token({common_name: RUNNER});
+  assert.deepEqual(await verifyV1Access(req(jwt), e, {fetcher}), {ok: true, identity: 'runner'});
+  const blocked = await handleV1Site(req(jwt, '/api/v1/jobs'), e, null, {access: {fetcher}});
+  assert.equal(blocked.status, 403);
+  const allowed = await handleV1Site(req(jwt, '/api/v1/runner/unknown'), e, null, {access: {fetcher}});
+  assert.notEqual(allowed.status, 403);
+  assert.notEqual(allowed.status, 401);
+  assert.equal((await handleV1Site(req(jwt, '/'), e)).status, 401);
+});

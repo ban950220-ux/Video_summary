@@ -28,12 +28,24 @@ function newView() {
   const geminiOnly = h('input', {type: 'checkbox', name: 'geminiOnly'});
   const geminiLabel = h('label', {class: 'muted check'}, geminiOnly,
     ' 기존 자막 건너뛰고 Gemini로 전사 (시험용, 무료 한도에서 영상 길이만큼 사용)');
+  const pcMode = h('input', {type: 'checkbox', name: 'pcMode'});
+  const pcLabel = h('label', {class: 'muted check'}, pcMode,
+    ' PC 실행기로 전사 (내 PC에서 음성을 받아 Groq Whisper로 전사, 권리가 있는 영상만)');
+  geminiOnly.addEventListener('change', () => { if (geminiOnly.checked) pcMode.checked = false; });
+  pcMode.addEventListener('change', () => { if (pcMode.checked) geminiOnly.checked = false; });
   const submit = h('button', {type: 'submit'}, '요약 시작');
   const urlForm = h('form', {id: 'url-form', onsubmit: async event => {
     event.preventDefault();
     submit.disabled = true;
     try {
-      const body = {url: url.value.trim(), ...(geminiOnly.checked ? {transcriptMode: 'gemini'} : {})};
+      if (pcMode.checked && !confirm('YouTube 영상의 음성을 내 PC로 내려받는 것은 YouTube 이용약관에 걸릴 수 있습니다.\n'
+        + '이 영상에 대한 권리가 있거나 허용된 범위에서만 사용하는 것이 맞습니까?')) {
+        submit.disabled = false;
+        return;
+      }
+      const mode = pcMode.checked ? {transcriptMode: 'pc', rightsConfirmed: true}
+        : geminiOnly.checked ? {transcriptMode: 'gemini'} : {};
+      const body = {url: url.value.trim(), ...mode};
       const {job, reused} = await api('/api/v1/jobs', {method: 'POST', body});
       if (reused) toast('이미 요약한 영상이라 기존 결과를 엽니다.');
       location.hash = `#job/${job.id}`;
@@ -41,7 +53,7 @@ function newView() {
       toast(error.message);
       submit.disabled = false;
     }
-  }}, url, geminiLabel, submit);
+  }}, url, geminiLabel, pcLabel, submit);
 
   const file = h('input', {type: 'file', accept: '.srt,.vtt,.txt', 'aria-label': '자막 파일'});
   const fileUrl = h('input', {type: 'url', placeholder: '영상 주소 (선택)', 'aria-label': '영상 주소 (선택)'});

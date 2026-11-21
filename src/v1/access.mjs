@@ -28,9 +28,10 @@ async function jwks(domain, kid, fetcher, nowMs) {
   return keys;
 }
 
+const CLIENT_ID = /^[0-9a-f]{32}\.access$/;
+
 export function serviceTokenConfigured(env) {
-  const id = env?.V1_SERVICE_TOKEN_CLIENT_ID;
-  return typeof id === 'string' && /^[0-9a-f]{32}\.access$/.test(id);
+  return CLIENT_ID.test(env?.V1_SERVICE_TOKEN_CLIENT_ID ?? '');
 }
 
 // Returns {ok, identity: 'owner' | 'service'} or {ok: false, reason}.
@@ -54,7 +55,10 @@ export async function verifyV1Access(request, env, {fetcher = fetch, nowMs = Dat
       && claims.email.toLowerCase() === String(env.ACCESS_OWNER_EMAIL ?? '').toLowerCase();
     const service = !claims.email && serviceTokenConfigured(env)
       && claims.common_name === env.V1_SERVICE_TOKEN_CLIENT_ID;
-    if (!owner && !service) throw Error('NOT_ALLOWED');
+    // The PC runner has its own token; entry.mjs limits it to /api/v1/runner/*.
+    const runner = !claims.email && CLIENT_ID.test(env.V1_RUNNER_TOKEN_CLIENT_ID ?? '')
+      && claims.common_name === env.V1_RUNNER_TOKEN_CLIENT_ID;
+    if (!owner && !service && !runner) throw Error('NOT_ALLOWED');
     const jwk = (await jwks(env.ACCESS_TEAM_DOMAIN, header.kid, fetcher, nowMs)).find(k => k.kid === header.kid);
     if (!jwk) throw Error('UNKNOWN_KEY');
     const key = await crypto.subtle.importKey('jwk', {kty: 'RSA', n: jwk.n, e: jwk.e, ext: true},
@@ -62,7 +66,7 @@ export async function verifyV1Access(request, env, {fetcher = fetch, nowMs = Dat
     const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, base64UrlBytes(parts[2]),
       encoder.encode(`${parts[0]}.${parts[1]}`));
     if (!ok) throw Error('SIGNATURE');
-    return {ok: true, identity: owner ? 'owner' : 'service'};
+    return {ok: true, identity: owner ? 'owner' : service ? 'service' : 'runner'};
   } catch {
     return {ok: false, reason: 'ACCESS_DENIED'};
   }

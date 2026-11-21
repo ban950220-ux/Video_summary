@@ -11,6 +11,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const MAX_LINES = 400;
 const MAX_COLUMNS = 120;
 const DEFAULT_TARGETS = ['src/v1', 'tests/v1', 'tests/v1-browser', 'web/app', 'scripts/v1-lint.mjs',
+  'scripts/v1-pc-runner.mjs',
   'scripts/v1-make-icons.mjs'];
 const EXTENSIONS = /\.(?:mjs|js)$/;
 

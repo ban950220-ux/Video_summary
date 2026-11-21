@@ -49,6 +49,7 @@ export async function handleV1Site(request, env, ctx, deps = {}) {
   if (!authConfigured(env)) return denied('ACCESS_NOT_CONFIGURED', 503);
   const access = await verifyV1Access(request, env, deps.access);
   if (!access.ok) return denied(access.reason, 401);
+  if (access.identity === 'runner' && !path.startsWith('/api/v1/runner/')) return denied('RUNNER_SCOPE', 403);
   if (!sameOriginMutation(request)) return denied('CSRF_BLOCKED', 403);
   const response = await routeV1(request, env, ctx, deps);
   const headers = new Headers(response.headers);

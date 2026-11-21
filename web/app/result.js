@@ -29,7 +29,15 @@ function coverageText(transcript) {
   return '전사 범위 확인 불가';
 }
 
+function uncertainLine(transcript) {
+  const flagged = (transcript?.segments ?? []).filter(s => s.flags?.length);
+  if (!flagged.length) return null;
+  return h('p', {class: 'warn'}, `전사가 불확실한 구간 ${flagged.length}개 (환각·낮은 확신·반복 등). 근거 구간에 ⚠로 표시됩니다.`);
+}
+
 function steps(status) {
+  if (status === 'WAITING_PC') return h('p', {class: 'warn'}, 'PC 실행기 대기 중입니다. PC에서 실행기를 켜면 전사가 시작됩니다.');
+  if (status === 'PC_RUNNING') return h('p', {class: 'muted'}, 'PC 실행기가 음성을 받아 전사하고 있습니다…');
   const at = STEPS.findIndex(([key]) => key === status);
   return h('ol', {class: 'steps', 'aria-label': '진행 단계'},
     STEPS.map(([, label], i) => h('li', {class: i < at || status === 'DONE' ? 'done' : i === at ? 'now' : ''}, label)));
@@ -41,7 +49,8 @@ function evidence(ids, transcript, videoId) {
   const chips = h('div', {class: 'evidence'}, ids.map(id => h('button', {type: 'button', 'data-segment': id,
     onclick: () => {
       const seg = byId.get(id);
-      box.replaceChildren(seg ? h('p', {class: 'quote'}, h('a', {href: watchUrl(videoId, seg.startMs),
+      const unsure = seg?.flags?.length ? h('span', {class: 'warn'}, ` ⚠ 전사 불확실(${seg.flags.join(', ')})`) : null;
+      box.replaceChildren(seg ? h('p', {class: 'quote'}, unsure, h('a', {href: watchUrl(videoId, seg.startMs),
         target: '_blank', rel: 'noopener'}, clock(seg.startMs)), ' ', seg.text) : h('p', {class: 'muted'}, '구간 없음'));
     }}, `#${id}`)));
   return [chips, box];
@@ -111,7 +120,8 @@ export function renderResult({job, transcript, summary, verification}, {onDelete
     h('div', {class: 'row'}, h('span', {class: `badge status-${job.status}`}, job.status)),
     job.status === 'DONE' || job.status === 'FAILED' ? null : steps(job.status),
     transcript ? h('p', {class: 'muted'}, `전사 출처: ${SOURCE[transcript.source] ?? transcript.source} · `
-      + `범위: ${coverageText(transcript)}`) : null)];
+      + `범위: ${coverageText(transcript)}`) : null,
+    uncertainLine(transcript))];
 
   if (job.status === 'FAILED') {
     nodes.push(h('section', {class: 'card', id: 'failure'},
