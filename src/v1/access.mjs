@@ -58,7 +58,10 @@ export async function verifyV1Access(request, env, {fetcher = fetch, nowMs = Dat
     // The PC runner has its own token; entry.mjs limits it to /api/v1/runner/*.
     const runner = !claims.email && CLIENT_ID.test(env.V1_RUNNER_TOKEN_CLIENT_ID ?? '')
       && claims.common_name === env.V1_RUNNER_TOKEN_CLIENT_ID;
-    if (!owner && !service && !runner) throw Error('NOT_ALLOWED');
+    // Another project (e.g. BANSIGHT) reads summaries with its own token; entry.mjs limits it to reads.
+    const reader = !claims.email && CLIENT_ID.test(env.V1_READER_TOKEN_CLIENT_ID ?? '')
+      && claims.common_name === env.V1_READER_TOKEN_CLIENT_ID;
+    if (!owner && !service && !runner && !reader) throw Error('NOT_ALLOWED');
     const jwk = (await jwks(env.ACCESS_TEAM_DOMAIN, header.kid, fetcher, nowMs)).find(k => k.kid === header.kid);
     if (!jwk) throw Error('UNKNOWN_KEY');
     const key = await crypto.subtle.importKey('jwk', {kty: 'RSA', n: jwk.n, e: jwk.e, ext: true},
@@ -66,7 +69,7 @@ export async function verifyV1Access(request, env, {fetcher = fetch, nowMs = Dat
     const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, base64UrlBytes(parts[2]),
       encoder.encode(`${parts[0]}.${parts[1]}`));
     if (!ok) throw Error('SIGNATURE');
-    return {ok: true, identity: owner ? 'owner' : service ? 'service' : 'runner'};
+    return {ok: true, identity: owner ? 'owner' : service ? 'service' : runner ? 'runner' : 'reader'};
   } catch {
     return {ok: false, reason: 'ACCESS_DENIED'};
   }

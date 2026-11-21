@@ -105,6 +105,10 @@ async function runnerRoute(request, env, ctx, deps, jobs, path) {
   const report = uncertaintyReport(transcript);
   await jobs.update(job.id, {status: STATUS.QUEUED, transcriptSource: transcript.source,
     title: job.title ?? (typeof body.title === 'string' ? body.title.slice(0, 300) : null),
+    // Video publish date from yt-dlp (YYYYMMDD), kept for point-in-time use by other projects.
+    options: /^\d{8}$/.test(body.uploadDate ?? '') ? {...job.options,
+      publishedAt: `${body.uploadDate.slice(0, 4)}-${body.uploadDate.slice(4, 6)}-${body.uploadDate.slice(6)}`}
+      : job.options,
     attempts: [...job.attempts, {step: 'pc', outcome: 'found', engine: String(body.engine ?? '').slice(0, 60),
       uncertainSegments: report.uncertainSegments, gaps: report.gaps.length}]});
   const runner = await startJob(job.id, env, ctx, deps);

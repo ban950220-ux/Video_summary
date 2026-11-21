@@ -42,6 +42,12 @@ export function withV1PageHeaders(response, pathname) {
   return new Response(response.body, {status: response.status, headers});
 }
 
+// The reader token may only list summaries and fetch an export. No writes, no transcripts API,
+// no usage or key status.
+export function readerAllowed(method, path) {
+  return method === 'GET' && (path === '/api/v1/jobs' || /^\/api\/v1\/jobs\/[0-9a-f-]{36}\/export$/.test(path));
+}
+
 export async function handleV1Site(request, env, ctx, deps = {}) {
   const path = new URL(request.url).pathname;
   if (path === '/v1' || path.startsWith('/v1/')) return v1Page(request, env, ctx);
@@ -50,6 +56,7 @@ export async function handleV1Site(request, env, ctx, deps = {}) {
   const access = await verifyV1Access(request, env, deps.access);
   if (!access.ok) return denied(access.reason, 401);
   if (access.identity === 'runner' && !path.startsWith('/api/v1/runner/')) return denied('RUNNER_SCOPE', 403);
+  if (access.identity === 'reader' && !readerAllowed(request.method, path)) return denied('READER_SCOPE', 403);
   if (!sameOriginMutation(request)) return denied('CSRF_BLOCKED', 403);
   const response = await routeV1(request, env, ctx, deps);
   const headers = new Headers(response.headers);

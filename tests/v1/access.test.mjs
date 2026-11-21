@@ -65,3 +65,22 @@ test('the PC runner token opens only /api/v1/runner/*', async () => {
   assert.notEqual(allowed.status, 401);
   assert.equal((await handleV1Site(req(jwt, '/'), e)).status, 401);
 });
+
+test('the reader token (other projects) may only list summaries and fetch exports', async () => {
+  const READER = `${'d'.repeat(32)}.access`;
+  const e = {...env, V1_READER_TOKEN_CLIENT_ID: READER};
+  const jwt = token({common_name: READER});
+  const call = (path, method = 'GET') => handleV1Site(new Request(`https://s.test${path}`, {method,
+    headers: {'cf-access-jwt-assertion': jwt, origin: 'https://s.test', 'content-type': 'application/json'},
+    body: method === 'GET' ? undefined : '{}'}), e, null, {access: {fetcher}});
+  const id = '00000000-0000-4000-8000-000000000001';
+  for (const path of ['/api/v1/jobs', `/api/v1/jobs/${id}/export`]) {
+    assert.notEqual((await call(path)).status, 403, path);
+  }
+  for (const [path, method] of [['/api/v1/jobs', 'POST'], [`/api/v1/jobs/${id}`, 'GET'],
+    [`/api/v1/jobs/${id}`, 'DELETE'], ['/api/v1/usage', 'GET'], ['/api/v1/runner/next', 'POST'], [`/api/v1/jobs/${id}/corrections`, 'PUT'],
+    ['/api/v1/legacy-sources', 'GET']]) {
+    assert.equal((await call(path, method)).status, 403, `${method} ${path}`);
+  }
+  assert.equal((await handleV1Site(req(jwt, '/'), e)).status, 401);
+});

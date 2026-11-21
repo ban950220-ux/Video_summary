@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
-import {configFromEnv, ffmpegArgs, whisperToSegments, ytDlpArgs} from '../../scripts/v1-pc-runner.mjs';
+import {
+  configFromEnv, ffmpegArgs, parseInfo, whisperToSegments, ytDlpArgs, ytDlpInfoArgs,
+} from '../../scripts/v1-pc-runner.mjs';
 import {routeV1} from '../../src/v1/router.mjs';
 import {findGaps, markRepeats, markUnclear, uncertaintyReport, whisperFlags} from '../../src/v1/uncertainty.mjs';
 import {d1, geminiBody, jsonResponse, memoryDb} from './fakes.mjs';
@@ -38,6 +40,9 @@ test('runner helpers: safe command arguments and chunk offsets', () => {
   assert.deepEqual(args.slice(-2), ['--', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ']);
   assert.ok(args.includes('--no-config') && args.includes('--no-cookies-from-browser'));
   assert.ok(ffmpegArgs('/w/source.m4a', '/w').includes('600'));
+  assert.ok(ytDlpInfoArgs('u').includes('--skip-download'));
+  assert.deepEqual(parseInfo('20261105\t제목\t탭 포함\n'), {uploadDate: '20261105', title: '제목\t탭 포함'});
+  assert.deepEqual(parseInfo('NA\t'), {});
   const segments = whisperToSegments({segments: [{start: 1.5, end: 4, text: ' 안녕 ', avg_logprob: -1.4,
     no_speech_prob: 0, compression_ratio: 1}, {start: 5, end: 6, text: '  '}]}, 2);
   assert.deepEqual(segments, [{startMs: 1_201_500, endMs: 1_204_000, text: '안녕', flags: ['LOW_CONFIDENCE']}]);
@@ -65,12 +70,16 @@ test('PC job: rights confirmation, single claim, transcript upload with flags, t
   const segments = [{startMs: 0, endMs: 4000, text: '첫 문장', flags: ['LOW_CONFIDENCE']},
     {startMs: 4000, endMs: 8000, text: '둘째'}, {startMs: 8000, endMs: 12_000, text: '셋째'}];
   const uploaded = await routeV1(post(`/api/v1/runner/jobs/${created.job.id}/transcript`, {segments, language: 'ko',
-    durationSec: 12, engine: 'groq whisper-large-v3-turbo'}), e, null, {fetchFn});
+    durationSec: 12, engine: 'groq whisper-large-v3-turbo', uploadDate: '20261105', title: '영상 제목'}), e, null,
+    {fetchFn});
   assert.equal(uploaded.status, 202);
   assert.equal((await uploaded.json()).uncertainSegments, 1);
   const detail = await (await routeV1(get(`/api/v1/jobs/${created.job.id}`), e)).json();
   assert.equal(detail.job.status, 'DONE');
   assert.equal(detail.transcript.source, 'pc-whisper');
+  assert.equal(detail.job.options.publishedAt, '2026-11-05');
+  assert.equal(detail.job.options.pcRunner, true);
+  assert.equal(detail.job.title, '영상 제목');
   assert.deepEqual(detail.transcript.segments[0].flags, ['LOW_CONFIDENCE']);
   assert.equal(uncertaintyReport(detail.transcript).uncertainSegments, 1);
   assert.equal(detail.job.attempts.at(-1).engine, 'groq whisper-large-v3-turbo');

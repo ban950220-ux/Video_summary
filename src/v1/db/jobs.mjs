@@ -73,13 +73,13 @@ export function jobRepository(db, {now = () => new Date().toISOString(), newId =
     async update(id, fields) {
       await ready();
       const columns = {status: 'status', title: 'title', transcriptSource: 'transcript_source',
-        errorCode: 'error_code', attempts: 'attempts_json'};
+        errorCode: 'error_code', attempts: 'attempts_json', options: 'options_json'};
       const sets = [];
       const values = [];
       for (const [key, column] of Object.entries(columns)) {
         if (!Object.hasOwn(fields, key)) continue;
         sets.push(`${column} = ?`);
-        values.push(key === 'attempts' ? JSON.stringify(fields[key]) : fields[key]);
+        values.push(key === 'attempts' || key === 'options' ? JSON.stringify(fields[key]) : fields[key]);
       }
       sets.push('updated_at = ?');
       values.push(now(), id);

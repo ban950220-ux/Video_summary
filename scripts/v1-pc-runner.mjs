@@ -32,6 +32,12 @@ export function ffmpegArgs(input, outDir) {
     join(outDir, 'chunk%03d.mp3')];
 }
 
+export function parseInfo(stdout) {
+  const [date, ...title] = String(stdout).trim().split('\n')[0].split('\t');
+  return {...(/^\d{8}$/.test(date) ? {uploadDate: date} : {}), ...(title.join('\t').trim()
+    ? {title: title.join('\t').trim().slice(0, 300)} : {})};
+}
+
 // Groq verbose_json segments (seconds within the chunk) -> transcript segments on the video timeline.
 export function whisperToSegments(response, chunkIndex) {
   const offset = chunkIndex * CHUNK_SEC;
@@ -41,13 +47,20 @@ export function whisperToSegments(response, chunkIndex) {
       endMs: Math.round((offset + Number(s.end)) * 1000), text: s.text.trim(), flags: whisperFlags(s)}));
 }
 
+export function ytDlpInfoArgs(url) {
+  return ['--no-playlist', '--no-config', '--no-cookies-from-browser', '--skip-download', '--print',
+    '%(upload_date)s\t%(title)s', '--', url];
+}
+
 function run(command, args) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {shell: false, windowsHide: true});
     let stderr = '';
+    let stdout = '';
+    child.stdout.on('data', chunk => { stdout = (stdout + chunk).slice(0, 4000); });
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
     child.on('error', reject);
-    child.on('close', code => (code === 0 ? resolve() : reject(new Error(`${command} exit ${code}: ${stderr}`))));
+    child.on('close', code => (code === 0 ? resolve(stdout) : reject(new Error(`${command} exit ${code}: ${stderr}`))));
   });
 }
 
@@ -94,6 +107,8 @@ export async function processOne(config) {
   const dir = mkdtempSync(join(config.workDir, 'v1-run-'));
   console.log(`job ${job.id}: ${job.url}`);
   try {
+    // Publish date and title first (no download); a failure here must not stop the transcription.
+    const info = await run(config.ytdlp, ytDlpInfoArgs(job.url)).then(parseInfo, () => ({}));
     await run(config.ytdlp, ytDlpArgs(job.url, dir));
     const source = readdirSync(dir).find(name => name.startsWith('source.'));
     if (!source) throw new Error('yt-dlp produced no audio');
@@ -109,7 +124,7 @@ export async function processOne(config) {
     }
     const durationSec = segments.length ? Math.max(...segments.map(s => s.endMs)) / 1000 : null;
     const uploaded = await api(config, `runner/jobs/${job.id}/transcript`, {segments: markRepeats(segments), language,
-      durationSec, engine: `groq ${WHISPER_MODEL}`});
+      durationSec, engine: `groq ${WHISPER_MODEL}`, ...info});
     console.log(`  uploaded ${segments.length} segments, uncertain ${uploaded.uncertainSegments}`);
     return job.id;
   } catch (error) {

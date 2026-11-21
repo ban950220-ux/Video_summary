@@ -582,3 +582,9 @@
 - 후속 개선 3·2 배포(Deploy #15, AI 실행, `de5c36a`): 성공.
   - 운영에서 JSON 내보내기를 확인했다(스키마, 진술 19개, 1003개사에 `MISMATCH`와 `reListen DIFFERS(1,053개)`가 붙음, 근거 문장·시각 링크 포함).
   - 화면 간결화와 공유 받기는 화면 경로라 AI가 볼 수 없다. 사용자 확인이 필요하다.
+
+## 후속 개선 2 — 연계 마무리 (사용자 결정: API 직접 호출, 게시일은 PC 실행기에서, 종목 추출 없음)
+- 읽기 전용 토큰 `V1_READER_TOKEN_CLIENT_ID`: `GET /api/v1/jobs`와 `GET /api/v1/jobs/:id/export`만 허용한다. 그 외(쓰기, 상세, 사용량, 실행기, 교정, 기존 전사 목록)는 403, 화면은 401(테스트로 확인).
+- 영상 게시일: PC 실행기가 내려받기 전에 `yt-dlp --skip-download --print`로 게시일·제목을 받아 전사와 함께 올린다. 서버는 `options.publishedAt`(YYYY-MM-DD)에 저장하고 JSON 내보내기의 `video.publishedAt`으로 내보낸다.
+- 연계 문서: `docs/v1/EXPORT_API.md`(인증, 엔드포인트, 형식, 사용 시 주의).
+- 테스트: 읽기 토큰 범위 1개, 게시일 저장. v1 102/102.
