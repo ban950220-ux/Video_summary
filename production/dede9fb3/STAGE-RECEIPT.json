@@ -1,0 +1,19 @@
+{
+  "worker": "holy-rice-b914",
+  "manifestSha256": "ce3a6cf81337ee2a829e54aeeeadc2156ec76887cb7ef97aa23017b577f5b097",
+  "workerSha256": "a49146b6ab9f4180577e525dde63817d8bebcea15aad7b4aefdc91a91f06d86a",
+  "versionTag": "text-review-read-a49146b6ab9f",
+  "previousVersion": "cafa3ca3-4202-43a8-b7d5-d335797d335d",
+  "previousDeployment": "d9ae3855-502a-4e68-874c-516095d7c738",
+  "uploadReceipt": "RECEIVED",
+  "activeTrafficVerified": true,
+  "inventoryVerified": true,
+  "newlyTaggedVersions": 1,
+  "versionId": "dede9fb3-38d2-49b8-ad67-32b4ed51937a",
+  "stagedConfigurationVerified": true,
+  "promoted": false,
+  "resendAttempted": false,
+  "stagedScriptETag": "12e565adf12b8599648b8b08c25ec8afb417dce4be1451e2e6e7ce7713ebcd12",
+  "status": "STAGED_AT_0_PERCENT",
+  "stagedTrafficPercent": 0
+}

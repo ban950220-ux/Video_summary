@@ -1,0 +1,59 @@
+{
+  "worker": "holy-rice-b914",
+  "versionId": "dede9fb3-38d2-49b8-ad67-32b4ed51937a",
+  "expectedScriptETag": "12e565adf12b8599648b8b08c25ec8afb417dce4be1451e2e6e7ce7713ebcd12",
+  "previousVersion": "cafa3ca3-4202-43a8-b7d5-d335797d335d",
+  "rollbackVersion": "cafa3ca3-4202-43a8-b7d5-d335797d335d",
+  "deploymentId": "5a0eb30a-6728-4a0d-bea1-dff60c9299b6",
+  "actualTraffic": [
+    {
+      "version_id": "dede9fb3-38d2-49b8-ad67-32b4ed51937a",
+      "percentage": 100
+    }
+  ],
+  "activeTrafficVerified": true,
+  "command": {
+    "receipt": "RECEIVED",
+    "settingsSyncSkipped": true
+  },
+  "resendAttempted": false,
+  "ownerBrowserVerification": "PASS",
+  "productionChecks": [
+    {
+      "check": 0,
+      "bindingAndRuntimeMatch": true
+    },
+    {
+      "check": 1,
+      "accessRedirects": 4,
+      "statusCodes": [
+        302,
+        302,
+        302,
+        302
+      ]
+    },
+    {
+      "check": 2,
+      "d1RecordCount": 1,
+      "summarySha256": "256d48dc3c7467982f4779c5dab2eafcf53233e18a6ace7b58064c3ff3fe4a62",
+      "payloadSha256": "588b064c5e1f6e352cd8c54fba940b8af880fbccde63a9489db7af7a2f8c8342",
+      "unverifiedFlags": true,
+      "d1Writes": 0
+    }
+  ],
+  "productionReadChecksPassed": true,
+  "status": "DEPLOYED_AND_OWNER_BROWSER_VERIFIED",
+  "ownerBrowserChecks": {
+    "ExportBytes": 13176,
+    "ReviewCount": 1,
+    "SignedInOwnerSession": true,
+    "Reopened": true,
+    "Browser": "Chrome",
+    "OriginalTabRecovered": true,
+    "DisplayedOriginalAudioUnverified": true,
+    "VerifiedAtUtc": "2026-11-09T12:00:17.8224940Z",
+    "ExportName": "corrected-review (1).txt",
+    "ExportSha256": "256d48dc3c7467982f4779c5dab2eafcf53233e18a6ace7b58064c3ff3fe4a62"
+  }
+}

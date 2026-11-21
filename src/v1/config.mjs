@@ -25,7 +25,8 @@ export function readConfig(env = {}) {
     paidApiAllowed: false,
     // Reported so the UI can warn when the environment asks for something the code refuses.
     paidApiRequested: env.ALLOW_PAID_API === 'true',
-    liveProvidersEnabled: env.ENABLE_LIVE_FREE === 'true',
+    // V1_LIVE_PROVIDERS is the v1-only switch; ENABLE_LIVE_FREE is the shared v0.7 switch.
+    liveProvidersEnabled: env.V1_LIVE_PROVIDERS === 'true' || env.ENABLE_LIVE_FREE === 'true',
     dailyLimits: {
       supadataCalls: cappedInteger(env.V1_LIMIT_SUPADATA_CALLS, DEFAULT_DAILY_LIMITS.supadataCalls),
       geminiVideoSeconds: cappedInteger(env.V1_LIMIT_GEMINI_VIDEO_SECONDS, DEFAULT_DAILY_LIMITS.geminiVideoSeconds),

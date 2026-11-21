@@ -33,10 +33,9 @@ binding = "ASSETS"
 run_worker_first = true
 
 [vars]
-ENABLE_LIVE_FREE = "true"
-ALLOW_PAID_API = "false"
-SITE_DEPLOYED = "true"
-# ACCESS_* and KEY_ENCRYPTION_KEY_B64 stay as existing dashboard variables / Worker Secrets.
+# Only a new v1 switch. Existing variables (ENABLE_LIVE_FREE, ALLOW_PAID_API, SITE_DEPLOYED, ACCESS_*)
+# and Secrets are left exactly as they are in the dashboard (keep_vars), like the production deploy.
+V1_LIVE_PROVIDERS = "true"
 
 [[d1_databases]]
 binding = "DB"

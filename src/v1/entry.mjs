@@ -1,8 +1,9 @@
 // v1 site entry. Runs the same owner checks as src/site-worker.mjs (Cloudflare Access JWT,
-// same-origin JSON writes) before /api/v1/*, and hands every other path to the v0.7 handler
-// unchanged. Kept separate so the reviewed v0.7 entry and its single-file bundle stay as they were.
+// same-origin JSON writes) before /api/v1/*, and hands every other path to the production handler
+// unchanged, so every live feature keeps working.
 import {authConfigured, sameOriginMutation, verifyOwnerAccess} from '../access.mjs';
-import {handleSiteRequest} from '../site-worker.mjs';
+// The live production site (version dede9fb3), not the older v0.7 source in src/: see production/README.md.
+import {handleSiteRequest} from '../../production/dede9fb3/runtime/primary.mjs';
 import {routeV1} from './router.mjs';
 
 const SECURITY_HEADERS = Object.freeze({

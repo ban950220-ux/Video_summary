@@ -1,0 +1,119 @@
+{
+  "scope": "Read-only stored text review list, detail and text export",
+  "worker": "holy-rice-b914",
+  "baseline": {
+    "version": "cafa3ca3-4202-43a8-b7d5-d335797d335d",
+    "deployment": "d9ae3855-502a-4e68-874c-516095d7c738",
+    "scriptETag": "c46ea664be6eba7f4df5bb75dd59eb7bed243b3119a8f4a042d2b08c919ca446",
+    "trafficPercent": 100
+  },
+  "rollbackVersion": "cafa3ca3-4202-43a8-b7d5-d335797d335d",
+  "d1": {
+    "binding": "DB",
+    "databaseIdSuffix": "d5e20b34",
+    "migrationIncluded": false
+  },
+  "build": {
+    "node": "v24.18.0",
+    "wrangler": "4.149.0",
+    "workerSha256": "a49146b6ab9f4180577e525dde63817d8bebcea15aad7b4aefdc91a91f06d86a",
+    "assetCount": 14
+  },
+  "validation": {
+    "dryRun": "PASS",
+    "remoteStrictComparison": "PENDING_STAGE",
+    "packagedWorkerD1Edge": "PASS"
+  },
+  "stage": {
+    "requestedTrafficPercent": 0,
+    "flags": [
+      "--keep-vars",
+      "--no-bundle",
+      "--strict"
+    ]
+  },
+  "promotion": "Separate approval required for the inspected staged version.",
+  "remoteChangesThisRun": false,
+  "contents": [
+    {
+      "file": "runtime/primary.mjs",
+      "bytes": 739864,
+      "sha256": "a49146b6ab9f4180577e525dde63817d8bebcea15aad7b4aefdc91a91f06d86a"
+    },
+    {
+      "file": "assets/app.js",
+      "bytes": 149594,
+      "sha256": "a53f4c0544eceee2b450fbbe05776fdf84112c7714a8259c82e56834fd6287d3"
+    },
+    {
+      "file": "assets/app.webmanifest",
+      "bytes": 529,
+      "sha256": "d364d800669f35d3571f3412183a3eba9a90d43024f59f9e691a2a91659bb5da"
+    },
+    {
+      "file": "assets/audio-progress-plan.mjs",
+      "bytes": 4681,
+      "sha256": "ad7d3e85550baa8652d059468aaeababfcbb9ac5728c68ffb73b5048a8ef4b38"
+    },
+    {
+      "file": "assets/audio-runner.mjs",
+      "bytes": 12141,
+      "sha256": "60e5f5de69ba19a767d376a980e5a13112c6469508ff3463831c375e9b2cbf92"
+    },
+    {
+      "file": "assets/audio.mjs",
+      "bytes": 6170,
+      "sha256": "19250dd1fef7cc0b2284cdb8b65cb813c6789372db45d0bed1a8645214b1a00d"
+    },
+    {
+      "file": "assets/context-review.mjs",
+      "bytes": 6228,
+      "sha256": "fc8bf1c476fe18c14b4165e6e24cb2e413963295b5487e2ea7a43ff48f3606da"
+    },
+    {
+      "file": "assets/groq-summary-progress.mjs",
+      "bytes": 8144,
+      "sha256": "4305fdcab4e5ec88241317a20ccaea0453912b3fc65805cbfbf57f258f86cbb4"
+    },
+    {
+      "file": "assets/icons/app-192.png",
+      "bytes": 7384,
+      "sha256": "b020f0ea6a51fac93e042effeeec8c2eb54e7b70f020c27f13df5b3524697a0d"
+    },
+    {
+      "file": "assets/icons/app-512.png",
+      "bytes": 17006,
+      "sha256": "191ff64fc7c62945f763d17ed48796a019fa017887e3928b441c849e05f18b72"
+    },
+    {
+      "file": "assets/index.html",
+      "bytes": 14727,
+      "sha256": "9db9690d64955245ad350e0298b53095c0d52338c1445176848eba77acff8178"
+    },
+    {
+      "file": "assets/manual-summary-archive.mjs",
+      "bytes": 22429,
+      "sha256": "f3bbe4d4cdc448dee2c4a6b2a970904d0f6e560069c75d8eeff46645862d3f0e"
+    },
+    {
+      "file": "assets/pwa-install.js",
+      "bytes": 2494,
+      "sha256": "93545fb320bd976ece5b9bc86582ce09a8193ed4c72fc611489f5b808f2348a7"
+    },
+    {
+      "file": "assets/style.css",
+      "bytes": 10674,
+      "sha256": "2c7e40d98d90c25fea4009e7390623011f73fa65a1a79e02a50af5ff90b8d8da"
+    },
+    {
+      "file": "assets/text-review-panel.mjs",
+      "bytes": 4399,
+      "sha256": "d605ee0af419768cf5860723088e5ac4c55a25bd3debe067590fd4a3e9d55c74"
+    },
+    {
+      "file": "wrangler.archive.template.json",
+      "bytes": 870,
+      "sha256": "c5d675f38351f5527b6f1c5611f2d8f6a9c2be1bcc243827e4b917d8806b968d"
+    }
+  ]
+}

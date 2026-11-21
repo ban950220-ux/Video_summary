@@ -1,0 +1,42 @@
+{
+  "name": "holy-rice-b914",
+  "main": "runtime/primary.mjs",
+  "compatibility_date": "2026-10-10",
+  "workers_dev": true,
+  "preview_urls": false,
+  "keep_vars": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": false,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
+  },
+  "assets": {
+    "directory": "./assets",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_id": "d7c1bd48-b0e1-4bb2-a7d7-2079d5e20b34"
+    }
+  ],
+  "previews": {
+    "vars": {
+      "ENABLE_LIVE_FREE": "false",
+      "ALLOW_PAID_API": "false",
+      "SITE_DEPLOYED": "false"
+    }
+  }
+}

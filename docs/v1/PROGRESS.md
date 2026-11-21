@@ -254,3 +254,30 @@
 추가 권장: 운영 코드 백업(PC 폴더 복사, 대시보드에서 코드 확인).
 
 키 위치 안내: 기존 사이트 "API 보안 설정" = Cloudflare D1 암호화 저장. GitHub에는 키를 넣지 않는다. GitHub Secrets에는 Cloudflare 배포 토큰만 넣는다.
+
+## 6단계 — 운영 코드 확보와 v1 통합 (2026-11-21)
+
+사용자 결정·보고: 운영 코드 저장소 보관 승인("넣어"), PC 백업 완료, API 키 등록, GitHub Secrets 등록, 검증 영상 2개 제공, 배포 방식 GitHub Actions.
+
+### 변경 내용
+- `production/dede9fb3/`: 사용자 제공 ZIP의 운영 산출물(번들 `runtime/primary.mjs`, `assets/`, 배포 영수증). 16개 파일 해시가 영수증과 일치한다. **위치 정보가 든 `.wrangler/cache/cf.json`은 제외했다.** 키·이메일·PC 경로는 없음을 확인했다. 설명은 `production/README.md`.
+- `src/v1/entry.mjs`: 감싸는 대상을 GitHub v0.7 소스에서 **운영 코드 `handleSiteRequest`**로 바꿨다. 수동 요약 보관·텍스트 검토·루트 PWA가 그대로 유지된다.
+- `scripts/v1-build-assets.mjs`: 정적 파일을 운영 `assets/`(/)와 v1(/v1/)로 구성한다.
+- `wrangler.v1.toml`: 기존 변수(`ENABLE_LIVE_FREE` 등)를 설정 파일에 쓰지 않는다. 운영 배포 방식과 같이 대시보드 값을 그대로 둔다. v1 전용 `V1_LIVE_PROVIDERS="true"`만 추가했다.
+- `src/v1/config.mjs`: `V1_LIVE_PROVIDERS` 또는 `ENABLE_LIVE_FREE`가 true면 외부 호출을 허용한다.
+- `.github/workflows/deploy-v1.yml`: `check` 모드 추가(토큰 확인·D1 복원 지점·배포 리허설만, 배포 안 함). 배포 직전 D1 Time Travel 복원 지점을 기록한다.
+- `tests/v1/deploy-config.test.mjs`: 운영 번들·정적 파일이 영수증과 바이트 단위로 같은지, 운영 외 경로가 운영 처리기의 Access 검사를 거치는지, 기존 변수를 덮어쓰지 않는지 검사한다(총 6개).
+- `docs/v1/DEPLOY.md`: 운영 코드 기준으로 갱신(배포 방법, 검증 영상, 되돌리기, D1 복원).
+
+### 발견한 위험과 조치
+- **변수 덮어쓰기 위험**: 운영 배포 템플릿은 `[vars]`를 쓰지 않는데, 이전 `wrangler.v1.toml`은 `ENABLE_LIVE_FREE="true"` 등을 썼다. 대시보드 값이 다르면 배포만으로 기존 앱의 외부 호출 설정이 바뀔 수 있었다. 기존 변수는 쓰지 않도록 고쳤다.
+- **Actions 버튼이 안 보이는 원인**: 수동 실행 워크플로는 기본 브랜치(main)에 파일이 있어야 버튼이 나타난다.
+
+### 검증 결과
+- 배포 리허설(`wrangler --dry-run`): 성공. 정적 파일 27개(운영 13 + v1 8 + 아이콘), 압축 177.42 KiB, 새 변수 `V1_LIVE_PROVIDERS`만 표시
+- v1 테스트 72/72, `npm run check` 통과
+- 전체 `npm test`·GitHub CI: 아래 기록
+
+### 남은 이슈
+- GitHub Secrets가 실제로 동작하는지는 이 세션에서 읽을 수 없다. `check` 모드 실행으로 확인한다.
+- `vujhk4dNlGA`는 자동 생성 자막 영상이라 Supadata native로 처리될 수 있다. 그 경우 Gemini 전사 경로는 실제로 검증되지 않으므로, 결과의 전사 출처를 기록하고 필요하면 자막 없는 영상을 추가로 받는다.
