@@ -227,7 +227,7 @@
 ### 검증 결과
 - `npx wrangler deploy -c wrangler.v1.toml --dry-run`(실제 배포 없음): 번들 생성 성공. Workflow·D1·정적 파일 바인딩 인식, 업로드 크기 952.63 KiB(gzip 205.24 KiB)
 - v1 테스트 70/70, 화면 테스트 5/5, `npm run check` 통과(v1 검사 45개 파일)
-- 전체 `npm test`·GitHub CI: 아래 기록
+- 전체 `npm test`(Node 24.22.2, 이 클라우드): **1035/1035 통과, 건너뜀 0**. GitHub CI run 372(`a08931e`): **통과** (CI는 기존 v0.7 테스트 2개를 건너뛰는 환경이며 실패 0)
 
 ### 배포 전 사용자 확인 필요 (DEPLOY.md 2장)
 - 현재 운영 버전 ID·배포 시각, D1 테이블 목록(`0021` 유무), 키 등록 여부, 배포 방법(A 직접 / B GitHub Actions), 검증 영상 URL 2개
