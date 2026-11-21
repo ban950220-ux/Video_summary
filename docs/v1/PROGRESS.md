@@ -163,7 +163,7 @@
 - 전체 `npm test` 1차: 1029개 중 1개 실패(`tests/durable-sqlite.test.mjs`)
   - 원인: v0.7 단일 파일 번들러(`scripts/build-dashboard.mjs`)는 고정 모듈 목록만 묶는다. `site-worker.mjs`에 v1 import를 넣자 번들(`dist/dashboard-worker.mjs`)이 깨졌다.
   - 조치: `site-worker.mjs`를 원래대로 되돌리고, v1은 별도 진입점 `src/v1/entry.mjs`로 분리했다. v0.7 운영 코드와 번들이 그대로 유지된다.
-  - 재검증: 해당 테스트 + v1 69개 통과. 전체·CI는 아래 기록
+  - 재검증: 전체 `npm test`(Node 24.22.2) **1031/1031 통과**, GitHub CI run 368(`73140dd`) **통과**. 4단계 완료 기준 충족.
 
 ### 남은 이슈
 - **Workers 무료 플랜 CPU 한도**: 요청당 CPU 10ms가 한도다. 긴 전사(수천 구간)의 JSON 처리가 한도에 걸릴 수 있다. 6단계 실측으로 확인하고, 필요하면 구간 분할 저장으로 바꾼다.
