@@ -14,13 +14,17 @@ export const ERROR_TEXT = {
   PROVIDER_INVALID_OUTPUT: '요약 형식이 두 번 연속 올바르지 않았습니다. 잠시 후 다시 시도하세요.',
   PROVIDER_RATE_LIMITED: '외부 서비스의 무료 한도에 걸렸습니다. 잠시 후 다시 시도하세요.',
 };
-const STEP_TEXT = {legacy: '기존 저장 전사', supadata: 'YouTube 기존 자막', gemini: 'Gemini 영상 전사', providers: '외부 서비스'};
+const STEP_TEXT = {legacy: '기존 저장 전사', supadata: 'YouTube 기존 자막', gemini: 'Gemini 영상 전사', providers: '외부 서비스',
+  failure: '실패 지점'};
 const OUTCOME_TEXT = {found: '사용', none: '없음', 'no-captions': '자막 없음', skipped: '건너뜀', error: '실패', used: '사용'};
 
 function coverageText(transcript) {
   const c = transcript?.coverage ?? {};
   if (c.complete) return '영상 처음~끝 (시간축 기준 추정)';
-  if (c.lastSec) return `일부만 전사됨 (${clock((c.firstSec ?? 0) * 1000)}~${clock(c.lastSec * 1000)})`;
+  const span = c.lastSec ? `${clock((c.firstSec ?? 0) * 1000)}~${clock(c.lastSec * 1000)}` : '';
+  // Captions carry no video length, so "partial" can only be claimed when the length is known.
+  if (c.lastSec && (c.ratio === null || c.ratio === undefined) && !c.partial) return `${span} (영상 길이 미확인)`;
+  if (c.lastSec) return `일부만 전사됨 (${span})`;
   return '전사 범위 확인 불가';
 }
 
@@ -64,7 +68,8 @@ export function renderResult({job, transcript, summary}, {onDelete}) {
       h('h2', {}, '처리하지 못했습니다'),
       h('p', {}, ERROR_TEXT[job.errorCode] ?? `오류: ${job.errorCode ?? '알 수 없음'}`),
       h('ul', {}, (job.attempts ?? []).filter(a => a.step).map(a => h('li', {class: 'muted'},
-        `${STEP_TEXT[a.step] ?? a.step}: ${OUTCOME_TEXT[a.outcome] ?? a.outcome}${a.code ? ` (${a.code})` : ''}`))),
+        `${STEP_TEXT[a.step] ?? a.step}: ${OUTCOME_TEXT[a.outcome] ?? a.outcome}${a.code ? ` (${a.code})` : ''}`
+        + (a.detail ? ` — ${a.detail}` : '')))),
       h('a', {class: 'button secondary', href: '#new'}, '자막 파일로 다시 시도')));
   }
 

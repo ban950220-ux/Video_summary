@@ -6,12 +6,17 @@ import {transcriptFromUpload} from './captions.mjs';
 import {AppError} from './errors.mjs';
 import {findLegacyTranscript} from './legacy-transcripts.mjs';
 import {DEFAULT_GEMINI_MODEL, transcribeVideo} from './providers/gemini.mjs';
+import {safeReason} from './providers/http.mjs';
 import {fetchNativeCaptions} from './providers/supadata.mjs';
 import {withRetry} from './retry.mjs';
 import {parseYouTubeUrl} from './youtube.mjs';
 
 function codeOf(error) {
   return error instanceof AppError ? error.code : 'INTERNAL';
+}
+
+function detailOf(error) {
+  return safeReason(error instanceof AppError ? error.detail : error?.message);
 }
 
 export function acquireFromUpload({url = null, filename, text, durationSec = null}) {
@@ -37,7 +42,7 @@ export async function acquireTranscript({url, db = null, keys = {}, liveProvider
       attempts.push({step: 'legacy', outcome: legacy ? 'found' : 'none',
         complete: legacy?.transcript.coverage.complete});
     } catch (error) {
-      attempts.push({step: 'legacy', outcome: 'error', code: codeOf(error)});
+      attempts.push({step: 'legacy', outcome: 'error', code: codeOf(error), detail: detailOf(error)});
     }
   }
   if (legacy?.transcript.coverage.complete) return done(legacy.transcript, {legacyJobId: legacy.legacyJobId});
@@ -57,7 +62,7 @@ export async function acquireTranscript({url, db = null, keys = {}, liveProvider
         attempts.push({step: 'supadata', outcome: captions ? 'found' : 'no-captions', tries});
         if (captions) return done(captions);
       } catch (error) {
-        attempts.push({step: 'supadata', outcome: 'error', code: codeOf(error), tries});
+        attempts.push({step: 'supadata', outcome: 'error', code: codeOf(error), detail: detailOf(error), tries});
       }
     } else {
       attempts.push({step: 'supadata', outcome: 'skipped', reason: 'PROVIDER_KEY_MISSING'});
@@ -71,7 +76,7 @@ export async function acquireTranscript({url, db = null, keys = {}, liveProvider
         attempts.push({step: 'gemini', outcome: 'found', calls: result.calls, model: result.model, tries});
         return done(result.transcript);
       } catch (error) {
-        attempts.push({step: 'gemini', outcome: 'error', code: codeOf(error), tries});
+        attempts.push({step: 'gemini', outcome: 'error', code: codeOf(error), detail: detailOf(error), tries});
       }
     } else {
       attempts.push({step: 'gemini', outcome: 'skipped', reason: 'PROVIDER_KEY_MISSING'});

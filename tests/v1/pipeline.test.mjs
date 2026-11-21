@@ -139,7 +139,8 @@ test('no transcript anywhere -> job FAILED with reasons recorded', async () => {
   const detail = await (await routeV1(new Request(`${BASE}/api/v1/jobs/${job.id}`), env, null, {})).json();
   assert.equal(detail.job.status, 'FAILED');
   assert.equal(detail.job.errorCode, 'TRANSCRIPT_UNAVAILABLE');
-  assert.deepEqual(detail.job.attempts.map(a => a.step), ['legacy', 'providers']);
+  assert.deepEqual(detail.job.attempts.map(a => a.step), ['legacy', 'providers', 'failure']);
+  assert.equal(detail.job.attempts.at(-1).code, 'TRANSCRIPT_UNAVAILABLE');
 });
 
 // A durable step store: finished steps are cached by name, like the Workflow engine on replay.
@@ -235,4 +236,35 @@ test('transcriptMode gemini creates a new job and never calls Supadata', async (
   assert.equal(count.supadata, 1);
   const bad = await routeV1(post('/api/v1/jobs', {url: `https://youtu.be/${ID}`, transcriptMode: 'paid'}), env);
   assert.equal(bad.status, 400);
+});
+
+// The real Workflow engine re-wraps errors thrown inside step.do as plain Errors.
+function rewrappingStep() {
+  return {do: async (name, options, fn) => {
+    try {
+      return await (fn ?? options)();
+    } catch (error) {
+      throw new Error(error.message);
+    }
+  }};
+}
+
+test('error codes and provider reasons survive the Workflow error re-wrapping', async () => {
+  const {env} = environment();
+  const jobs = jobRepository(env.DB);
+  const job = await jobs.create({videoId: ID, url: `https://www.youtube.com/watch?v=${ID}`,
+    options: {geminiOnly: true}});
+  const rejecting = async () => jsonResponse({error: {code: 400,
+    message: 'Model not found for API key AIzaSyFAKEFAKEFAKEFAKE1234'}}, 400);
+  const result = await runSummaryJob({jobId: job.id, env, step: rewrappingStep(), deps: {fetchFn: rejecting,
+    sleep: async () => {}}});
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.errorCode, 'TRANSCRIPT_UNAVAILABLE');
+  const saved = await jobs.get(job.id);
+  assert.equal(saved.errorCode, 'TRANSCRIPT_UNAVAILABLE');
+  const gemini = saved.attempts.find(a => a.step === 'gemini');
+  assert.equal(gemini.code, 'PROVIDER_FAILED');
+  assert.match(gemini.detail, /gemini 400: Model not found/);
+  assert.doesNotMatch(JSON.stringify(saved.attempts), /AIzaSy/);
+  assert.match(saved.attempts.at(-1).detail, /^acquire: /);
 });

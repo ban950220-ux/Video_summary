@@ -42,6 +42,30 @@ export async function readProviderJson(response, name = 'provider') {
   }
 }
 
-export function failedResponse(response, name = 'provider') {
-  return providerError('PROVIDER_FAILED', `${name} ${response.status}`, {status: response.status});
+// Keeps the provider's own reason (e.g. Google's error.message) so failures can be diagnosed.
+// Anything that looks like a credential is masked, and the text is truncated.
+export function safeReason(text) {
+  return String(text ?? '')
+    .replace(/(AIza[0-9A-Za-z_-]{10,}|gsk_[0-9A-Za-z]{10,}|sk-[0-9A-Za-z]{10,}|Bearer\s+\S+)/g, '[masked]')
+    .replace(/[A-Za-z0-9_-]{32,}/g, '[masked]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+}
+
+export async function failedResponse(response, name = 'provider') {
+  let reason = '';
+  try {
+    const text = await response.text();
+    try {
+      const body = JSON.parse(text);
+      reason = body?.error?.message ?? body?.message ?? body?.error ?? text;
+    } catch {
+      reason = text;
+    }
+  } catch {
+    reason = '';
+  }
+  const detail = `${name} ${response.status}${reason ? `: ${safeReason(reason)}` : ''}`;
+  return providerError('PROVIDER_FAILED', detail, {status: response.status});
 }

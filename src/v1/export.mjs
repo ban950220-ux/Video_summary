@@ -11,7 +11,9 @@ const ATTRIBUTION_LABELS = Object.freeze({SPEAKER: '화자', INTERPRETATION: 'AI
 function coverageLine(transcript) {
   const c = transcript?.coverage ?? {};
   if (c.complete) return '전사 범위: 영상 처음~끝 (시간축 기준 추정, 모든 발화 보증 아님)';
-  if (c.lastSec) return `전사 범위: 일부 (${formatClock((c.firstSec ?? 0) * 1000)}~${formatClock(c.lastSec * 1000)})`;
+  const span = c.lastSec ? `${formatClock((c.firstSec ?? 0) * 1000)}~${formatClock(c.lastSec * 1000)}` : '';
+  if (c.lastSec && (c.ratio === null || c.ratio === undefined) && !c.partial) return `전사 범위: ${span} (영상 길이 미확인)`;
+  if (c.lastSec) return `전사 범위: 일부 (${span})`;
   return '전사 범위: 확인 불가';
 }
 

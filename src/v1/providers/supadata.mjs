@@ -41,7 +41,7 @@ export async function fetchNativeCaptions({canonicalUrl, apiKey, fetchFn = fetch
   const headers = {'x-api-key': apiKey, accept: 'application/json'};
   const response = await providerFetch(supadataRequestUrl(canonicalUrl), {headers}, {fetchFn, name: 'supadata'});
   if (response.status === 206 || response.status === 404) return null;
-  if (!response.ok && response.status !== 202) throw failedResponse(response, 'supadata');
+  if (!response.ok && response.status !== 202) throw await failedResponse(response, 'supadata');
   const body = await readProviderJson(response, 'supadata');
   if (!body?.jobId) return toTranscript(body);
   if (typeof body.jobId !== 'string' || !JOB_ID.test(body.jobId)) {
@@ -52,7 +52,7 @@ export async function fetchNativeCaptions({canonicalUrl, apiKey, fetchFn = fetch
     await wait(pollDelayMs);
     const jobUrl = `${SUPADATA_BASE}/${encodeURIComponent(body.jobId)}`;
     const jobResponse = await providerFetch(jobUrl, {headers}, {fetchFn, name: 'supadata'});
-    if (!jobResponse.ok) throw failedResponse(jobResponse, 'supadata');
+    if (!jobResponse.ok) throw await failedResponse(jobResponse, 'supadata');
     const job = await readProviderJson(jobResponse, 'supadata');
     if (job?.status === 'failed') return null;
     if (job?.status === 'completed') return toTranscript(job.result ?? job);

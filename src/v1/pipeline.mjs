@@ -9,6 +9,7 @@ import {createD1Usage} from './db/usage.mjs';
 import {AppError} from './errors.mjs';
 import {loadProviderKeys} from './keys.mjs';
 import {DEFAULT_GEMINI_MODEL} from './providers/gemini.mjs';
+import {safeReason} from './providers/http.mjs';
 import {geminiTextModel, groqTextModel} from './providers/llm.mjs';
 import {combinePartials, finalizeSummary, summarizeChunk, summarizeSingle, summaryPlan} from './summary/engine.mjs';
 
@@ -27,6 +28,21 @@ async function fetchTitle(canonicalUrl, fetchFn) {
   } catch {
     return null;
   }
+}
+
+const STEP_ERROR = /V1ERR::([A-Z_]{2,40})::([\s\S]*)$/;
+
+export function encodeStepError(name, error) {
+  const known = error instanceof AppError;
+  const code = known ? error.code : 'INTERNAL';
+  const detail = safeReason(`${name}: ${known ? error.detail ?? error.message : error?.message ?? error}`);
+  return `V1ERR::${code}::${detail}`;
+}
+
+export function decodeStepError(error) {
+  if (error instanceof AppError) return error;
+  const match = String(error?.message ?? '').match(STEP_ERROR);
+  return match ? new AppError(match[1], match[2]) : new AppError('INTERNAL', safeReason(error?.message));
 }
 
 export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) {
@@ -48,8 +64,25 @@ export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) 
     };
   };
 
+  // Errors thrown inside a durable step come back from the Workflow engine re-wrapped as plain Errors,
+  // losing the AppError class. The code and reason are carried in the message and rebuilt here.
+  // Failures are still thrown (never returned), so the engine does not cache a failed step.
+  const durable = async (name, fn) => {
+    try {
+      return await step.do(name, STEP_OPTIONS, async () => {
+        try {
+          return await fn();
+        } catch (error) {
+          throw new Error(encodeStepError(name, error));
+        }
+      });
+    } catch (error) {
+      throw decodeStepError(error);
+    }
+  };
+
   try {
-    const acquired = await step.do('acquire', STEP_OPTIONS, async () => {
+    const acquired = await durable('acquire', async () => {
       const job = await jobs.get(jobId);
       if (!job) throw new AppError('NOT_FOUND', jobId);
       const existing = await jobs.loadTranscript(jobId);
@@ -70,13 +103,14 @@ export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) 
       }
     });
 
-    const plan = await step.do('plan', STEP_OPTIONS, async () => {
+    const plan = await durable('plan', async () => {
       await jobs.update(jobId, {status: STATUS.SUMMARIZING});
       return summaryPlan(await jobs.loadTranscript(jobId));
     });
 
-    const run = async (name, fn) => step.do(name, STEP_OPTIONS, async () => {
-      const [transcript, job, {models}] = await Promise.all([jobs.loadTranscript(jobId), jobs.get(jobId), modelsFor()]);
+    const run = async (name, fn) => durable(name, async () => {
+      const [transcript, job, {models}] = await Promise.all([jobs.loadTranscript(jobId), jobs.get(jobId),
+        modelsFor()]);
       const log = [];
       const value = await fn({transcript, title: job.title, models, usage, sleep, log});
       return {value, log};
@@ -101,7 +135,7 @@ export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) 
       final = reduced.value;
     }
 
-    await step.do('save', STEP_OPTIONS, async () => {
+    await durable('save', async () => {
       const transcript = await jobs.loadTranscript(jobId);
       await jobs.saveSummary(jobId, finalizeSummary({final, transcript, plan, calls}));
       await jobs.update(jobId, {status: STATUS.DONE, errorCode: null});
@@ -109,7 +143,14 @@ export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) 
     return {status: STATUS.DONE, source: acquired.source};
   } catch (error) {
     const code = error instanceof AppError ? error.code : 'INTERNAL';
-    await jobs.update(jobId, {status: STATUS.FAILED, errorCode: code}).catch(() => {});
-    return {status: STATUS.FAILED, errorCode: code};
+    const detail = safeReason(error instanceof AppError ? error.detail : error?.message);
+    try {
+      const job = await jobs.get(jobId);
+      const attempts = [...(job?.attempts ?? []), {step: 'failure', outcome: 'error', code, detail}];
+      await jobs.update(jobId, {status: STATUS.FAILED, errorCode: code, attempts});
+    } catch {
+      // Recording the failure must never hide it.
+    }
+    return {status: STATUS.FAILED, errorCode: code, detail};
   }
 }

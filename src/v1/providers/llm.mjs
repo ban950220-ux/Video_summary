@@ -37,7 +37,7 @@ export function geminiTextModel({apiKey, model = DEFAULT_GEMINI_MODEL, fetchFn =
         headers: {'x-goog-api-key': apiKey, 'content-type': 'application/json'},
         body: JSON.stringify(body),
       }, {fetchFn, name: 'gemini', timeoutMs: 180_000});
-      if (!response.ok) throw failedResponse(response, 'gemini');
+      if (!response.ok) throw await failedResponse(response, 'gemini');
       const json = await readProviderJson(response, 'gemini');
       const candidate = json?.candidates?.[0];
       if (candidate?.finishReason === 'MAX_TOKENS') throw new AppError('PROVIDER_INVALID_OUTPUT', 'gemini MAX_TOKENS');
@@ -77,7 +77,7 @@ export function groqTextModel({apiKey, model = DEFAULT_GROQ_MODEL, fetchFn = fet
         headers: {authorization: `Bearer ${apiKey}`, 'content-type': 'application/json'},
         body: JSON.stringify(body),
       }, {fetchFn, name: 'groq', timeoutMs: 180_000});
-      if (!response.ok) throw failedResponse(response, 'groq');
+      if (!response.ok) throw await failedResponse(response, 'groq');
       const json = await readProviderJson(response, 'groq');
       const choice = json?.choices?.[0];
       if (choice?.finish_reason === 'length') throw new AppError('PROVIDER_INVALID_OUTPUT', 'groq length');

@@ -91,7 +91,7 @@ export async function transcribeClip({canonicalUrl, startSec, endSec, apiKey, mo
     body: JSON.stringify(geminiClipRequest({canonicalUrl, startSec, endSec})),
   };
   const response = await providerFetch(url, init, {fetchFn, name: 'gemini', timeoutMs: 300_000});
-  if (!response.ok) throw failedResponse(response, 'gemini');
+  if (!response.ok) throw await failedResponse(response, 'gemini');
   const body = await readProviderJson(response, 'gemini');
   const candidate = body?.candidates?.[0];
   if (candidate?.finishReason && candidate.finishReason !== 'STOP') {
