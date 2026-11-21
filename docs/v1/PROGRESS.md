@@ -276,7 +276,7 @@
 ### 검증 결과
 - 배포 리허설(`wrangler --dry-run`): 성공. 정적 파일 27개(운영 13 + v1 8 + 아이콘), 압축 177.42 KiB, 새 변수 `V1_LIVE_PROVIDERS`만 표시
 - v1 테스트 72/72, `npm run check` 통과
-- 전체 `npm test`·GitHub CI: 아래 기록
+- 전체 `npm test`(Node 24.22.2) **1037/1037 통과**, GitHub CI run 375(`52ddfff`) **통과**
 
 ### 남은 이슈
 - GitHub Secrets가 실제로 동작하는지는 이 세션에서 읽을 수 없다. `check` 모드 실행으로 확인한다.
