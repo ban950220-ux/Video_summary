@@ -57,6 +57,13 @@ export function exportMarkdown({job, transcript, summary, verification = null}) 
           + i.codes.map(verificationCodeText).join(', ')),
       '');
   }
+  if (summary.crossCheck?.status === 'DONE') {
+    const {counts, items} = summary.crossCheck;
+    lines.push('## 영상 다시 듣기 교차 확인', '',
+      `숫자 ${counts.total}개: 교차 확인 ${counts.confirmed} · 다르게 들림 ${counts.differs} · 미확인 ${counts.notChecked}`,
+      '', ...items.filter(i => i.result === 'DIFFERS')
+        .map(i => `- ⚠ ${i.surface}: 다시 들은 값 ${i.heardValues?.join(', ') || '숫자 없음'}`), '');
+  }
   return lines.join('\n');
 }
 

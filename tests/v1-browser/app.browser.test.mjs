@@ -31,7 +31,7 @@ const summary = {
 let server;
 let base;
 let browser;
-const state = {jobs: new Map(), polls: new Map()};
+const state = {jobs: new Map(), polls: new Map(), writes: []};
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
   res.writeHead(status, {'content-type': type, 'content-security-policy': CSP});
@@ -45,6 +45,10 @@ function mockApi(req, res, url, body) {
     state.jobs.set(id, {id, videoId: failing ? 'failfailfai' : VIDEO, url: body.url, status: 'QUEUED', failing,
       title: '<img src=x onerror="window.__xss=1">테스트 영상', createdAt: '2026-11-21T00:00:00Z'});
     return send(res, 202, {job: state.jobs.get(id), reused: false});
+  }
+  if (/\/(analysis|crosscheck)$/.test(url.pathname) && req.method === 'POST') {
+    state.writes.push([url.pathname.split('/').pop(), req.headers['content-type']]);
+    return send(res, 202, {started: true});
   }
   const match = url.pathname.match(/^\/api\/v1\/jobs\/([0-9a-f-]{36})$/);
   if (match && req.method === 'GET') {
@@ -140,6 +144,12 @@ for (const [name, viewport] of [['desktop', {width: 1280, height: 900}], ['phone
     assert.match(await p.textContent('main'), /확인 필요/);
     assert.match(await p.textContent('#verification'), /숫자 2개: 원문 확인 1 · 불일치 1/);
     assert.equal(await p.textContent('#analyze'), '상세 분석 만들기');
+    state.writes.length = 0;
+    await p.click('#crosscheck-run');
+    await p.waitForFunction(() => document.querySelector('#analyze') && !document.querySelector('#analyze').disabled);
+    await p.click('#analyze');
+    await p.waitForTimeout(300);
+    assert.deepEqual(state.writes, [['crosscheck', 'application/json'], ['analysis', 'application/json']]);
     assert.match(await p.textContent('#verification .verify-MISMATCH'), /1003개사 — 값이 원문과 다름 \(원문: 103개사\)/);
     assert.ok(await p.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       'no horizontal scroll');

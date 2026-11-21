@@ -11,23 +11,24 @@ import {keyStatus, loadProviderKeys} from './keys.mjs';
 import {listLegacySources, loadLegacyTranscript} from './legacy-transcripts.mjs';
 import {inlineStep, runSummaryJob} from './pipeline.mjs';
 import {runAnalysisJob} from './pipeline-analysis.mjs';
+import {runCrossCheckJob} from './pipeline-crosscheck.mjs';
 import {makeTranscript, SOURCES} from './transcript.mjs';
 import {uncertaintyReport} from './uncertainty.mjs';
 import {verifySummary} from './verify/facts.mjs';
 import {parseYouTubeUrl} from './youtube.mjs';
 
 export const API_PREFIX = '/api/v1/';
-const JOB_PATH = /^jobs\/([0-9a-f-]{36})(\/export|\/analysis)?$/;
+const JOB_PATH = /^jobs\/([0-9a-f-]{36})(\/export|\/analysis|\/crosscheck)?$/;
 
 // Durable Workflow when bound (production), otherwise inline in the background or awaited (tests).
 async function startJob(jobId, env, ctx, deps, task = 'summary') {
   if (env.SUMMARY_WORKFLOW?.create) {
     // Workflow instance IDs must be unique, so analysis runs get their own suffix.
-    const id = task === 'summary' ? jobId : `${jobId}-a${Date.now().toString(36)}`;
+    const id = task === 'summary' ? jobId : `${jobId}-${task[0]}${Date.now().toString(36)}`;
     await env.SUMMARY_WORKFLOW.create({id, params: {jobId, task}});
     return 'workflow';
   }
-  const runner = task === 'analysis' ? runAnalysisJob : runSummaryJob;
+  const runner = {analysis: runAnalysisJob, crosscheck: runCrossCheckJob}[task] ?? runSummaryJob;
   const run = runner({jobId, env, step: inlineStep, deps});
   if (ctx?.waitUntil) {
     ctx.waitUntil(run);
@@ -183,6 +184,16 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
       await jobs.saveSummary(match[1], {...summary, analysis});
       const runner = await startJob(match[1], env, ctx, deps, 'analysis');
       return json({analysis: (await jobs.loadSummary(match[1])).analysis, started: true, runner}, 202);
+    }
+    if (match && match[2] === '/crosscheck' && method === 'POST') {
+      assertSameOrigin(request);
+      const summary = await jobs.loadSummary(match[1]);
+      if (!summary) throw new AppError('NOT_FOUND', 'summary not ready');
+      if (summary.crossCheck?.status === 'RUNNING') return json({crossCheck: summary.crossCheck, started: false});
+      await jobs.saveSummary(match[1], {...summary, crossCheck: {status: 'RUNNING',
+        startedAt: new Date().toISOString()}});
+      const runner = await startJob(match[1], env, ctx, deps, 'crosscheck');
+      return json({crossCheck: (await jobs.loadSummary(match[1])).crossCheck, started: true, runner}, 202);
     }
     if (match && match[2] === '/export' && method === 'GET') {
       const detail = await jobDetail(jobs, match[1]);

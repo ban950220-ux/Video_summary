@@ -69,6 +69,43 @@ const CODE_TEXT = {VALUE_CHANGED: '값이 원문과 다름', UNIT_CHANGED: '단�
   NO_EVIDENCE: '원문 근거 없음'};
 const MARK = {VERIFIED: '✓', MISMATCH: '⚠', UNVERIFIABLE: '?'};
 
+function crossCheckBlock(cross, canRun, onCrossCheck) {
+  const box = h('div', {id: 'crosscheck'}, h('h3', {}, '영상 다시 듣기 교차 확인'));
+  if (cross?.status === 'RUNNING') {
+    box.append(h('p', {class: 'muted'}, '숫자가 나온 구간을 다시 듣는 중입니다… 화면이 자동으로 갱신됩니다.'));
+    return box;
+  }
+  if (cross?.status === 'DONE') {
+    const {counts} = cross;
+    box.append(h('p', {}, `숫자 ${counts.total}개: 교차 확인 ${counts.confirmed} · 다르게 들림 ${counts.differs} · `
+      + `미확인 ${counts.notChecked}`));
+    if (cross.sameEngineAsTranscript) {
+      box.append(h('p', {class: 'muted'}, '전사와 같은 엔진(Gemini)으로 다시 들은 결과라 독립적인 확인은 아닙니다.'));
+    }
+    const differs = cross.items.filter(item => item.result === 'DIFFERS');
+    if (differs.length) {
+      box.append(h('ul', {class: 'points'}, differs.map(item => h('li', {class: 'verify-MISMATCH'},
+        h('span', {class: 'badge'}, '⚠'), ' ', h('strong', {}, item.surface ?? String(item.value)),
+        ` — 다시 들은 값: ${item.heardValues?.join(', ') || '숫자 없음'}`))));
+    }
+    return box;
+  }
+  box.append(h('p', {class: 'muted'}, '전사 자체가 숫자를 잘못 받아 적었는지 확인합니다. 숫자가 나온 구간만 Gemini가 영상에서 '
+    + '다시 듣습니다(무료 한도 사용).'));
+  if (cross?.status === 'FAILED') {
+    box.append(h('p', {class: 'warn'}, `지난 확인 실패: ${cross.code} — ${cross.detail ?? ''}`));
+  }
+  if (canRun) {
+    box.append(h('button', {type: 'button', id: 'crosscheck-run', class: 'secondary', onclick: event => {
+      event.target.disabled = true;
+      onCrossCheck();
+    }}, '교차 확인 실행'));
+  } else {
+    box.append(h('p', {class: 'muted'}, '영상 주소가 연결된 작업에서만 실행할 수 있습니다.'));
+  }
+  return box;
+}
+
 function verificationCard(verification, transcript, videoId) {
   const {counts, items} = verification;
   const rows = [...items].sort((a, b) => (a.status === 'VERIFIED') - (b.status === 'VERIFIED'));
@@ -112,7 +149,7 @@ function analysisCard(analysis, transcript, videoId, onAnalyze) {
   return card;
 }
 
-export function renderResult({job, transcript, summary, verification}, {onDelete, onAnalyze}) {
+export function renderResult({job, transcript, summary, verification}, {onDelete, onAnalyze, onCrossCheck}) {
   const nodes = [h('section', {class: 'card'},
     h('h1', {}, job.title ?? job.videoId ?? '영상 요약'),
     h('p', {class: 'muted'}, date(job.createdAt), job.url ? ' · ' : '',
@@ -150,7 +187,11 @@ export function renderResult({job, transcript, summary, verification}, {onDelete
         })),
     );
     nodes.push(analysisCard(summary.analysis, transcript, job.videoId, onAnalyze));
-    if (verification?.counts.total) nodes.push(verificationCard(verification, transcript, job.videoId));
+    if (verification?.counts.total) {
+      const card = verificationCard(verification, transcript, job.videoId);
+      card.append(crossCheckBlock(summary.crossCheck, Boolean(job.url), onCrossCheck));
+      nodes.push(card);
+    }
     if (summary.warnings?.length) {
       nodes.push(h('section', {class: 'card warn'}, h('h2', {}, '확인 필요'),
         h('p', {}, `숫자의 원문 근거가 기록되지 않은 항목 ${summary.warnings.length}개가 있습니다.`)));

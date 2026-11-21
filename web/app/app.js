@@ -8,7 +8,8 @@ let pollTimer = null;
 
 async function api(path, {method = 'GET', body} = {}) {
   const response = await fetch(path, {method, credentials: 'same-origin',
-    headers: body ? {'content-type': 'application/json'} : {}, body: body ? JSON.stringify(body) : undefined});
+    headers: body || method !== 'GET' ? {'content-type': 'application/json'} : {},
+    body: body ? JSON.stringify(body) : method === 'GET' ? undefined : '{}'});
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data?.error?.message ?? `요청 실패 (${response.status})`);
@@ -87,9 +88,16 @@ function newView() {
 async function jobView(id) {
   const render = async () => {
     const detail = await api(`/api/v1/jobs/${encodeURIComponent(id)}`);
-    show(renderResult(detail, {onAnalyze: async () => {
+    show(renderResult(detail, {onCrossCheck: async () => {
       try {
-        await api(`/api/v1/jobs/${encodeURIComponent(id)}/analysis`, {method: 'POST'});
+        await api(`/api/v1/jobs/${encodeURIComponent(id)}/crosscheck`, {method: 'POST', body: {}});
+        await render();
+      } catch (error) {
+        toast(error.message);
+      }
+    }, onAnalyze: async () => {
+      try {
+        await api(`/api/v1/jobs/${encodeURIComponent(id)}/analysis`, {method: 'POST', body: {}});
         await render();
       } catch (error) {
         toast(error.message);
@@ -100,7 +108,8 @@ async function jobView(id) {
       toast('삭제했습니다.');
       location.hash = '#library';
     }}));
-    const busy = !['DONE', 'FAILED'].includes(detail.job.status) || detail.summary?.analysis?.status === 'RUNNING';
+    const busy = !['DONE', 'FAILED'].includes(detail.job.status) || detail.summary?.analysis?.status === 'RUNNING'
+      || detail.summary?.crossCheck?.status === 'RUNNING';
     if (busy) pollTimer = setTimeout(() => render().catch(fail), POLL_MS);
   };
   await render();
