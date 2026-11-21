@@ -1,7 +1,8 @@
 // v1 site entry. Runs the same owner checks as src/site-worker.mjs (Cloudflare Access JWT,
 // same-origin JSON writes) before /api/v1/*, and hands every other path to the production handler
 // unchanged, so every live feature keeps working.
-import {authConfigured, sameOriginMutation, verifyOwnerAccess} from '../access.mjs';
+import {authConfigured, sameOriginMutation} from '../access.mjs';
+import {verifyV1Access} from './access.mjs';
 // The live production site (version dede9fb3), not the older v0.7 source in src/: see production/README.md.
 import {handleSiteRequest} from '../../production/dede9fb3/runtime/primary.mjs';
 import {routeV1} from './router.mjs';
@@ -46,7 +47,7 @@ export async function handleV1Site(request, env, ctx, deps = {}) {
   if (path === '/v1' || path.startsWith('/v1/')) return v1Page(request, env, ctx);
   if (!path.startsWith('/api/v1/')) return handleSiteRequest(request, env, ctx);
   if (!authConfigured(env)) return denied('ACCESS_NOT_CONFIGURED', 503);
-  const access = await verifyOwnerAccess(request, env, deps.access);
+  const access = await verifyV1Access(request, env, deps.access);
   if (!access.ok) return denied(access.reason, 401);
   if (!sameOriginMutation(request)) return denied('CSRF_BLOCKED', 403);
   const response = await routeV1(request, env, ctx, deps);
