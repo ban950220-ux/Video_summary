@@ -10,6 +10,7 @@ import {assertSameOrigin, errorResponse, json, readJson} from './http.mjs';
 import {keyStatus, loadProviderKeys} from './keys.mjs';
 import {listLegacySources, loadLegacyTranscript} from './legacy-transcripts.mjs';
 import {inlineStep, runSummaryJob} from './pipeline.mjs';
+import {verifySummary} from './verify/facts.mjs';
 import {parseYouTubeUrl} from './youtube.mjs';
 
 export const API_PREFIX = '/api/v1/';
@@ -34,7 +35,9 @@ async function jobDetail(jobs, id) {
   const job = await jobs.get(id);
   if (!job) throw new AppError('NOT_FOUND');
   const [transcript, summary] = await Promise.all([jobs.loadTranscript(id), jobs.loadSummary(id)]);
-  return {job, transcript, summary};
+  // Computed on read (no model calls), so summaries saved before stage 8 are checked too.
+  const verification = summary && transcript ? verifySummary(summary, transcript) : null;
+  return {job, transcript, summary, verification};
 }
 
 async function createJob(request, env, ctx, deps, jobs) {

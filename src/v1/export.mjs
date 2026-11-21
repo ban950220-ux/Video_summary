@@ -17,7 +17,13 @@ function coverageLine(transcript) {
   return '전사 범위: 확인 불가';
 }
 
-export function exportMarkdown({job, transcript, summary}) {
+const CODE_TEXT = Object.freeze({VALUE_CHANGED: '값이 원문과 다름', UNIT_CHANGED: '단위가 원문과 다름',
+  QUALIFIER_CHANGED: '약·이상·미만 같은 한정어가 원문과 다름', KIND_CHANGED: '지표(비중·증가율 등)가 원문과 다름',
+  QUOTE_NOT_FOUND: '근거 인용을 원문에서 찾지 못함', NO_NUMBER_IN_SOURCE: '근거 구간에서 숫자를 읽지 못함',
+  NO_EVIDENCE: '원문 근거가 기록되지 않음'});
+export const verificationCodeText = code => CODE_TEXT[code] ?? code;
+
+export function exportMarkdown({job, transcript, summary, verification = null}) {
   const link = sec => (job.videoId && Number.isFinite(sec) ? ` ([${formatClock(sec)}](${watchUrlAt(job.videoId,
     sec / 1000)}))` : '');
   const lines = [
@@ -41,8 +47,15 @@ export function exportMarkdown({job, transcript, summary}) {
     '',
     ...summary.chapters.map(c => `### ${formatClock(c.startMs)} ${c.title}${link(c.startMs)}\n\n${c.summary}\n`),
   ];
-  if (summary.warnings?.length) {
-    lines.push('## 확인 필요', '', ...summary.warnings.map(w => `- ${w.path}: 숫자의 원문 근거가 기록되지 않음`), '');
+  if (verification) {
+    const {counts} = verification;
+    lines.push('## 숫자 근거 검증 (자동)', '',
+      `숫자 ${counts.total}개: 원문 확인 ${counts.verified} · 불일치 ${counts.mismatch} · 확인 불가 ${counts.unverifiable}`,
+      '(숫자·단위·한정어·지표만 대조하며 문장 전체의 의미를 보증하지 않음)', '',
+      ...verification.items.filter(i => i.status !== 'VERIFIED')
+        .map(i => `- ${i.status === 'MISMATCH' ? '⚠' : '?'} ${i.surface}: `
+          + i.codes.map(verificationCodeText).join(', ')),
+      '');
   }
   return lines.join('\n');
 }

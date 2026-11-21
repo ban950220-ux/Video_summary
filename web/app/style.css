@@ -67,3 +67,5 @@ button:disabled { opacity: .55; cursor: default; }
 #toast.show { opacity: 1; }
 .check { display: flex; gap: 8px; align-items: flex-start; }
 .check input { margin-top: 4px; }
+.verify-MISMATCH .badge { color: var(--accent); border-color: var(--accent); }
+.verify-VERIFIED .badge { color: var(--ok); }

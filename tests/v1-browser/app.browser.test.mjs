@@ -58,7 +58,10 @@ function mockApi(req, res, url, body) {
         {step: 'supadata', outcome: 'no-captions'}, {step: 'gemini', outcome: 'error', code: 'PROVIDER_FAILED'}]});
     }
     const done = job.status === 'DONE';
-    return send(res, 200, {job, transcript: done ? {source: 'supadata-native', segments,
+    const verification = done ? {counts: {total: 2, verified: 1, mismatch: 1, unverifiable: 0}, items: [
+      {surface: '약 20%', status: 'VERIFIED', codes: [], segmentIds: [2]},
+      {surface: '1003개사', status: 'MISMATCH', codes: ['VALUE_CHANGED'], source: '103개사', segmentIds: [5]}]} : null;
+    return send(res, 200, {job, verification, transcript: done ? {source: 'supadata-native', segments,
       coverage: {complete: true, firstSec: 0, lastSec: 305}} : null, summary: done ? summary : null});
   }
   if (url.pathname === '/api/v1/jobs' && req.method === 'GET') {
@@ -135,6 +138,8 @@ for (const [name, viewport] of [['desktop', {width: 1280, height: 900}], ['phone
     assert.equal(await p.evaluate(() => window.__xss), undefined);
     assert.match(await p.textContent('main'), /YouTube 기존 자막/);
     assert.match(await p.textContent('main'), /확인 필요/);
+    assert.match(await p.textContent('#verification'), /숫자 2개: 원문 확인 1 · 불일치 1/);
+    assert.match(await p.textContent('#verification .verify-MISMATCH'), /1003개사 — 값이 원문과 다름 \(원문: 103개사\)/);
     assert.ok(await p.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       'no horizontal scroll');
     assert.deepEqual(p.errors, []);

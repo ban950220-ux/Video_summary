@@ -54,7 +54,27 @@ function point(p, transcript, videoId) {
     evidence(p.segmentIds, transcript, videoId));
 }
 
-export function renderResult({job, transcript, summary}, {onDelete}) {
+const CODE_TEXT = {VALUE_CHANGED: '값이 원문과 다름', UNIT_CHANGED: '단위가 원문과 다름',
+  QUALIFIER_CHANGED: '약·이상·미만 같은 한정어가 다름', KIND_CHANGED: '지표(비중·증가율 등)가 다름',
+  QUOTE_NOT_FOUND: '근거 인용을 원문에서 못 찾음', NO_NUMBER_IN_SOURCE: '근거 구간에서 숫자를 못 읽음',
+  NO_EVIDENCE: '원문 근거 없음'};
+const MARK = {VERIFIED: '✓', MISMATCH: '⚠', UNVERIFIABLE: '?'};
+
+function verificationCard(verification, transcript, videoId) {
+  const {counts, items} = verification;
+  const rows = [...items].sort((a, b) => (a.status === 'VERIFIED') - (b.status === 'VERIFIED'));
+  return h('section', {class: 'card', id: 'verification'}, h('h2', {}, '숫자 근거 검증'),
+    h('p', {}, `숫자 ${counts.total}개: 원문 확인 ${counts.verified} · 불일치 ${counts.mismatch} · `
+      + `확인 불가 ${counts.unverifiable}`),
+    h('p', {class: 'muted'}, '숫자·단위·한정어·지표만 원문과 대조합니다. 문장 전체의 의미를 보증하지 않습니다.'),
+    h('ul', {class: 'points'}, rows.map(item => h('li', {class: `verify-${item.status}`},
+      h('span', {class: 'badge'}, MARK[item.status]), ' ', h('strong', {}, item.surface ?? ''),
+      item.codes.length ? ` — ${item.codes.map(c => CODE_TEXT[c] ?? c).join(', ')}` : ' — 원문 확인',
+      item.source && item.status === 'MISMATCH' ? h('span', {class: 'muted'}, ` (원문: ${item.source})`) : null,
+      item.segmentIds?.length ? evidence(item.segmentIds, transcript, videoId) : null))));
+}
+
+export function renderResult({job, transcript, summary, verification}, {onDelete}) {
   const nodes = [h('section', {class: 'card'},
     h('h1', {}, job.title ?? job.videoId ?? '영상 요약'),
     h('p', {class: 'muted'}, date(job.createdAt), job.url ? ' · ' : '',
@@ -90,6 +110,7 @@ export function renderResult({job, transcript, summary}, {onDelete}) {
             h('div', {}, h('strong', {}, c.title), h('p', {}, c.summary)));
         })),
     );
+    if (verification?.counts.total) nodes.push(verificationCard(verification, transcript, job.videoId));
     if (summary.warnings?.length) {
       nodes.push(h('section', {class: 'card warn'}, h('h2', {}, '확인 필요'),
         h('p', {}, `숫자의 원문 근거가 기록되지 않은 항목 ${summary.warnings.length}개가 있습니다.`)));
