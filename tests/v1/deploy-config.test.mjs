@@ -96,3 +96,9 @@ test('deploy workflow never prints account identity into public logs', () => {
   assert.doesNotMatch(workflow, /echo\s+"?\$\{?\{?\s*secrets\./);
   assert.match(workflow, /if: inputs\.mode == 'deploy'/);
 });
+
+test('deploy output is not streamed to the public log', () => {
+  const workflow = read('.github/workflows/deploy-v1.yml');
+  assert.doesNotMatch(workflow, /wrangler deploy -c wrangler\.v1\.toml \| tee/);
+  assert.match(workflow, /wrangler deploy -c wrangler\.v1\.toml > deploy\.log 2>&1/);
+});

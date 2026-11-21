@@ -63,7 +63,14 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           test -n "$CLOUDFLARE_API_TOKEN" && test -n "$CLOUDFLARE_ACCOUNT_ID"
-          npx wrangler deploy -c wrangler.v1.toml | tee deploy.log
+          # Full wrangler output stays off the public log: its config-diff warning prints dashboard
+          # variable values. Only the version/deployment IDs are shown.
+          set +e
+          npx wrangler deploy -c wrangler.v1.toml > deploy.log 2>&1
+          status=$?
+          set -e
+          grep -E "Uploaded|Deployed|Current Version ID|Deployment ID" deploy.log | grep -v "https://" || true
+          if [ "$status" -ne 0 ]; then echo "wrangler deploy failed (exit $status); full output withheld"; exit "$status"; fi
           {
             echo "### v1 deployment"
             echo "- Commit: \`$GITHUB_SHA\`"

@@ -292,3 +292,14 @@
   - API `transcriptMode: 'gemini'`. 기존 전사·자막 단계를 건너뛰고 기록하며, 기존 작업을 재사용하지 않는다.
   - `v1_jobs.options_json` 열 추가(운영 D1에는 아직 v1 테이블이 없음).
   - 테스트 2개 추가(v1 75/75), 화면 테스트 5/5.
+
+## 6단계 — 운영 배포 (2026-11-21, 사용자 실행)
+
+- Deploy v1 #3 (`deploy`, 커밋 `1a3d445`): 성공. **새 운영 버전 `0d097355-f63b-443e-8e7a-259f43d697ad`**. 정적 파일 10개(/v1/) 신규 업로드, 기존 14개는 그대로 재사용. Workflow `video-summary-v1` 생성.
+- D1 복원 지점: #1 check 실행 시 `000000ed-00000000-0000512a-4966c0dc48aab75321b4e1f1cb40c7d6`(배포 6분 전). #3 실행 요약에도 배포 직전 값이 기록되어 있다.
+- 되돌리기: 대시보드 Rollback → `dede9fb3`.
+
+### 배포 중 발견한 문제
+1. **공개 로그에 대시보드 변수 값 노출**: wrangler가 "로컬 설정과 대시보드 설정이 다르다"는 경고를 내며 변수 값(`ACCESS_AUD`, `ACCESS_TEAM_DOMAIN`, `GEMINI_LEGACY_QUOTE_RECOVERY_JSON` 등)을 출력했다. Secret은 출력되지 않았다. 워크플로가 배포 출력을 그대로 로그에 남긴(`tee`) 것이 원인이다. 이제 출력은 파일로만 남기고 버전 ID만 표시하도록 고쳤고, 테스트로 고정했다. 사용자에게 #3 실행 기록 삭제를 요청했다.
+2. **변수 유지 여부 미확인**: 같은 경고에서 대시보드 변수가 "제거"로 표시됐다. `keep_vars = true`이므로 유지됐을 가능성이 높지만, 이 세션은 Access 뒤 사이트를 볼 수 없다. 사용자에게 사이트 정상 여부와 Variables 화면을 확인 요청했다. `ACCESS_NOT_CONFIGURED`가 나오면 즉시 `dede9fb3`으로 Rollback한다.
+3. **참고**: 운영 대시보드 변수에 `ENABLE_PAID_SUMMARY`, `PAID_SUMMARY_EXECUTION_APPROVED`, `PAID_FIRST_GENERATION_TRIAL_ENABLED`가 `true`로 설정되어 있다(v0.7 Gemini 유료 요약 경로). v1은 유료 호출 경로가 없지만, 기존 앱의 유료 설정은 그대로다. "무료 유지" 방침과 맞는지 사용자 확인이 필요하다.
