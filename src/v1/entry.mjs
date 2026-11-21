@@ -35,6 +35,8 @@ export function withV1PageHeaders(response, pathname) {
   if (!response.ok) return response;
   const headers = new Headers(response.headers);
   headers.set('content-security-policy', V1_PAGE_CSP);
+  // Revalidate every time: a stale app.js/result.js after a deploy hid new failure details once.
+  headers.set('cache-control', 'no-cache');
   if (pathname.endsWith('/sw.js')) headers.set('service-worker-allowed', '/v1/');
   return new Response(response.body, {status: response.status, headers});
 }

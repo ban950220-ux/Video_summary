@@ -268,3 +268,23 @@ test('error codes and provider reasons survive the Workflow error re-wrapping', 
   assert.doesNotMatch(JSON.stringify(saved.attempts), /AIzaSy/);
   assert.match(saved.attempts.at(-1).detail, /^acquire: /);
 });
+
+test('a retry after a summary failure reuses the saved v1 transcript without caption calls', async () => {
+  const {env} = environment();
+  const {fetchFn, count} = providers();
+  const failingSummary = async (url, init) => (String(url).includes('generativelanguage')
+    ? jsonResponse({error: {message: 'quota'}}, 403) : fetchFn(url, init));
+  const first = await (await routeV1(post('/api/v1/jobs', {url: `https://youtu.be/${ID}`}), env, null,
+    {fetchFn: failingSummary, sleep: async () => {}})).json();
+  const failed = await (await routeV1(new Request(`${BASE}/api/v1/jobs/${first.job.id}`), env, null, {})).json();
+  assert.equal(failed.job.status, 'FAILED');
+  assert.match(failed.job.attempts.at(-1).detail, /^single: gemini 403: quota/);
+  assert.equal(count.supadata, 1);
+  const second = await (await routeV1(post('/api/v1/jobs', {url: `https://youtu.be/${ID}`}), env, null,
+    {fetchFn, sleep: async () => {}})).json();
+  const done = await (await routeV1(new Request(`${BASE}/api/v1/jobs/${second.job.id}`), env, null, {})).json();
+  assert.equal(done.job.status, 'DONE');
+  assert.equal(count.supadata, 1);
+  assert.equal(done.job.attempts[0].step, 'saved');
+  assert.equal(done.job.attempts[0].fromJobId, first.job.id);
+});

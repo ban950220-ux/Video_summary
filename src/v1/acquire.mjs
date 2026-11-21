@@ -4,7 +4,7 @@
 // Each step is recorded in `attempts` so the UI can show why a path was or was not used.
 import {transcriptFromUpload} from './captions.mjs';
 import {AppError} from './errors.mjs';
-import {findLegacyTranscript} from './legacy-transcripts.mjs';
+import {findLegacyTranscript, findSavedV1Transcript} from './legacy-transcripts.mjs';
 import {DEFAULT_GEMINI_MODEL, transcribeVideo} from './providers/gemini.mjs';
 import {safeReason} from './providers/http.mjs';
 import {fetchNativeCaptions} from './providers/supadata.mjs';
@@ -37,6 +37,15 @@ export async function acquireTranscript({url, db = null, keys = {}, liveProvider
     // Owner-chosen test mode: skip saved transcripts and existing captions, transcribe with Gemini.
     attempts.push({step: 'legacy', outcome: 'skipped', reason: 'GEMINI_ONLY'});
   } else {
+    try {
+      const saved = await findSavedV1Transcript(db, videoId);
+      if (saved) {
+        attempts.push({step: 'saved', outcome: 'found', fromJobId: saved.fromJobId});
+        return done(saved.transcript);
+      }
+    } catch (error) {
+      attempts.push({step: 'saved', outcome: 'error', code: codeOf(error), detail: detailOf(error)});
+    }
     try {
       legacy = await findLegacyTranscript(db, videoId);
       attempts.push({step: 'legacy', outcome: legacy ? 'found' : 'none',

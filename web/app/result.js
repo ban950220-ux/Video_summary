@@ -14,7 +14,8 @@ export const ERROR_TEXT = {
   PROVIDER_INVALID_OUTPUT: '요약 형식이 두 번 연속 올바르지 않았습니다. 잠시 후 다시 시도하세요.',
   PROVIDER_RATE_LIMITED: '외부 서비스의 무료 한도에 걸렸습니다. 잠시 후 다시 시도하세요.',
 };
-const STEP_TEXT = {legacy: '기존 저장 전사', supadata: 'YouTube 기존 자막', gemini: 'Gemini 영상 전사', providers: '외부 서비스',
+const STEP_TEXT = {saved: '이전 v1 작업의 전사', legacy: '기존 저장 전사', supadata: 'YouTube 기존 자막',
+  gemini: 'Gemini 영상 전사', providers: '외부 서비스',
   failure: '실패 지점'};
 const OUTCOME_TEXT = {found: '사용', none: '없음', 'no-captions': '자막 없음', skipped: '건너뜀', error: '실패', used: '사용'};
 

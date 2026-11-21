@@ -42,3 +42,24 @@ export async function findLegacyTranscript(db, videoId) {
   const candidates = results.map(candidateFrom).filter(Boolean);
   return candidates.find(c => c.transcript.coverage.complete) ?? candidates[0] ?? null;
 }
+
+// Transcript saved by an earlier v1 job for the same video (any status), so a retry after a
+// summary failure does not spend caption or Gemini quota again. Read-only.
+export async function findSavedV1Transcript(db, videoId) {
+  if (!db) return null;
+  const exists = await db.prepare(
+    "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('v1_jobs','v1_transcripts')",
+  ).first();
+  if (Number(exists?.n) !== 2) return null;
+  const row = await db.prepare(`SELECT t.job_id, t.source, t.language, t.duration_sec, t.segments_json
+    FROM v1_transcripts t JOIN v1_jobs j ON j.id = t.job_id
+    WHERE j.video_id = ? AND t.source != 'upload' ORDER BY t.created_at DESC LIMIT 1`).bind(videoId).first();
+  if (!row) return null;
+  try {
+    const transcript = makeTranscript({source: row.source, language: row.language,
+      segments: JSON.parse(row.segments_json), durationSec: row.duration_sec ?? null});
+    return {transcript, fromJobId: row.job_id};
+  } catch {
+    return null;
+  }
+}
