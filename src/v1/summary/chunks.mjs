@@ -1,9 +1,9 @@
 // Splits a transcript into summary chunks on segment boundaries.
 // Timed transcripts: about CHUNK_SEC of video per chunk; every chunk also stays under CHUNK_CHARS.
 export const CHUNK_SEC = 15 * 60;
-export const CHUNK_CHARS = 24_000;
+export const CHUNK_CHARS = 12_000;
 // Above this size the whole transcript is summarized in map-reduce mode instead of one call.
-export const SINGLE_CALL_CHARS = 30_000;
+export const SINGLE_CALL_CHARS = 12_000;
 
 export function chunkTranscript(transcript, {chunkSec = CHUNK_SEC, chunkChars = CHUNK_CHARS} = {}) {
   const chunks = [];

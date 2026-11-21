@@ -81,7 +81,7 @@ test('no captions -> Gemini; Supadata 206 still counts one credit', async () => 
   const result = await acquireTranscript({url: URL_, keys, liveProvidersEnabled: true, fetchFn, usage,
     sleep: noSleep});
   assert.equal(result.method, 'gemini-video');
-  assert.match(calls[1].url, /models\/gemini-2\.5-flash:generateContent$/);
+  assert.match(calls[1].url, /models\/gemini-3\.8-flash:generateContent$/);
   assert.deepEqual(usage.totals, {supadataCalls: 1, geminiCalls: 1, geminiVideoSeconds: 900});
   assert.deepEqual(result.attempts.map(a => a.step + ':' + a.outcome), ['legacy:none', 'supadata:no-captions',
     'gemini:found']);

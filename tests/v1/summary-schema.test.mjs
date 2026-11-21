@@ -80,7 +80,7 @@ test('Gemini text model: system rules, response schema, Flash-only, finish reaso
   const model = geminiTextModel({apiKey: 'g', fetchFn});
   const out = await model.generateJson({system: 'RULES', prompt: 'P', schema: FINAL_SCHEMA});
   assert.deepEqual(out.data, {a: 1});
-  assert.match(calls[0].url, /gemini-2\.5-flash:generateContent$/);
+  assert.match(calls[0].url, /gemini-3\.8-flash:generateContent$/);
   assert.equal(calls[0].body.systemInstruction.parts[0].text, 'RULES');
   assert.deepEqual(calls[0].body.generationConfig.responseSchema, FINAL_SCHEMA);
   assert.throws(() => geminiTextModel({apiKey: 'g', model: 'gemini-2.5-pro'}), {code: 'PAID_API_BLOCKED'});

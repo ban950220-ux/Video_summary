@@ -334,3 +334,15 @@
 - D1 조회 결과: v0.7 저장 전사 1건(116,145바이트, `video_id` 없음, `audio`). MP3 업로드 작업이라 영상 ID로 연결되지 않는다.
   - 남은 이슈: "이전 보고서"에서 기존 전사를 직접 골라 v1 요약하는 기능.
   - 현재는 5번 실행에서 받은 YouTube 자막(1:38:11)이 v1에 저장되어 있어 재사용된다.
+
+## 6단계 — 실제 검증 3차: 실제 원인 확인 (사유 표시 덕분)
+
+- 4번 Gemini: `gemini 404: This model models/gemini-2.5-flash is no longer available to new users ... use models/gemini-3.8-flash`. **기본 모델이 새 사용자에게 닫혀 있었다.** Gemini 전사와 Gemini 요약이 모두 이 때문에 실패했다.
+- 3·5번: Gemini 요약 실패 후 Groq로 넘어갔지만 `groq 413 ... tokens per minute: Limit 8000, Requested 15777 / 8211`. Groq 무료 등급은 입력과 최대 출력을 합쳐 분당 8,000토큰이다.
+- 조치:
+  - 기본 Gemini 모델을 `gemini-3.8-flash`로 변경(Flash 계열이라 무료 전용 검사 통과).
+  - 대시보드 변수 `V1_GEMINI_MODEL`로 재배포 없이 바꿀 수 있다.
+  - Groq 최대 출력 8,192 → 2,048.
+  - 요약 구간 24,000자 → 12,000자, 단일 요약 기준 30,000자 → 12,000자.
+- 확인된 것: Workflow 오류 코드 보존, 사유 표시, 저장 전사 재사용(`saved: 사용`, 자막 추가 호출 없음), 범위 문구("영상 길이 미확인")가 실제 환경에서 동작한다.
+- v1 78/78, `npm run check` 통과.

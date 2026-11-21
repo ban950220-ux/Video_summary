@@ -7,7 +7,8 @@ import {withRetry} from '../retry.mjs';
 import {failedResponse, providerFetch, readProviderJson} from './http.mjs';
 
 export const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-export const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+// Google closed gemini-2.5-flash to new users (error seen 2026-11-21) and points to gemini-3.8-flash instead
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 const FREE_MODEL = /^gemini-\d+(?:\.\d+)?-flash(?:-lite)?(?:-\d{3})?$/;
 export const DEFAULT_CLIP_SEC = 15 * 60;
 export const MAX_VIDEO_SEC = 2 * 60 * 60;
