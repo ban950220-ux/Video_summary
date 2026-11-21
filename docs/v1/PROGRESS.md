@@ -85,7 +85,8 @@
 - v1 테스트 43/43 통과 (Node 22, Node 24.22.3)
 - 무료 전용 정적 검사 통과: `mode=auto/generate` 없음, Flash 계열 외 Gemini ID 없음, `paidApiAllowed`는 `false` 고정
 - `npm run check` 통과(v1 검사 22개 파일, 문제 0)
-- 전체 `npm test`(Node 24.22.2)와 GitHub CI: 아래 기록
+- 전체 `npm test`(Node 24.22.2): **1008/1008 통과** (기존 965 + v1 43)
+- GitHub CI run 362(`ea2a5e0`): **통과**. 2단계 완료 기준 충족.
 
 ### 남은 이슈
 - **Gemini 구간 지정의 실제 토큰 사용량**: YouTube URL은 구간을 지정해도 음성 토큰이 영상 전체로 잡힌다는 사용자 보고가 있다(Google 포럼). 결제가 없는 키라 비용은 생기지 않지만, 무료 한도(하루 8시간·분당 토큰)가 예상보다 빨리 찰 수 있다. 호출마다 `promptTokens`를 기록하므로 6단계 실측으로 확인하고, 필요하면 구간 길이나 방식을 바꾼다.
