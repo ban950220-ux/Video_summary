@@ -1,0 +1,72 @@
+name: Deploy v1 (manual)
+
+# Manual only. Push, pull request or merge never deploys.
+# Requires repository secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID and owner approval
+# per docs/v1/DEPLOY.md. Type the Worker name to confirm.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check = 토큰·D1 확인과 배포 리허설만 (배포 안 함) / deploy = 실제 배포"
+        required: true
+        type: choice
+        default: check
+        options: [check, deploy]
+      confirm:
+        description: "deploy일 때만: Worker 이름 holy-rice-b914 를 입력하세요"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-v1-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Require typed confirmation for deploy
+        if: inputs.mode == 'deploy'
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: test "$CONFIRM" = "holy-rice-b914"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:v1
+      - run: node scripts/v1-build-assets.mjs
+      - name: Record D1 restore point (Time Travel bookmark) before deploying
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing secret CLOUDFLARE_API_TOKEN"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "Missing secret CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+          npx wrangler whoami
+          npx wrangler d1 time-travel info youtube-ai-analyzer-private-db | tee d1-bookmark.log
+          {
+            echo "### D1 restore point before deploy"
+            grep -iE "bookmark" d1-bookmark.log || echo "(see job log)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Deploy rehearsal (no upload)
+        run: npx wrangler deploy -c wrangler.v1.toml --dry-run --outdir dist/dry-run
+      - name: Deploy
+        if: inputs.mode == 'deploy'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" && test -n "$CLOUDFLARE_ACCOUNT_ID"
+          npx wrangler deploy -c wrangler.v1.toml | tee deploy.log
+          {
+            echo "### v1 deployment"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            grep -E "Current Version ID|Deployment ID" deploy.log || true
+          } >> "$GITHUB_STEP_SUMMARY"
