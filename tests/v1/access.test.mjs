@@ -78,7 +78,8 @@ test('the reader token (other projects) may only list summaries and fetch export
     assert.notEqual((await call(path)).status, 403, path);
   }
   for (const [path, method] of [['/api/v1/jobs', 'POST'], [`/api/v1/jobs/${id}`, 'GET'],
-    [`/api/v1/jobs/${id}`, 'DELETE'], ['/api/v1/usage', 'GET'], ['/api/v1/runner/next', 'POST'], [`/api/v1/jobs/${id}/corrections`, 'PUT'],
+    [`/api/v1/jobs/${id}`, 'DELETE'], ['/api/v1/usage', 'GET'],
+    ['/api/v1/runner/next', 'POST'], [`/api/v1/jobs/${id}/corrections`, 'PUT'],
     ['/api/v1/legacy-sources', 'GET']]) {
     assert.equal((await call(path, method)).status, 403, `${method} ${path}`);
   }
