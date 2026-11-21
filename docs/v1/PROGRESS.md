@@ -600,3 +600,13 @@
 - 사용자 확인(2026-11-21): 결과 화면(배지, 접히는 카드, 검토할 곳, JSON 버튼) 정상. Android YouTube 공유 목록에 영상요약이 표시됨(앱 재설치 후 반영). 후속 개선 1·5·4·3·2 완료.
 - 사용자 보고(2026-11-21): PC 실행기 `git pull` 완료(`9adab0d`). BANSIGHT용 읽기 토큰(`bansight-reader`) 생성, 정책 연결, `holy-rice-b914` 변수 `V1_READER_TOKEN_CLIENT_ID` 설정, `bansight-owner-private`에 Secret 2개(`VIDEO_SUMMARY_CLIENT_ID`, `VIDEO_SUMMARY_CLIENT_SECRET`) 등록 완료. 실제 호출 확인(curl)과 BANSIGHT 쪽 호출 코드는 아직 남아 있다.
 - 미확인: Gemini 키가 속한 Google 프로젝트의 결제 연결 여부. v0.7 변수에 유료 승인 흔적(`PAID_APPROVED`, 10/12)이 있어 사용자에게 AI Studio에서 Free/Paid tier 확인을 요청했다.
+
+## 중요: Gemini 키가 유료 등급으로 확인됨 (2026-11-21, 사용자 확인 "AI Studio에서 Tier 1")
+- 사이트에 등록된 Gemini 키의 Google 프로젝트는 **Tier 1(결제 연결)**이다. 이전에 받은 "결제 미연결 키" 답변과 다르다. 따라서 **오늘 v1의 Gemini 호출(91회, 영상 10,115초)은 과금 대상**이다.
+- 추정 금액은 1~2달러 이하다(입력 약 100만·출력 약 20만 토큰, Flash 계열 과거 단가 가정). `gemini-3.8-flash`의 실제 단가는 확인하지 못했다. 실제 금액은 Google Cloud 결제 보고서로 확인한다.
+- 원인(프로세스): 키 등급을 화면으로 직접 확인받지 않고 구두 확인만으로 "무료 유지"를 전제했다. v0.7 변수의 `PAID_APPROVED` 흔적을 발견했을 때 즉시 재확인하지 않았다.
+- 코드의 "무료 전용" 장치(Flash 계열만 허용, Supadata native 고정, 일일 상한)는 **키의 결제 등급을 감지하지 못한다.**
+- 조치:
+  - AI는 이 문제가 정리될 때까지 Gemini를 쓰는 실행을 하지 않는다.
+  - 사용자에게 결제 미연결 새 프로젝트의 키로 교체하는 방법과 v0.7 유료 변수 3개를 끄는 방법을 안내했다.
+  - 결정 대기: 무료 키 교체 여부, 설정 화면에 "무료 등급 확인" 기록 추가 여부.

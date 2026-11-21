@@ -11,6 +11,10 @@
   - 숫자 검증 설계: `docs/v1/NUMERIC_VERIFICATION_DESIGN.md`
 - 현재 단계는 `docs/v1/PROGRESS.md`의 마지막 항목을 본다.
 
+## ⚠ 미해결: Gemini 키가 유료 등급(Tier 1)
+
+- 2026-11-21 사용자가 AI Studio에서 확인. 무료 키로 교체(또는 유료 유지 결정) 전까지 AI는 Gemini를 쓰는 실행을 하지 않는다. `docs/v1/PROGRESS.md` 마지막 절 참고.
+
 ## 사용자 확정 사항 (2026-11-21)
 
 - 새 구조로 재구성하되 좋은 기존 코드는 재사용한다.
