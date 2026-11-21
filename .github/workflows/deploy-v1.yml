@@ -49,7 +49,6 @@ jobs:
         run: |
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing secret CLOUDFLARE_API_TOKEN"; exit 1; }
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "Missing secret CLOUDFLARE_ACCOUNT_ID"; exit 1; }
-          npx wrangler whoami
           npx wrangler d1 time-travel info youtube-ai-analyzer-private-db | tee d1-bookmark.log
           {
             echo "### D1 restore point before deploy"

@@ -89,3 +89,10 @@ test('non-v1 paths go to the production handler with its own Access check', asyn
   }
   assert.equal((await handleV1Site(new Request('https://s.test/'), {})).status, 503);
 });
+
+test('deploy workflow never prints account identity into public logs', () => {
+  const workflow = read('.github/workflows/deploy-v1.yml');
+  assert.doesNotMatch(workflow, /wrangler\s+whoami/);
+  assert.doesNotMatch(workflow, /echo\s+"?\$\{?\{?\s*secrets\./);
+  assert.match(workflow, /if: inputs\.mode == 'deploy'/);
+});
