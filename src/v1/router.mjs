@@ -2,6 +2,7 @@
 // before any /api/ route, so every handler here already runs as the owner.
 import {acquireFromUpload} from './acquire.mjs';
 import {readConfig} from './config.mjs';
+import {applyCorrections, reviewList} from './corrections.mjs';
 import {jobRepository, STATUS} from './db/jobs.mjs';
 import {createD1Usage} from './db/usage.mjs';
 import {AppError} from './errors.mjs';
@@ -18,7 +19,7 @@ import {verifySummary} from './verify/facts.mjs';
 import {parseYouTubeUrl} from './youtube.mjs';
 
 export const API_PREFIX = '/api/v1/';
-const JOB_PATH = /^jobs\/([0-9a-f-]{36})(\/export|\/analysis|\/crosscheck)?$/;
+const JOB_PATH = /^jobs\/([0-9a-f-]{36})(\/export|\/analysis|\/crosscheck|\/corrections|\/resummarize)?$/;
 
 // Durable Workflow when bound (production), otherwise inline in the background or awaited (tests).
 async function startJob(jobId, env, ctx, deps, task = 'summary') {
@@ -44,7 +45,9 @@ async function jobDetail(jobs, id) {
   const [transcript, summary] = await Promise.all([jobs.loadTranscript(id), jobs.loadSummary(id)]);
   // Computed on read (no model calls), so summaries saved before stage 8 are checked too.
   const verification = summary && transcript ? verifySummary(summary, transcript) : null;
-  return {job, transcript, summary, verification};
+  const corrections = await jobs.loadCorrections(id);
+  const review = transcript ? reviewList(transcript, verification, summary?.crossCheck, corrections) : [];
+  return {job, transcript, summary, verification, corrections, review};
 }
 
 async function createJob(request, env, ctx, deps, jobs) {
@@ -184,6 +187,32 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
       await jobs.saveSummary(match[1], {...summary, analysis});
       const runner = await startJob(match[1], env, ctx, deps, 'analysis');
       return json({analysis: (await jobs.loadSummary(match[1])).analysis, started: true, runner}, 202);
+    }
+    if (match && match[2] === '/corrections' && method === 'PUT') {
+      assertSameOrigin(request);
+      const body = await readJson(request);
+      const transcript = await jobs.loadTranscript(match[1]);
+      const segment = transcript?.segments.find(s => s.id === body.segmentId);
+      if (!segment) throw new AppError('NOT_FOUND', 'segment');
+      const text = typeof body.text === 'string' ? body.text.replace(/\s+/g, ' ').trim().slice(0, 2000) : '';
+      await jobs.saveCorrection(match[1], segment.id, text === segment.text ? '' : text);
+      return json({corrections: await jobs.loadCorrections(match[1])});
+    }
+    // A corrected summary is a new job, so the automatic one stays available for comparison.
+    if (match && match[2] === '/resummarize' && method === 'POST') {
+      assertSameOrigin(request);
+      const [source, transcript, corrections] = await Promise.all([jobs.get(match[1]), jobs.loadTranscript(match[1]),
+        jobs.loadCorrections(match[1])]);
+      if (!source || !transcript) throw new AppError('NOT_FOUND');
+      const count = Object.keys(corrections).length;
+      if (!count) throw new AppError('BAD_REQUEST', 'no corrections');
+      const job = await jobs.create({videoId: source.videoId, url: source.url, title: source.title,
+        options: {correctedFrom: source.id, correctedSegments: count}});
+      await jobs.saveTranscript(job.id, applyCorrections(transcript, corrections));
+      await jobs.update(job.id, {transcriptSource: transcript.source,
+        attempts: [{step: 'corrected', outcome: 'used', fromJobId: source.id, segments: count}]});
+      const runner = await startJob(job.id, env, ctx, deps);
+      return json({job: await jobs.get(job.id), runner}, 202);
     }
     if (match && match[2] === '/crosscheck' && method === 'POST') {
       assertSameOrigin(request);

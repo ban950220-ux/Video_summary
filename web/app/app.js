@@ -88,7 +88,22 @@ function newView() {
 async function jobView(id) {
   const render = async () => {
     const detail = await api(`/api/v1/jobs/${encodeURIComponent(id)}`);
-    show(renderResult(detail, {onCrossCheck: async () => {
+    show(renderResult(detail, {onCorrect: async (segmentId, text) => {
+      try {
+        await api(`/api/v1/jobs/${encodeURIComponent(id)}/corrections`, {method: 'PUT', body: {segmentId, text}});
+        toast('교정을 저장했습니다.');
+        await render();
+      } catch (error) {
+        toast(error.message);
+      }
+    }, onResummarize: async () => {
+      try {
+        const {job} = await api(`/api/v1/jobs/${encodeURIComponent(id)}/resummarize`, {method: 'POST', body: {}});
+        location.hash = `#job/${job.id}`;
+      } catch (error) {
+        toast(error.message);
+      }
+    }, onCrossCheck: async () => {
       try {
         await api(`/api/v1/jobs/${encodeURIComponent(id)}/crosscheck`, {method: 'POST', body: {}});
         await render();

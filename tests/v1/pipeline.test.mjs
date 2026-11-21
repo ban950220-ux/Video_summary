@@ -122,7 +122,7 @@ test('v0.7 tables are untouched; v1 tables are added', async () => {
   const after = db.prepare("SELECT name, sql FROM sqlite_master WHERE instr(name, 'v1_') = 0 ORDER BY name").all();
   assert.deepEqual(after, before);
   const v1 = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'v1_%' ORDER BY name").all();
-  assert.deepEqual(v1.map(r => r.name), ['v1_jobs', 'v1_summaries', 'v1_transcripts', 'v1_usage']);
+  assert.deepEqual(v1.map(r => r.name), ['v1_corrections', 'v1_jobs', 'v1_summaries', 'v1_transcripts', 'v1_usage']);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM jobs').get().n, 0);
 });
 

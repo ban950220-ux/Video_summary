@@ -33,6 +33,14 @@ export const V1_SCHEMA = Object.freeze([
     summary_json TEXT NOT NULL,
     created_at TEXT NOT NULL
   )`,
+  // Human corrections are stored apart from the transcript, which is never edited.
+  `CREATE TABLE IF NOT EXISTS v1_corrections (
+    job_id TEXT NOT NULL,
+    segment_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (job_id, segment_id)
+  )`,
   `CREATE TABLE IF NOT EXISTS v1_usage (
     day TEXT NOT NULL,
     key TEXT NOT NULL,

@@ -97,7 +97,7 @@ export function jobRepository(db, {now = () => new Date().toISOString(), newId =
     },
     async remove(id) {
       await ready();
-      for (const table of ['v1_summaries', 'v1_transcripts']) {
+      for (const table of ['v1_summaries', 'v1_transcripts', 'v1_corrections']) {
         await db.prepare(`DELETE FROM ${table} WHERE job_id = ?`).bind(id).run();
       }
       const result = await db.prepare('DELETE FROM v1_jobs WHERE id = ?').bind(id).run();
@@ -123,6 +123,22 @@ export function jobRepository(db, {now = () => new Date().toISOString(), newId =
         timed: segments.every(s => s.startMs !== null), coverage: parse(row.coverage_json, {}), segments,
         legacyJobId: row.legacy_job_id,
       };
+    },
+    async saveCorrection(jobId, segmentId, text) {
+      await ready();
+      if (!text) {
+        await db.prepare('DELETE FROM v1_corrections WHERE job_id = ? AND segment_id = ?').bind(jobId, segmentId).run();
+        return;
+      }
+      await db.prepare(`INSERT INTO v1_corrections(job_id, segment_id, text, updated_at) VALUES(?, ?, ?, ?)
+        ON CONFLICT(job_id, segment_id) DO UPDATE SET text = excluded.text, updated_at = excluded.updated_at`)
+        .bind(jobId, segmentId, text, now()).run();
+    },
+    async loadCorrections(jobId) {
+      await ready();
+      const {results = []} = await db.prepare('SELECT segment_id, text FROM v1_corrections WHERE job_id = ?')
+        .bind(jobId).all();
+      return Object.fromEntries(results.map(r => [r.segment_id, r.text]));
     },
     async saveSummary(jobId, summary) {
       await ready();

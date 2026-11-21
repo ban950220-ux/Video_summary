@@ -65,7 +65,9 @@ function mockApi(req, res, url, body) {
     const verification = done ? {counts: {total: 2, verified: 1, mismatch: 1, unverifiable: 0}, items: [
       {surface: '약 20%', status: 'VERIFIED', codes: [], segmentIds: [2]},
       {surface: '1003개사', status: 'MISMATCH', codes: ['VALUE_CHANGED'], source: '103개사', segmentIds: [5]}]} : null;
-    return send(res, 200, {job, verification, transcript: done ? {source: 'supadata-native', segments,
+    const review = done ? [{segmentId: 5, startMs: 240_000, text: '원문 문장 5', corrected: null,
+      reasons: ['숫자 불일치: 1003개사']}] : [];
+    return send(res, 200, {job, verification, review, transcript: done ? {source: 'supadata-native', segments,
       coverage: {complete: true, firstSec: 0, lastSec: 305}} : null, summary: done ? summary : null});
   }
   if (url.pathname === '/api/v1/jobs' && req.method === 'GET') {
@@ -144,6 +146,8 @@ for (const [name, viewport] of [['desktop', {width: 1280, height: 900}], ['phone
     assert.match(await p.textContent('main'), /확인 필요/);
     assert.match(await p.textContent('#verification'), /숫자 2개: 원문 확인 1 · 불일치 1/);
     assert.equal(await p.textContent('#analyze'), '상세 분석 만들기');
+    assert.match(await p.textContent('#review'), /검토할 곳 \(1\).*04:00 #5 숫자 불일치: 1003개사/s);
+    assert.equal(await p.inputValue('#review textarea'), '원문 문장 5');
     state.writes.length = 0;
     await p.click('#crosscheck-run');
     await p.waitForFunction(() => document.querySelector('#analyze') && !document.querySelector('#analyze').disabled);

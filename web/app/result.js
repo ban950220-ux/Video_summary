@@ -122,6 +122,30 @@ function verificationCard(verification, transcript, videoId) {
       item.segmentIds?.length ? evidence(item.segmentIds, transcript, videoId) : null))));
 }
 
+function reviewCard(review, videoId, {onCorrect, onResummarize}) {
+  const corrected = review.filter(item => item.corrected).length;
+  const card = h('section', {class: 'card', id: 'review'}, h('h2', {}, `검토할 곳 (${review.length})`),
+    h('p', {class: 'muted'}, '전사가 불확실하거나 숫자가 맞지 않은 구간입니다. 영상을 듣고 고치면 원본은 그대로 두고 교정본을 '
+      + '따로 저장합니다.'));
+  card.append(h('ul', {class: 'points'}, review.map(item => {
+    const input = h('textarea', {rows: 2, 'aria-label': `구간 ${item.segmentId} 교정`}, item.corrected ?? item.text);
+    const href = watchUrl(videoId, item.startMs);
+    return h('li', {'data-review': item.segmentId},
+      href ? h('a', {href, target: '_blank', rel: 'noopener'}, clock(item.startMs)) : clock(item.startMs),
+      ` #${item.segmentId} `, h('span', {class: 'warn'}, item.reasons.join(' · ')),
+      item.corrected ? h('p', {class: 'muted'}, `원본: ${item.text}`) : null, input,
+      h('button', {type: 'button', class: 'secondary', onclick: () => onCorrect(item.segmentId, input.value)},
+        '교정 저장'));
+  })));
+  if (corrected) {
+    card.append(h('button', {type: 'button', id: 'resummarize', onclick: event => {
+      event.target.disabled = true;
+      onResummarize();
+    }}, `교정 ${corrected}곳 반영해 새로 요약`));
+  }
+  return card;
+}
+
 const TYPE_TEXT = {CLAIM: '주장', CAUSE: '인과', CONTEXT: '맥락', UNCERTAINTY: '불확실성·예측'};
 
 function analysisCard(analysis, transcript, videoId, onAnalyze) {
@@ -151,12 +175,16 @@ function analysisCard(analysis, transcript, videoId, onAnalyze) {
   return card;
 }
 
-export function renderResult({job, transcript, summary, verification}, {onDelete, onAnalyze, onCrossCheck}) {
+export function renderResult({job, transcript, summary, verification, review = []}, handlers) {
+  const {onDelete, onAnalyze, onCrossCheck} = handlers;
   const nodes = [h('section', {class: 'card'},
     h('h1', {}, job.title ?? job.videoId ?? '영상 요약'),
     h('p', {class: 'muted'}, date(job.createdAt), job.url ? ' · ' : '',
       job.url ? h('a', {href: job.url, target: '_blank', rel: 'noopener'}, 'YouTube에서 보기') : ''),
     h('div', {class: 'row'}, h('span', {class: `badge status-${job.status}`}, job.status)),
+    job.options?.correctedFrom ? h('p', {}, h('span', {class: 'badge speaker'}, '수동 교정 반영'),
+      ` ${job.options.correctedSegments}개 구간 · `, h('a', {href: `#job/${job.options.correctedFrom}`}, '교정 전 요약 보기'))
+      : null,
     job.status === 'DONE' || job.status === 'FAILED' ? null : steps(job.status),
     transcript ? h('p', {class: 'muted'}, `전사 출처: ${SOURCE[transcript.source] ?? transcript.source} · `
       + `범위: ${coverageText(transcript)}`) : null,
@@ -194,6 +222,7 @@ export function renderResult({job, transcript, summary, verification}, {onDelete
       card.append(crossCheckBlock(summary.crossCheck, Boolean(job.url), onCrossCheck));
       nodes.push(card);
     }
+    if (review.length) nodes.push(reviewCard(review, job.videoId, handlers));
     if (summary.warnings?.length) {
       nodes.push(h('section', {class: 'card warn'}, h('h2', {}, '확인 필요'),
         h('p', {}, `숫자의 원문 근거가 기록되지 않은 항목 ${summary.warnings.length}개가 있습니다.`)));
