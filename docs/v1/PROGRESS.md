@@ -231,3 +231,26 @@
 
 ### 배포 전 사용자 확인 필요 (DEPLOY.md 2장)
 - 현재 운영 버전 ID·배포 시각, D1 테이블 목록(`0021` 유무), 키 등록 여부, 배포 방법(A 직접 / B GitHub Actions), 검증 영상 URL 2개
+
+## 6단계 — 배포 전 확인 결과: 같은 Worker 배포 보류 (2026-11-21)
+
+사용자 제공 정보:
+- 운영 버전 `dede9fb3`, 배포 2026-11-09 11:57:17Z
+- D1 테이블 25개. 이 가운데 `yta_manual_summary_archives`, `yta_manual_summary_archive_requests`, `video_text_review_summaries`가 있다.
+- 배포 방식: GitHub Actions
+
+확인:
+- 위 세 테이블 이름은 GitHub 원격 브랜치 72개 어디에도 없다(전체 `git grep`).
+- 운영 배포일(11/09)이 main 마지막 커밋(10/27)보다 늦다.
+- 따라서 **운영 코드는 GitHub에 없는 코드**(PC 또는 대시보드에서 배포된 것으로 추정)다.
+
+결정:
+- `holy-rice-b914`에 `wrangler.v1.toml`로 배포하면 운영 기능(수동 요약 보관 등)이 사라질 수 있다. 같은 Worker 배포는 **보류**한다.
+
+사용자에게 선택 요청:
+- A. v1을 새 Worker로 배포(같은 D1, 기존 테이블 읽기 전용) — 권장
+- B. 운영 코드를 확보한 뒤 그 위에 v1을 합쳐 배포
+
+추가 권장: 운영 코드 백업(PC 폴더 복사, 대시보드에서 코드 확인).
+
+키 위치 안내: 기존 사이트 "API 보안 설정" = Cloudflare D1 암호화 저장. GitHub에는 키를 넣지 않는다. GitHub Secrets에는 Cloudflare 배포 토큰만 넣는다.

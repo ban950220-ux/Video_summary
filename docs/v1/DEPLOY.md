@@ -1,7 +1,7 @@
 # v1 배포 절차서 (6단계)
 
 - 대상: 기존 Worker `holy-rice-b914`, 기존 D1 `youtube-ai-analyzer-private-db`
-- 상태: **준비 완료. 배포는 사용자 승인 후에만 진행한다.** 이 클라우드 세션은 Cloudflare 계정에 접근하지 않는다.
+- 상태: **같은 Worker 배포 보류 (2026-11-21).** 운영 버전 `dede9fb3`이 GitHub에 없는 코드로 확인되었다(`docs/v1/PROGRESS.md` 마지막 절). 이 문서 그대로 `holy-rice-b914`에 배포하지 말 것. 이 클라우드 세션은 Cloudflare 계정에 접근하지 않는다.
 
 ## 1. 바뀌는 것과 그대로인 것
 
