@@ -34,6 +34,8 @@
 | `src/v1/legacy-transcripts.mjs` | v0.7 전사 읽기 전용 재사용 | 2단계 |
 | `src/v1/providers/*.mjs` | Supadata(native 전용), Gemini(구간 전사, Flash 전용) | 2단계 |
 | `src/v1/acquire.mjs` | 전사 확보 순서 실행·기록 | 2단계 |
+| `src/v1/summary/*.mjs` | 구간 나누기, 지시문, 출력 스키마·검증, 요약 엔진 | 3단계 |
+| `src/v1/providers/llm.mjs` | Gemini·Groq JSON 출력 모델 | 3단계 |
 
 ## 기존 v0.7 (운영 중, 유지)
 
