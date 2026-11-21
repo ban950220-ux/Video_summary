@@ -273,6 +273,7 @@ export function renderResult({job, transcript, summary, verification, review = [
     nodes.push(h('section', {class: 'card row'},
       h('a', {class: 'button secondary', href: `/api/v1/jobs/${job.id}/export`}, 'Markdown 내보내기'),
       h('a', {class: 'button secondary', href: `/api/v1/jobs/${job.id}/export?format=txt`}, 'TXT 내보내기'),
+      h('a', {class: 'button secondary', href: `/api/v1/jobs/${job.id}/export?format=json`}, 'JSON (연계용)'),
       h('button', {type: 'button', class: 'secondary', onclick: onDelete}, '삭제')));
   }
   return nodes;

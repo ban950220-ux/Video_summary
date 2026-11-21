@@ -7,6 +7,7 @@ import {jobRepository, STATUS} from './db/jobs.mjs';
 import {createD1Usage} from './db/usage.mjs';
 import {AppError} from './errors.mjs';
 import {exportMarkdown, exportText} from './export.mjs';
+import {exportJson} from './export-json.mjs';
 import {assertSameOrigin, errorResponse, json, readJson} from './http.mjs';
 import {keyStatus, loadProviderKeys} from './keys.mjs';
 import {listLegacySources, loadLegacyTranscript} from './legacy-transcripts.mjs';
@@ -227,6 +228,11 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
     if (match && match[2] === '/export' && method === 'GET') {
       const detail = await jobDetail(jobs, match[1]);
       if (!detail.summary) throw new AppError('NOT_FOUND', 'summary not ready');
+      if (url.searchParams.get('format') === 'json') {
+        return new Response(JSON.stringify(exportJson(detail), null, 2), {headers: {
+          'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store',
+          'content-disposition': `attachment; filename="summary-${detail.job.videoId ?? detail.job.id}.json"`}});
+      }
       const txt = url.searchParams.get('format') === 'txt';
       const body = txt ? exportText(detail) : exportMarkdown(detail);
       return new Response(body, {headers: {

@@ -91,3 +91,27 @@ test('numbers as written in the summary count when heard as Korean number words'
   const clips = [{startSec: 0, endSec: 20, segments: [{startMs: 1000, endMs: 4000, text: '상장사 열 곳 중 네 곳이 대상입니다'}]}];
   assert.equal(compareFacts(verification, t, clips).items[0].result, 'CONFIRMED');
 });
+
+test('JSON export keeps attribution, evidence sentences and per-number check results', async () => {
+  const {exportJson, EXPORT_SCHEMA} = await import('../../src/v1/export-json.mjs');
+  const verification = verifySummary(summary, transcript);
+  const withCross = {...summary, crossCheck: {status: 'DONE', sameEngineAsTranscript: false,
+    counts: {total: 4, confirmed: 3, differs: 1, notChecked: 0},
+    items: [{value: 1003, segmentIds: [2], result: 'DIFFERS', heardValues: ['1,053개']}]},
+  analysis: {status: 'DONE', items: [{type: 'CAUSE', text: '인과', attribution: 'INTERPRETATION', segmentIds: [3],
+    facts: []}]}};
+  const out = exportJson({job: {id: 'j', videoId: 'dQw4w9WgXcQ', url: 'u', title: '제목', createdAt: 't', options: {}},
+    transcript, summary: withCross, verification});
+  assert.equal(out.schema, EXPORT_SCHEMA);
+  assert.equal(out.reviewState, 'AUTO_NOT_HUMAN_REVIEWED');
+  assert.deepEqual(out.statements.map(s => `${s.kind}:${s.attribution}`), ['KEY_POINT:SPEAKER', 'KEY_POINT:SPEAKER',
+    'KEY_POINT:SPEAKER', 'CAUSE:INTERPRETATION']);
+  const wrong = out.statements[1].numbers.find(n => n.value === 1003);
+  assert.deepEqual(wrong.verification, {status: 'MISMATCH', codes: ['VALUE_CHANGED']});
+  assert.deepEqual(wrong.reListen, {result: 'DIFFERS', heardValues: ['1,053개']});
+  assert.deepEqual(out.statements[1].evidence[0], {segmentId: 2, startSec: 300,
+    url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=300s', text: '상장사는 2,521개사 중 103개사였습니다',
+    transcriptFlags: []});
+  assert.equal(out.video.publishedAt, null);
+  assert.equal(out.checks.reListen.differs, 1);
+});
