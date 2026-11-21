@@ -143,7 +143,11 @@ for (const [name, viewport] of [['desktop', {width: 1280, height: 900}], ['phone
     assert.match(await p.textContent('h1'), /<img src=x/);
     assert.equal(await p.evaluate(() => window.__xss), undefined);
     assert.match(await p.textContent('main'), /YouTube 기존 자막/);
-    assert.match(await p.textContent('main'), /확인 필요/);
+    assert.deepEqual(await p.$$eval('#glance .badge', els => els.map(e => e.textContent)), ['숫자 ⚠ 1/2', '검토할 곳 1']);
+    assert.equal(await p.$eval('#verification', el => el.open), false);
+    await p.click('#glance [data-open="verification"]');
+    assert.equal(await p.$eval('#verification', el => el.open), true);
+    await p.click('#analysis > summary');
     assert.match(await p.textContent('#verification'), /숫자 2개: 원문 확인 1 · 불일치 1/);
     assert.equal(await p.textContent('#analyze'), '상세 분석 만들기');
     assert.match(await p.textContent('#review'), /검토할 곳 \(1\).*04:00 #5 숫자 불일치: 1003개사/s);
@@ -217,4 +221,20 @@ test('PWA: manifest with credentials, icons of the right size, service worker re
   await p.waitForFunction(async () => Boolean(await navigator.serviceWorker.getRegistration()));
   assert.equal(await p.evaluate(async () => (await navigator.serviceWorker.getRegistration()).scope), `${base}/v1/`);
   await p.context().close();
+});
+
+test('a link shared from the YouTube app is filled in but not started', async () => {
+  const context = await browser.newContext({viewport: {width: 390, height: 844}});
+  const p = await context.newPage();
+  const before = state.jobs.size;
+  const shared = encodeURIComponent(`https://youtu.be/${VIDEO}?si=abc`);
+  await p.goto(`${base}/v1/?title=${encodeURIComponent('영상 제목')}&text=${shared}`);
+  await p.waitForSelector('#url-form input');
+  assert.equal(await p.inputValue('#url-form input[type=url]'), `https://youtu.be/${VIDEO}?si=abc`);
+  assert.equal(new URL(p.url()).search, '');
+  assert.equal(state.jobs.size, before);
+  const manifest = JSON.parse(readFileSync(new URL('manifest.webmanifest', APP), 'utf8'));
+  assert.deepEqual(manifest.share_target, {action: '/v1/', method: 'GET', params: {title: 'title', text: 'text',
+    url: 'url'}});
+  await context.close();
 });

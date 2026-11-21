@@ -23,9 +23,25 @@ function show(...nodes) {
   view.replaceChildren(...nodes.flat());
 }
 
+// "Share" from the YouTube app opens /v1/?text=<link> (manifest share_target). The link is only
+// filled in; the owner still presses start, so nothing is spent without a tap.
+export function sharedYouTubeUrl(search) {
+  const params = new URLSearchParams(search);
+  const joined = ['url', 'text', 'title'].map(key => params.get(key) ?? '').join(' ');
+  const link = /https:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?[^\s]*v=|shorts\/|live\/)|youtu\.be\/)[^\s]+/;
+  return joined.match(link)?.[0] ?? null;
+}
+let sharedUrl = sharedYouTubeUrl(location.search);
+if (location.search) history.replaceState(null, '', location.pathname + location.hash);
+
 function newView() {
   const url = h('input', {type: 'url', name: 'url', required: true, placeholder: 'https://www.youtube.com/watch?v=…',
     'aria-label': 'YouTube 주소'});
+  if (sharedUrl) {
+    url.value = sharedUrl;
+    sharedUrl = null;
+    toast('공유한 영상 주소를 넣었습니다. "요약 시작"을 누르세요.');
+  }
   const geminiOnly = h('input', {type: 'checkbox', name: 'geminiOnly'});
   const geminiLabel = h('label', {class: 'muted check'}, geminiOnly,
     ' 기존 자막 건너뛰고 Gemini로 전사 (시험용, 무료 한도에서 영상 길이만큼 사용)');

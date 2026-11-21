@@ -175,6 +175,49 @@ function analysisCard(analysis, transcript, videoId, onAnalyze) {
   return card;
 }
 
+// Secondary cards fold so the first screen stays short on a phone. Open state survives re-renders.
+const openFolds = new Set();
+
+function fold(section, note = '') {
+  const heading = section.querySelector('h2');
+  const details = h('details', {class: 'card', id: section.id});
+  if (openFolds.has(section.id)) details.open = true;
+  details.addEventListener('toggle', () => (details.open ? openFolds.add(section.id) : openFolds.delete(section.id)));
+  heading.remove();
+  details.append(h('summary', {}, h('strong', {}, heading.textContent), note ? h('span', {class: 'muted'}, ` ${note}`)
+    : null), ...section.childNodes);
+  return details;
+}
+
+function glance(transcript, verification, crossCheck, review) {
+  const chips = [];
+  const bad = verification ? verification.counts.mismatch + verification.counts.unverifiable : 0;
+  if (verification?.counts.total) {
+    chips.push(h('a', {class: `badge ${bad ? 'ai' : 'speaker'}`, href: '#', 'data-open': 'verification'},
+      bad ? `숫자 ⚠ ${bad}/${verification.counts.total}` : `숫자 ${verification.counts.total}개 원문 확인`));
+  }
+  if (crossCheck?.status === 'DONE') {
+    chips.push(h('a', {class: `badge ${crossCheck.counts.differs ? 'ai' : 'speaker'}`, href: '#',
+      'data-open': 'verification'}, `다시 듣기: 다름 ${crossCheck.counts.differs}`));
+  }
+  if (review.length) {
+    chips.push(h('a', {class: 'badge ai', href: '#', 'data-open': 'review'}, `검토할 곳 ${review.length}`));
+  }
+  const flagged = (transcript?.segments ?? []).filter(s => s.flags?.some(f => f !== 'CORRECTED')).length;
+  if (flagged) chips.push(h('span', {class: 'badge ai'}, `전사 불확실 ${flagged}`));
+  for (const chip of chips) {
+    if (!chip.dataset.open) continue;
+    chip.addEventListener('click', event => {
+      event.preventDefault();
+      const target = document.getElementById(chip.dataset.open);
+      if (!target) return;
+      target.open = true;
+      target.scrollIntoView({behavior: 'smooth'});
+    });
+  }
+  return chips.length ? h('p', {class: 'row', id: 'glance'}, chips) : null;
+}
+
 export function renderResult({job, transcript, summary, verification, review = []}, handlers) {
   const {onDelete, onAnalyze, onCrossCheck} = handlers;
   const nodes = [h('section', {class: 'card'},
@@ -204,7 +247,8 @@ export function renderResult({job, transcript, summary, verification, review = [
     nodes.push(
       h('section', {class: 'card', id: 'conclusion'}, h('h2', {}, '핵심 결론'),
         h('p', {class: 'muted'}, '자동 생성 · 사람 검토 전'), h('p', {}, summary.conclusion.text),
-        evidence(summary.conclusion.segmentIds, transcript, job.videoId)),
+        evidence(summary.conclusion.segmentIds, transcript, job.videoId),
+        glance(transcript, verification, summary.crossCheck, review)),
       h('section', {class: 'card', id: 'points'}, h('h2', {}, '핵심 요약'),
         h('ul', {class: 'points'}, summary.keyPoints.map(p => point(p, transcript, job.videoId)))),
       h('section', {class: 'card', id: 'chapters'}, h('h2', {}, '챕터'),
@@ -216,17 +260,16 @@ export function renderResult({job, transcript, summary, verification, review = [
             h('div', {}, h('strong', {}, c.title), h('p', {}, c.summary)));
         })),
     );
-    nodes.push(analysisCard(summary.analysis, transcript, job.videoId, onAnalyze));
+    const analysis = summary.analysis;
+    nodes.push(fold(analysisCard(analysis, transcript, job.videoId, onAnalyze), analysis?.status === 'DONE'
+      ? `${analysis.items.length}개` : analysis?.status === 'RUNNING' ? '분석 중…' : '아직 만들지 않음'));
     if (verification?.counts.total) {
       const card = verificationCard(verification, transcript, job.videoId);
       card.append(crossCheckBlock(summary.crossCheck, Boolean(job.url), onCrossCheck));
-      nodes.push(card);
+      const {counts} = verification;
+      nodes.push(fold(card, `${counts.total}개 · 불일치 ${counts.mismatch} · 확인 불가 ${counts.unverifiable}`));
     }
-    if (review.length) nodes.push(reviewCard(review, job.videoId, handlers));
-    if (summary.warnings?.length) {
-      nodes.push(h('section', {class: 'card warn'}, h('h2', {}, '확인 필요'),
-        h('p', {}, `숫자의 원문 근거가 기록되지 않은 항목 ${summary.warnings.length}개가 있습니다.`)));
-    }
+    if (review.length) nodes.push(fold(reviewCard(review, job.videoId, handlers)));
     nodes.push(h('section', {class: 'card row'},
       h('a', {class: 'button secondary', href: `/api/v1/jobs/${job.id}/export`}, 'Markdown 내보내기'),
       h('a', {class: 'button secondary', href: `/api/v1/jobs/${job.id}/export?format=txt`}, 'TXT 내보내기'),

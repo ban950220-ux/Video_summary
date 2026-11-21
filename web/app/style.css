@@ -71,3 +71,5 @@ button:disabled { opacity: .55; cursor: default; }
 .verify-VERIFIED .badge { color: var(--ok); }
 textarea { width: 100%; margin: 6px 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font: inherit;
   background: var(--panel); color: var(--ink); }
+details.card > summary { cursor: pointer; font-size: 1.05rem; padding: 2px 0; }
+details.card[open] > summary { margin-bottom: 10px; }
