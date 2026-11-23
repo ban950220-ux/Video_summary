@@ -45,7 +45,7 @@ test('LOCAL SQLite file persists reports and encrypted keys across DB close/reop
  }finally{db.close();rmSync(dir,{recursive:true,force:true});}
 });
 test('Dashboard bundle fails closed before configuration, assets and API included',async()=>{
- for(const path of ['/','/app.js','/style.css','/api/health']){
+ for(const path of ['/','/app.js','/style.css','/app.webmanifest','/pwa-install.js','/icons/app-192.png','/icons/app-512.png','/api/health']){
   assert.equal((await dashboard.fetch(req(path),{})).status,503);
   assert.equal((await dashboard.fetch(req(path),{ACCESS_TEAM_DOMAIN:'https://test.cloudflareaccess.com',ACCESS_AUD:'test-application-audience',ACCESS_OWNER_EMAIL:'owner@example.invalid'})).status,401);
  }
@@ -61,10 +61,18 @@ test('Dashboard embedded assets require a cryptographically signed owner JWT; fo
  const originalFetch=globalThis.fetch;
  globalThis.fetch=async url=>{assert.equal(url,env.ACCESS_TEAM_DOMAIN+'/cdn-cgi/access/certs');return Response.json({keys:[{...publicKey.export({format:'jwk'}),kid:'bundle-key',alg:'RS256'}]});};
  try{
-  for(const path of ['/','/app.js','/style.css']){
+  for(const path of ['/','/app.js','/style.css','/app.webmanifest','/pwa-install.js']){
    const response=await dashboard.fetch(new Request('https://analyzer.invalid'+path,{headers:{'cf-access-jwt-assertion':jwt}}),env);
    assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'private, no-store');
    assert.ok((await response.text()).length>100);
+  }
+  for(const size of [192,512]){
+   const response=await dashboard.fetch(new Request(`https://analyzer.invalid/icons/app-${size}.png`,{headers:{'cf-access-jwt-assertion':jwt}}),env);
+   assert.equal(response.status,200);
+   assert.match(response.headers.get('content-type'),/^image\/png/);
+   const bytes=Buffer.from(await response.arrayBuffer());
+   assert.equal(bytes.readUInt32BE(16),size);
+   assert.equal(bytes.readUInt32BE(20),size);
   }
   const response=await dashboard.fetch(new Request('https://analyzer.invalid/api/jobs',{method:'POST',headers:{'cf-access-jwt-assertion':jwt,Origin:'https://foreign.invalid','content-type':'application/json'},body:'{}'}),env);
   assert.equal(response.status,403);

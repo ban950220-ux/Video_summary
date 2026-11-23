@@ -10,7 +10,7 @@ test('unchecking batch while audio-plan awaits cannot start ordinary Groq or Gem
  const planPending=new Promise(resolve=>{resolvePlan=resolve;});
  let signalPlan;
  const planStarted=new Promise(resolve=>{signalPlan=resolve;});
- const node=()=>({hidden:false,textContent:'',append(){},prepend(){},replaceChildren(){},setAttribute(){},classList:{add(){},remove(){},toggle(){}}});
+ const node=()=>({dataset:{},hidden:false,textContent:'',append(){},prepend(){},replaceChildren(){},setAttribute(){},classList:{add(){},remove(){},toggle(){}}});
  const elements=new Map();
  const field=(name,values)=>{const entry=Object.assign(node(),values);elements.set('#'+name,entry);return entry;};
  field('run-button',{});field('analysis-progress',{});field('live-analysis',{checked:true});field('video-title',{value:'Test'});field('duration-min',{value:'10'});

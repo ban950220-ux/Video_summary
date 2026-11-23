@@ -4,13 +4,14 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {webcrypto} from 'node:crypto';
 
-const videoId='2hUkTmwYm3A';
+// Invented video and analysis identifiers; no user records or provider calls.
+const videoId='synthetic01';
 const canonical=`https://www.youtube.com/watch?v=${videoId}`;
 const job={id:'11111111-1111-1111-1111-111111111111',video_id:videoId,source_url:canonical,source_type:'audio',duration_seconds:600,status:'NEED_AUDIO_UPLOAD',report:null};
 
 async function run({resume=false,wrongVideo=false,file=true,complete=false,alreadyComplete=false,lostCreate=false,deleted=false,confirmNew=true,storage=new Map()}={}){
-  const calls=[];let chunkRuns=0,summaryRuns=0;
-  const node=()=>({hidden:false,textContent:'',append(){},prepend(){},replaceChildren(){},setAttribute(){},classList:{add(){},remove(){},toggle(){}}});
+  const calls=[];let chunkRuns=0,summaryRuns=0,createdUrlJob;
+  const node=()=>({dataset:{},hidden:false,textContent:'',append(){},prepend(){},replaceChildren(){},setAttribute(){},classList:{add(){},remove(){},toggle(){}}});
   const elements=new Map();const field=(name,values)=>elements.set('#'+name,Object.assign(node(),values));
   field('run-button',{});field('analysis-progress',{});field('live-analysis',{checked:true});field('video-title',{value:'Owned recording'});field('duration-min',{value:'10'});
   field('audio-free-batch-run',{checked:false});field('audio-provider',{value:'groq'});field('audio-gemini-confirm',{checked:false});field('resume-job',{value:resume?job.id:''});
@@ -23,6 +24,9 @@ async function run({resume=false,wrongVideo=false,file=true,complete=false,alrea
     if(path==='/api/jobs'&&deleted)return {ok:false,headers:{get:()=> 'application/json'},json:async()=>({error:{code:'AUDIO_SUBMISSION_DELETED',message:'Deleted job'}})};
     let result;
     if(path==='/api/preflight')result={videoId};
+    else if(path==='/api/jobs'&&body.sourceType==='url'){createdUrlJob={...job,id:body.submissionId,source_type:'url',title:body.title,duration_seconds:body.durationSeconds,status:'NEED_UPLOAD',audit:{status:'CAPTION_RESULT_UNAVAILABLE',nativeAcquisition:'NO_STORED_RESULT',automaticAudioAcquisition:'NOT_CONNECTED'}};result={job:createdUrlJob,persisted:true,reused:false};}
+    else if(createdUrlJob&&path==='/api/jobs/'+createdUrlJob.id+'/source')result={source:null};
+    else if(createdUrlJob&&path==='/api/jobs/'+createdUrlJob.id+'/native')result={job:{...createdUrlJob,status:'NEED_UPLOAD',audit:{status:'NO_CAPTIONS',nativeAcquisition:'NO_CAPTIONS',automaticAudioAcquisition:'NOT_CONNECTED'}},persisted:true};
     else if(path==='/api/jobs')result={job:alreadyComplete?{...job,audit:{audioProcessingCoverage:1}}:job,persisted:true};
     else if(path==='/api/jobs/'+job.id)result={job:{...job,video_id:wrongVideo?'otherid0001':videoId}};
     else if(path==='/api/jobs/'+job.id+'/audio-plan')result={planned:true};
@@ -99,7 +103,8 @@ test('a completed replay reads the existing job and skips audio planning and pro
 
 test('URL without owned MP3 keeps native caption path and never creates an audio plan',async()=>{
   const result=await run({file:false});
-  assert.deepEqual(result.calls.map(x=>x.path),['/api/preflight','/api/jobs','/api/jobs/'+job.id+'/native']);
+  const id=result.calls.find(call=>call.path==='/api/jobs').body.submissionId;
+  assert.deepEqual(result.calls.map(x=>x.path),['/api/preflight','/api/jobs','/api/jobs/'+id+'/source','/api/jobs/'+id+'/native']);
   assert.equal(result.calls[1].body.sourceType,'url');
   assert.equal(result.chunkRuns,0);
 });

@@ -79,3 +79,14 @@ test('static asset cannot be served without owner JWT',async()=>{
   const ok=await call('/style.css');assert.equal(ok.status,200);
   assert.equal(ok.headers.get('x-frame-options'),'DENY');
 });
+test('install metadata and icon remain owner-only',async()=>{
+  for(const path of ['/app.webmanifest','/icons/app-192.png','/icons/app-512.png']){
+    assert.equal((await call(path,'')).status,401);
+    assert.equal((await call(path,jwt({email:'intruder@example.com'}))).status,401);
+    assert.equal((await call(path)).status,200);
+  }
+  const manifest=await call('/app.webmanifest');
+  assert.equal(manifest.headers.get('cache-control'),'private, no-store');
+  assert.match(manifest.headers.get('content-type'),/^application\/manifest\+json/);
+  assert.match(manifest.headers.get('content-security-policy'),/manifest-src 'self'/);
+});
