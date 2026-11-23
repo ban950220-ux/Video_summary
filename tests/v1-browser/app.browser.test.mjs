@@ -64,7 +64,8 @@ function mockApi(req, res, url, body) {
     const done = job.status === 'DONE';
     const verification = done ? {counts: {total: 2, verified: 1, mismatch: 1, unverifiable: 0}, items: [
       {surface: '약 20%', status: 'VERIFIED', codes: [], segmentIds: [2]},
-      {surface: '1003개사', status: 'MISMATCH', codes: ['VALUE_CHANGED'], source: '103개사', segmentIds: [5]}]} : null;
+      {surface: '1003개사', status: 'MISMATCH', codes: ['VALUE_CHANGED'], source: '103개사', segmentIds: [5],
+        path: 'keyPoints[0]'}]} : null;
     const review = done ? [{segmentId: 5, startMs: 240_000, text: '원문 문장 5', corrected: null,
       reasons: ['숫자 불일치: 1003개사']}] : [];
     return send(res, 200, {job, verification, review, transcript: done ? {source: 'supadata-native', segments,
@@ -135,7 +136,8 @@ for (const [name, viewport] of [['desktop', {width: 1280, height: 900}], ['phone
     await p.waitForSelector('.steps li.now');
     await p.waitForSelector('#chapters', {timeout: 15_000});
     assert.equal(await p.textContent('#conclusion p:nth-of-type(2)'), '핵심 결론 문장');
-    assert.deepEqual(await p.$$eval('#points .badge', els => els.map(e => e.textContent)), ['화자', 'AI 해석']);
+    assert.deepEqual(await p.$$eval('#points .badge', els => els.map(e => e.textContent)),
+      ['화자', '숫자 확인 필요', 'AI 해석']);
     const times = await p.$$eval('#chapters a.time', els => els.map(e => [e.textContent, e.href]));
     assert.deepEqual(times, [['00:00', `https://www.youtube.com/watch?v=${VIDEO}&t=0s`],
       ['02:00', `https://www.youtube.com/watch?v=${VIDEO}&t=120s`]]);
@@ -146,6 +148,14 @@ for (const [name, viewport] of [['desktop', {width: 1280, height: 900}], ['phone
     assert.match(await p.textContent('main'), /YouTube 기존 자막/);
     assert.deepEqual(await p.$$eval('#glance .badge', els => els.map(e => e.textContent)), ['숫자 ⚠ 1/2', '검토할 곳 1']);
     assert.equal(await p.$eval('#verification', el => el.open), false);
+    // The key point whose number failed the check is marked; the mark opens the check card without leaving.
+    assert.equal(await p.$$eval('#points .numflag', els => els.length), 1);
+    assert.equal(await p.$$eval('#chapters .numflag', els => els.length), 0);
+    const before = p.url();
+    await p.click('#points .numflag');
+    assert.equal(p.url(), before);
+    assert.equal(await p.$eval('#verification', el => el.open), true);
+    await p.$eval('#verification', el => { el.open = false; });
     await p.click('#glance [data-open="verification"]');
     assert.equal(await p.$eval('#verification', el => el.open), true);
     await p.click('#analysis > summary');

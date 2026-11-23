@@ -73,3 +73,16 @@ test('missing evidence is never shown as verified', () => {
   assert.deepEqual(result.counts, {total: 2, verified: 1, mismatch: 0, unverifiable: 1});
   assert.equal(result.judgedRatio, 0.5);
 });
+
+test('markdown export marks the items whose numbers failed the check', async () => {
+  const {exportMarkdown} = await import('../../src/v1/export.mjs');
+  const item = text => ({text, attribution: 'SPEAKER', segmentIds: [1], facts: []});
+  const out = exportMarkdown({job: {title: '제목', url: 'u'}, transcript: {source: 'upload', segments: []},
+    summary: {conclusion: item('결론'), keyPoints: [item('첫째'), item('둘째 90%')],
+      chapters: [{title: '장', summary: '설명', startMs: 0, facts: []}]},
+    verification: {counts: {total: 1, verified: 0, mismatch: 0, unverifiable: 1},
+      items: [{path: 'keyPoints[1]', surface: '90%', status: 'UNVERIFIABLE', codes: ['NO_EVIDENCE']}]}});
+  assert.match(out, /둘째 90% \(근거 #1\) ⚠ 숫자 확인 필요/);
+  assert.doesNotMatch(out, /첫째 \(근거 #1\) ⚠/);
+  assert.doesNotMatch(out, /설명 ⚠/);
+});

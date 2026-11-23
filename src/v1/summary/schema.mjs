@@ -122,7 +122,7 @@ function chapters(value, path, allowed, {min, max}) {
     return {
       startSegmentId,
       title: text(chapter.title, `${p}.title`, 120),
-      summary: text(chapter.summary, `${p}.summary`, 800),
+      summary: text(chapter.summary, `${p}.summary`, 1500),
       facts: facts(chapter.facts, `${p}.facts`, allowed),
     };
   });

@@ -9,14 +9,20 @@ import {FINAL_SCHEMA, MAP_SCHEMA, numberWarnings, validateFinal, validateMapOutp
 
 export const SUMMARY_VERSION = 'v1-summary-1';
 
-export async function callModels({label, models, prompt, schema, validate, usage, sleep, log}) {
+const LONG_OUTPUT_TOKENS = 24_576; // final step with detailed chapters; worst case stays under the budget reserve
+export const MAX_CHAPTERS = 40;
+
+// prompt may be a function of the model, so a model with a small output limit gets the short form.
+export async function callModels({label, models, prompt, schema, validate, usage, sleep, log, longOutput = false}) {
   let lastError = null;
   for (const model of models) {
     const tries = [];
     try {
       const result = await withRetry(`${label}@${model.provider}`, async () => {
         await usage?.consume({[model.usageKey]: 1});
-        const {data, usage: tokens} = await model.generateJson({system: SYSTEM_RULES, prompt, schema});
+        const {data, usage: tokens} = await model.generateJson({system: SYSTEM_RULES, schema,
+          prompt: typeof prompt === 'function' ? prompt(model) : prompt,
+          ...(longOutput && !model.brief ? {maxOutputTokens: LONG_OUTPUT_TOKENS} : {})});
         if (model.provider === 'gemini') await usage?.charge?.(tokens ?? {});
         return {value: validate(data), tokens};
       }, {sleep, attempts: tries});
@@ -65,8 +71,9 @@ function finalValidator(transcript) {
 // One step each: summarizeSingle, summarizeChunk (map), combinePartials (reduce).
 export function summarizeSingle({transcript, title = null, models, usage, sleep, log = []}) {
   requireModels(models);
-  return callModels({models, usage, sleep, log, label: 'single', schema: FINAL_SCHEMA,
-    validate: finalValidator(transcript), prompt: singlePrompt({title, segments: transcript.segments})});
+  return callModels({models, usage, sleep, log, label: 'single', schema: FINAL_SCHEMA, longOutput: true,
+    validate: finalValidator(transcript),
+    prompt: model => singlePrompt({title, segments: transcript.segments, brief: Boolean(model.brief)})});
 }
 
 export async function summarizeChunk({transcript, chunk, total, title = null, models, usage, sleep, log = []}) {
@@ -75,16 +82,32 @@ export async function summarizeChunk({transcript, chunk, total, title = null, mo
   const full = {...chunk, segments, startMs: segments[0].startMs,
     endMs: segments.at(-1).endMs ?? segments.at(-1).startMs};
   const output = await callModels({models, usage, sleep, log, label: `map#${chunk.index + 1}`, schema: MAP_SCHEMA,
-    validate: data => validateMapOutput(data, chunk), prompt: mapPrompt({title, chunk: full, total})});
+    validate: data => validateMapOutput(data, chunk),
+    prompt: model => mapPrompt({title, chunk: full, total, brief: Boolean(model.brief)})});
   return {fromId: chunk.fromId, toId: chunk.toId, output};
 }
 
-export function combinePartials({transcript, partials, title = null, models, usage, sleep, log = []}) {
+// The reduce step sometimes drops whole parts of the video (seen: nothing after 1:12 of a 1:38 talk).
+// Any part without a final chapter gets its own map chapters back, so coverage never depends on the model.
+export function coverChapters(final, partials) {
+  const chapters = [...final.chapters];
+  for (const part of partials) {
+    if (chapters.some(c => c.startSegmentId >= part.fromId && c.startSegmentId <= part.toId)) continue;
+    chapters.push(...part.output.chapters);
+  }
+  chapters.sort((a, b) => a.startSegmentId - b.startSegmentId);
+  const unique = chapters.filter((c, i) => !i || c.startSegmentId !== chapters[i - 1].startSegmentId);
+  return {...final, chapters: unique.slice(0, MAX_CHAPTERS)};
+}
+
+export async function combinePartials({transcript, partials, title = null, models, usage, sleep, log = []}) {
   requireModels(models);
   const ids = transcript.segments.map(s => s.id);
-  const prompt = reducePrompt({title, partials, firstId: ids[0], lastId: ids.at(-1)});
-  return callModels({models, usage, sleep, log, label: 'reduce', schema: FINAL_SCHEMA,
-    validate: finalValidator(transcript), prompt});
+  const final = await callModels({models, usage, sleep, log, label: 'reduce', schema: FINAL_SCHEMA, longOutput: true,
+    validate: finalValidator(transcript),
+    prompt: model => reducePrompt({title, partials, firstId: ids[0], lastId: ids.at(-1),
+      brief: Boolean(model.brief)})});
+  return coverChapters(final, partials);
 }
 
 export function finalizeSummary({final, transcript, plan, calls}) {

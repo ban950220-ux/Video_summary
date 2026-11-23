@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {AppError} from '../../src/v1/errors.mjs';
 import {chunkTranscript} from '../../src/v1/summary/chunks.mjs';
-import {summarizeTranscript} from '../../src/v1/summary/engine.mjs';
+import {coverChapters, summarizeTranscript} from '../../src/v1/summary/engine.mjs';
+import {mapPrompt, reducePrompt} from '../../src/v1/summary/prompts.mjs';
 import {FINAL_SCHEMA, MAP_SCHEMA} from '../../src/v1/summary/schema.mjs';
 import {makeTranscript, SOURCES} from '../../src/v1/transcript.mjs';
 import {createMemoryUsage} from '../../src/v1/usage.mjs';
@@ -139,4 +140,39 @@ test('chunking respects segment boundaries, time windows and character budget', 
   const untimed = makeTranscript({source: SOURCES.UPLOAD, segments: Array.from({length: 10}, () => ({
     text: '가'.repeat(1000)}))});
   assert.equal(chunkTranscript(untimed, {chunkChars: 3100}).length, 4);
+});
+
+test('parts the final step dropped get their own chapters back, in order and without duplicates', () => {
+  const ch = id => ({startSegmentId: id, title: `t${id}`, summary: 's', facts: []});
+  const partials = [
+    {fromId: 1, toId: 100, output: {chapters: [ch(1), ch(50)]}},
+    {fromId: 101, toId: 200, output: {chapters: [ch(101)]}},
+    {fromId: 201, toId: 300, output: {chapters: [ch(201), ch(260)]}},
+  ];
+  const covered = coverChapters({chapters: [ch(1), ch(101)]}, partials);
+  assert.deepEqual(covered.chapters.map(c => c.startSegmentId), [1, 101, 201, 260]);
+  const complete = coverChapters({chapters: [ch(1), ch(150), ch(201)]}, partials);
+  assert.deepEqual(complete.chapters.map(c => c.startSegmentId), [1, 150, 201]);
+});
+
+test('chapter depth: detailed for the main model, short for a model with a small output limit', async () => {
+  const chunk = {index: 0, fromId: 1, toId: 2, startMs: 0, endMs: 2000, segments: shortTranscript().segments};
+  assert.match(mapPrompt({chunk, total: 1}), /3~5문장/);
+  assert.match(mapPrompt({chunk, total: 1, brief: true}), /한두 문장/);
+  assert.doesNotMatch(mapPrompt({chunk, total: 1, brief: true}), /3~5문장/);
+  const reduce = reducePrompt({partials: [], firstId: 1, lastId: 2});
+  assert.match(reduce, /3~30개/);
+  assert.match(reduce, /마지막 부분까지/);
+  // The engine picks the form per model and asks the main model for a longer output.
+  const seen = [];
+  const model = brief => ({provider: brief ? 'groq' : 'gemini', model: 'fake', usageKey: 'geminiCalls', brief,
+    async generateJson(args) { seen.push({brief, ...args}); throw new AppError('PROVIDER_FAILED', 'x'); }});
+  await assert.rejects(summarizeTranscript({transcript: shortTranscript(), models: [model(false), model(true)],
+    usage: createMemoryUsage(limits), sleep: noSleep}));
+  const main = seen.find(s => !s.brief);
+  const small = seen.find(s => s.brief);
+  assert.match(main.prompt, /3~5문장/);
+  assert.equal(main.maxOutputTokens, 24_576);
+  assert.match(small.prompt, /한두 문장/);
+  assert.equal(small.maxOutputTokens, undefined);
 });

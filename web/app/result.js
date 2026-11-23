@@ -56,11 +56,26 @@ function evidence(ids, transcript, videoId) {
   return [chips, box];
 }
 
-function point(p, transcript, videoId) {
+// A chip that opens (and scrolls to) the folded card named in data-open.
+function opener(chip) {
+  chip.addEventListener('click', event => {
+    event.preventDefault();
+    const target = document.getElementById(chip.dataset.open);
+    if (!target) return;
+    target.open = true;
+    target.scrollIntoView({behavior: 'smooth'});
+  });
+  return chip;
+}
+
+const numberFlag = on => (on ? opener(h('a', {class: 'badge ai numflag', href: '#', 'data-open': 'verification'},
+  '숫자 확인 필요')) : null);
+
+function point(p, transcript, videoId, flagged = false) {
   const speaker = p.attribution === 'SPEAKER';
   return h('li', {},
     h('span', {class: `badge ${speaker ? 'speaker' : 'ai'}`}, speaker ? '화자' : 'AI 해석'),
-    p.synthesized ? h('span', {class: 'badge ai'}, '여러 구간 종합') : null, ' ', p.text,
+    p.synthesized ? h('span', {class: 'badge ai'}, '여러 구간 종합') : null, numberFlag(flagged), ' ', p.text,
     evidence(p.segmentIds, transcript, videoId));
 }
 
@@ -205,16 +220,7 @@ function glance(transcript, verification, crossCheck, review) {
   }
   const flagged = (transcript?.segments ?? []).filter(s => s.flags?.some(f => f !== 'CORRECTED')).length;
   if (flagged) chips.push(h('span', {class: 'badge ai'}, `전사 불확실 ${flagged}`));
-  for (const chip of chips) {
-    if (!chip.dataset.open) continue;
-    chip.addEventListener('click', event => {
-      event.preventDefault();
-      const target = document.getElementById(chip.dataset.open);
-      if (!target) return;
-      target.open = true;
-      target.scrollIntoView({behavior: 'smooth'});
-    });
-  }
+  chips.filter(chip => chip.dataset.open).forEach(opener);
   return chips.length ? h('p', {class: 'row', id: 'glance'}, chips) : null;
 }
 
@@ -244,20 +250,23 @@ export function renderResult({job, transcript, summary, verification, review = [
   }
 
   if (summary) {
+    const flagged = new Set((verification?.items ?? []).filter(i => i.status !== 'VERIFIED').map(i => i.path));
     nodes.push(
       h('section', {class: 'card', id: 'conclusion'}, h('h2', {}, '핵심 결론'),
         h('p', {class: 'muted'}, '자동 생성 · 사람 검토 전'), h('p', {}, summary.conclusion.text),
         evidence(summary.conclusion.segmentIds, transcript, job.videoId),
         glance(transcript, verification, summary.crossCheck, review)),
       h('section', {class: 'card', id: 'points'}, h('h2', {}, '핵심 요약'),
-        h('ul', {class: 'points'}, summary.keyPoints.map(p => point(p, transcript, job.videoId)))),
+        h('ul', {class: 'points'}, summary.keyPoints.map((p, i) =>
+          point(p, transcript, job.videoId, flagged.has(`keyPoints[${i}]`))))),
       h('section', {class: 'card', id: 'chapters'}, h('h2', {}, '챕터'),
-        summary.chapters.map(c => {
+        summary.chapters.map((c, i) => {
           const href = watchUrl(job.videoId, c.startMs);
           return h('div', {class: 'chapter'},
             href ? h('a', {class: 'time', href, target: '_blank', rel: 'noopener'}, clock(c.startMs))
               : h('span', {class: 'time'}, clock(c.startMs)),
-            h('div', {}, h('strong', {}, c.title), h('p', {}, c.summary)));
+            h('div', {}, h('strong', {}, c.title), ' ', numberFlag(flagged.has(`chapters[${i}]`)),
+              h('p', {}, c.summary)));
         })),
     );
     const analysis = summary.analysis;

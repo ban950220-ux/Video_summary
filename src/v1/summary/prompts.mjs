@@ -31,14 +31,18 @@ export function segmentLines(segments) {
   return segments.map(s => `[#${s.id} ${formatClock(s.startMs)}] ${s.text}`).join('\n');
 }
 
-export function mapPrompt({title, chunk, total}) {
+// Chapter depth. Models with a small output limit (brief) keep the short form.
+const depth = brief => (brief ? 'summary는 한두 문장 요약.'
+  : 'summary는 3~5문장: 누가 무엇을 주장했는지, 붙은 조건·예외, 화자 본인의 전망과 남의 말을 인용한 것의 구분을 담는다.');
+
+export function mapPrompt({title, chunk, total, brief = false}) {
   return [
     header({title, chunk, total}),
     '',
     '아래 전사 부분을 요약하라.',
     '- points: 이 부분의 중요한 내용 3~10개 (한 항목 한두 문장).',
     '- chapters: 이 부분 안에서 주제가 바뀌는 지점 1~4개. startSegmentId는 그 주제가 시작되는 구간 번호,',
-    '  title은 짧은 제목, summary는 한두 문장 요약.',
+    `  title은 짧은 제목, ${depth(brief)}`,
     `- segmentIds와 startSegmentId는 #${chunk.fromId}~#${chunk.toId} 범위만 쓴다.`,
     '',
     '전사문:',
@@ -46,7 +50,7 @@ export function mapPrompt({title, chunk, total}) {
   ].join('\n');
 }
 
-export function reducePrompt({title, partials, firstId, lastId}) {
+export function reducePrompt({title, partials, firstId, lastId, brief = false}) {
   const body = partials.map((p, i) => `## 부분 ${i + 1} (#${p.fromId}~#${p.toId})\n${JSON.stringify(p.output)}`);
   return [
     header({title}),
@@ -54,14 +58,16 @@ export function reducePrompt({title, partials, firstId, lastId}) {
     '아래는 한 영상을 순서대로 나눠 요약한 결과다. 이를 바탕으로 영상 전체 결과를 만들어라.',
     '- conclusion: 영상의 핵심 결론 1~3문장.',
     '- keyPoints: 영상 전체에서 가장 중요한 내용 5~10개. 각 항목의 segmentIds·facts는 부분 요약의 것을 그대로 쓴다.',
-    '- chapters: 시간순 챕터 3~20개. startSegmentId는 부분 요약의 chapters에서 고르고 오름차순으로 쓴다.',
+    '- chapters: 시간순 챕터 3~30개. startSegmentId는 부분 요약의 chapters에서 고르고 오름차순으로 쓴다.',
+    '  모든 부분에서 챕터를 하나 이상 고르고, 영상의 마지막 부분까지 챕터를 둔다. 뒷부분을 한 챕터로 뭉치지 않는다.',
+    `  ${brief ? depth(true) : `${depth(false)} 부분 요약의 내용을 줄이지 않는다.`}`,
     `- 모든 구간 번호는 #${firstId}~#${lastId} 안에서 부분 요약에 나온 것만 쓴다. 새 숫자를 만들지 않는다.`,
     '',
     ...body,
   ].join('\n');
 }
 
-export function singlePrompt({title, segments}) {
+export function singlePrompt({title, segments, brief = false}) {
   return [
     header({title}),
     '',
@@ -69,6 +75,7 @@ export function singlePrompt({title, segments}) {
     '- conclusion: 영상의 핵심 결론 1~3문장.',
     '- keyPoints: 가장 중요한 내용 3~10개.',
     '- chapters: 시간순 챕터 1~12개. startSegmentId는 주제가 시작되는 구간 번호, 오름차순.',
+    `  ${depth(brief)}`,
     '',
     '전사문:',
     segmentLines(segments),

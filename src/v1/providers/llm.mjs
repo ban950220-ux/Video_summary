@@ -60,6 +60,7 @@ export function groqTextModel({apiKey, model = DEFAULT_GROQ_MODEL, fetchFn = fet
     provider: 'groq',
     model,
     usageKey: 'groqCalls',
+    brief: true, // small output limit: ask for the short chapter form
     // Groq free tier counts input + max output against 8,000 tokens per minute (seen 2026-11-21).
     async generateJson({system, prompt, schema, maxOutputTokens = 2048}) {
       if (!apiKey) throw new AppError('PROVIDER_KEY_MISSING', 'groq');

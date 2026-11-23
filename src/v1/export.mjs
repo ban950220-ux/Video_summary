@@ -26,6 +26,8 @@ export const verificationCodeText = code => CODE_TEXT[code] ?? code;
 export function exportMarkdown({job, transcript, summary, verification = null}) {
   const link = sec => (job.videoId && Number.isFinite(sec) ? ` ([${formatClock(sec)}](${watchUrlAt(job.videoId,
     sec / 1000)}))` : '');
+  const flagged = new Set((verification?.items ?? []).filter(i => i.status !== 'VERIFIED').map(i => i.path));
+  const flag = path => (flagged.has(path) ? ' ⚠ 숫자 확인 필요' : '');
   const lines = [
     `# ${job.title ?? job.videoId ?? '영상 요약'}`,
     '',
@@ -36,16 +38,17 @@ export function exportMarkdown({job, transcript, summary, verification = null}) 
     '',
     '## 핵심 결론',
     '',
-    summary.conclusion.text,
+    summary.conclusion.text + flag('conclusion'),
     '',
     '## 핵심 요약',
     '',
-    ...summary.keyPoints.map(p => `- [${ATTRIBUTION_LABELS[p.attribution]}] ${p.text}`
-      + ` (근거 #${p.segmentIds.join(', #')})`),
+    ...summary.keyPoints.map((p, i) => `- [${ATTRIBUTION_LABELS[p.attribution]}] ${p.text}`
+      + ` (근거 #${p.segmentIds.join(', #')})${flag(`keyPoints[${i}]`)}`),
     '',
     '## 챕터',
     '',
-    ...summary.chapters.map(c => `### ${formatClock(c.startMs)} ${c.title}${link(c.startMs)}\n\n${c.summary}\n`),
+    ...summary.chapters.map((c, i) => `### ${formatClock(c.startMs)} ${c.title}${link(c.startMs)}\n\n${c.summary}`
+      + `${flag(`chapters[${i}]`)}\n`),
   ];
   if (verification) {
     const {counts} = verification;
