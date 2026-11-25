@@ -102,3 +102,31 @@ test('deploy output is not streamed to the public log', () => {
   assert.doesNotMatch(workflow, /wrangler deploy -c wrangler\.v1\.toml \| tee/);
   assert.match(workflow, /wrangler deploy -c wrangler\.v1\.toml > deploy\.log 2>&1/);
 });
+
+test('CPU measurement prints aggregates only and never the account ID or raw response', async () => {
+  const {measure, report, safeError} = await import('../../scripts/v1-measure-cpu.mjs');
+  const account = 'acc0123456789abcdef0123456789abcd';
+  const row = (status, max, requests = 3) => ({dimensions: {datetimeFifteenMinutes: '2026-11-25T01:15:00Z', status},
+    sum: {requests, errors: 0, subrequests: 7}, quantiles: {cpuTimeP50: 3000, cpuTimeP75: 9300, cpuTimeP99: 98_100},
+    max: {cpuTime: max}});
+  let sent;
+  const fetchFn = async (url, init) => {
+    sent = {url, init};
+    return new Response(JSON.stringify({data: {viewer: {accounts: [{workersInvocationsAdaptive: [
+      row('success', 130_900), row('exceededResources', 2_050_000, 4)]}]}}}));
+  };
+  const result = await measure({token: 'tok-secret', account, hours: 2, fetchFn, now: Date.UTC(2026, 10, 25, 2)});
+  assert.equal(JSON.parse(sent.init.body).variables.since, '2026-11-25T00:00:00.000Z');
+  assert.equal(result.exceededResources, 4);
+  assert.equal(result.maxCpuMs, 2050);
+  const text = report(result, 2);
+  assert.match(text, /11-25 01:15 \| success \| 3 \| 7 \| 3 \| 9\.3 \| 98\.1 \| 130\.9 {2}<-- over/);
+  assert.doesNotMatch(text, new RegExp(`${account}|tok-secret`));
+  assert.equal(safeError(`account ${account} not allowed`, account), 'account <account> not allowed');
+  const denied = async () => new Response(JSON.stringify({errors: [{message: `not authorized for ${account}`}]}));
+  await assert.rejects(measure({token: 't', account, fetchFn: denied}), error => !error.message.includes(account)
+    && /not authorized/.test(error.message));
+  const workflow = read('.github/workflows/measure-cpu.yml');
+  assert.match(workflow, /^on:\n {2}workflow_dispatch:/m);
+  assert.doesNotMatch(workflow, /wrangler|whoami|echo .*CLOUDFLARE_ACCOUNT_ID/);
+});
