@@ -4,15 +4,23 @@ import {configuredMasterKey, decryptProviderKey} from '../vault.mjs';
 
 const PROVIDERS = Object.freeze({supadata: 'SUPADATA_API_KEY', gemini: 'GEMINI_API_KEY', groq: 'GROQ_API_KEY'});
 
-async function vaultKey(env, provider) {
-  const root = configuredMasterKey(env);
-  if (!root || !env?.DB) return null;
+// All vault rows in one query (each D1 call costs Worker CPU under the Free plan's 10ms limit).
+async function vaultRows(env) {
+  if (!configuredMasterKey(env) || !env?.DB) return new Map();
   try {
-    const row = await env.DB.prepare(`SELECT cipher_version, iv_b64, ciphertext_b64 FROM provider_credentials
-      WHERE owner_id = 'owner' AND provider = ?`).bind(provider).first();
-    if (!row) return null;
-    return await decryptProviderKey(root, provider, {version: row.cipher_version, ivB64: row.iv_b64,
-      ciphertextB64: row.ciphertext_b64});
+    const {results = []} = await env.DB.prepare(`SELECT provider, cipher_version, iv_b64, ciphertext_b64
+      FROM provider_credentials WHERE owner_id = 'owner'`).all();
+    return new Map(results.map(row => [row.provider, row]));
+  } catch {
+    return new Map();
+  }
+}
+
+async function vaultKey(env, provider, row) {
+  if (!row) return null;
+  try {
+    return await decryptProviderKey(configuredMasterKey(env), provider, {version: row.cipher_version,
+      ivB64: row.iv_b64, ciphertextB64: row.ciphertext_b64});
   } catch {
     return null;
   }
@@ -20,8 +28,9 @@ async function vaultKey(env, provider) {
 
 export async function loadProviderKeys(env) {
   const keys = {};
+  const rows = await vaultRows(env);
   for (const [provider, secretName] of Object.entries(PROVIDERS)) {
-    const fromVault = await vaultKey(env, provider);
+    const fromVault = await vaultKey(env, provider, rows.get(provider));
     const secret = typeof env?.[secretName] === 'string' && env[secretName].length >= 8 ? env[secretName] : null;
     keys[provider] = fromVault ?? secret;
   }

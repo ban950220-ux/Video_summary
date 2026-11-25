@@ -53,8 +53,30 @@ export function jobContext({env, step = inlineStep, deps = {}}) {
   const config = readConfig(env);
   const jobs = jobRepository(env.DB, deps);
   const usage = createD1Usage(env.DB, config.dailyLimits, {...deps, budget: config.budget});
+  // Reused by every step of one run: keys, transcript and title do not change while a job runs, and each
+  // D1 call and decryption costs CPU against the Free plan's 10ms per step. A failure is not cached.
+  const once = fn => {
+    let pending = null;
+    return () => (pending ??= fn().catch(error => {
+      pending = null;
+      throw error;
+    }));
+  };
+  const keysOnce = once(() => loadProviderKeys(env));
+  let transcript = null;
+  let title;
+  const current = {
+    async transcript(jobId) {
+      transcript ??= await jobs.loadTranscript(jobId);
+      return transcript;
+    },
+    async title(jobId) {
+      if (title === undefined) title = (await jobs.get(jobId))?.title ?? null;
+      return title;
+    },
+  };
   const modelsFor = async () => {
-    const keys = await loadProviderKeys(env);
+    const keys = await keysOnce();
     const geminiModel = env.V1_GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
     return {
       keys,
@@ -83,11 +105,11 @@ export function jobContext({env, step = inlineStep, deps = {}}) {
     }
   };
 
-  return {fetchFn, sleep, config, jobs, usage, modelsFor, durable};
+  return {fetchFn, sleep, config, jobs, usage, modelsFor, durable, current};
 }
 
 export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) {
-  const {fetchFn, sleep, config, jobs, usage, modelsFor, durable} = jobContext({env, step, deps});
+  const {fetchFn, sleep, config, jobs, usage, modelsFor, durable, current} = jobContext({env, step, deps});
 
   try {
     const acquired = await durable('acquire', async () => {
@@ -113,14 +135,14 @@ export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) 
 
     const plan = await durable('plan', async () => {
       await jobs.update(jobId, {status: STATUS.SUMMARIZING});
-      return summaryPlan(await jobs.loadTranscript(jobId));
+      return summaryPlan(await current.transcript(jobId));
     });
 
     const run = async (name, fn) => durable(name, async () => {
-      const [transcript, job, {models}] = await Promise.all([jobs.loadTranscript(jobId), jobs.get(jobId),
+      const [transcript, title, {models}] = await Promise.all([current.transcript(jobId), current.title(jobId),
         modelsFor()]);
       const log = [];
-      const value = await fn({transcript, title: job.title, models, usage, sleep, log});
+      const value = await fn({transcript, title, models, usage, sleep, log});
       return {value, log};
     });
 

@@ -122,3 +122,28 @@ test('a result read with stored checks is one D1 query (each query costs Worker 
   await get(`/api/v1/jobs/${job.id}`);
   assert.equal(queries.length, 1);
 });
+
+test('a run loads keys, transcript and title once; a usage reservation is one statement', async () => {
+  const {jobContext} = await import('../../src/v1/pipeline.mjs');
+  const {createD1Usage} = await import('../../src/v1/db/usage.mjs');
+  const {job, db} = await seed();
+  const queries = [];
+  const counting = {prepare: sql => { queries.push(sql.replace(/\s+/g, ' ').trim()); return db.prepare(sql); }};
+  const ctx = jobContext({env: {DB: counting, GEMINI_API_KEY: 'gm-key-123'}});
+  for (let i = 0; i < 3; i++) {
+    await ctx.modelsFor();
+    await ctx.current.transcript(job.id);
+    await ctx.current.title(job.id);
+  }
+  assert.equal(queries.filter(q => q.includes('FROM v1_transcripts')).length, 1);
+  assert.equal(queries.filter(q => q.startsWith('SELECT * FROM v1_jobs')).length, 1);
+  assert.ok(queries.filter(q => q.includes('provider_credentials')).length <= 1);
+  queries.length = 0;
+  const usage = createD1Usage(counting, {groqCalls: 2});
+  await usage.consume({groqCalls: 1});
+  await usage.consume({groqCalls: 1});
+  await assert.rejects(usage.consume({groqCalls: 1}), error => error.code === 'DAILY_LIMIT_REACHED');
+  assert.equal(queries.filter(q => q.startsWith('INSERT INTO v1_usage')).length, 3);
+  assert.equal(queries.filter(q => q.startsWith('UPDATE v1_usage')).length, 0);
+  assert.equal((await usage.snapshot()).items.find(i => i.key === 'groqCalls').used, 2);
+});

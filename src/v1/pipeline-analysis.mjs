@@ -7,7 +7,7 @@ import {refreshChecks} from './detail.mjs';
 import {inlineStep, jobContext} from './pipeline.mjs';
 
 export async function runAnalysisJob({jobId, env, step = inlineStep, deps = {}}) {
-  const {sleep, jobs, usage, modelsFor, durable} = jobContext({env, step, deps});
+  const {sleep, jobs, usage, modelsFor, durable, current} = jobContext({env, step, deps});
   try {
     const plan = await durable('analysis-plan', async () => {
       const [transcript, summary] = await Promise.all([jobs.loadTranscript(jobId), jobs.loadSummary(jobId)]);
@@ -15,10 +15,10 @@ export async function runAnalysisJob({jobId, env, step = inlineStep, deps = {}})
       return analysisPlan(transcript);
     });
     const run = (name, fn) => durable(name, async () => {
-      const [transcript, job, {models}] = await Promise.all([jobs.loadTranscript(jobId), jobs.get(jobId),
+      const [transcript, title, {models}] = await Promise.all([current.transcript(jobId), current.title(jobId),
         modelsFor()]);
       const log = [];
-      const value = await fn({transcript, title: job.title, models, usage, sleep, log});
+      const value = await fn({transcript, title, models, usage, sleep, log});
       return {value, log};
     });
     const calls = [];

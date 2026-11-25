@@ -23,12 +23,12 @@ export function createD1Usage(db, limits, {now = () => new Date(), budget = null
     const [offsetMonth, offsetKrw] = (budget?.offset ?? ':0').split(':');
     return Number(row?.units ?? 0) + (offsetMonth === month() ? Number(offsetKrw) * 1000 : 0);
   };
+  // One statement: insert or add, only while the total stays within the limit (changes = 0 otherwise).
   const reserve = async (day, key, amount) => {
-    await db.prepare('INSERT INTO v1_usage(day, key, units) VALUES(?, ?, 0) ON CONFLICT(day, key) DO NOTHING')
-      .bind(day, key).run();
-    const result = await db.prepare(
-      'UPDATE v1_usage SET units = units + ? WHERE day = ? AND key = ? AND units + ? <= ?')
-      .bind(amount, day, key, amount, limits[key]).run();
+    if (amount > limits[key]) return false;
+    const result = await db.prepare(`INSERT INTO v1_usage(day, key, units) VALUES(?, ?, ?)
+      ON CONFLICT(day, key) DO UPDATE SET units = units + excluded.units WHERE units + excluded.units <= ?`)
+      .bind(day, key, amount, limits[key]).run();
     return Number(result?.meta?.changes ?? 0) === 1;
   };
   const release = (day, key, amount) => db.prepare('UPDATE v1_usage SET units = units - ? WHERE day = ? AND key = ?')
