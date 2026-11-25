@@ -2,21 +2,21 @@
 // before any /api/ route, so every handler here already runs as the owner.
 import {acquireFromUpload} from './acquire.mjs';
 import {readConfig} from './config.mjs';
-import {applyCorrections, reviewList} from './corrections.mjs';
+import {applyCorrections} from './corrections.mjs';
+import {exportDetail, jobDetailText} from './detail.mjs';
 import {jobRepository, STATUS} from './db/jobs.mjs';
 import {createD1Usage} from './db/usage.mjs';
 import {AppError} from './errors.mjs';
 import {exportMarkdown, exportText} from './export.mjs';
 import {exportJson} from './export-json.mjs';
-import {assertSameOrigin, errorResponse, json, readJson} from './http.mjs';
-import {keyStatus, loadProviderKeys} from './keys.mjs';
+import {assertSameOrigin, errorResponse, json, jsonText, readJson} from './http.mjs';
+import {registeredKeys} from './keys.mjs';
 import {listLegacySources, loadLegacyTranscript} from './legacy-transcripts.mjs';
 import {inlineStep, runSummaryJob} from './pipeline.mjs';
 import {runAnalysisJob} from './pipeline-analysis.mjs';
 import {runCrossCheckJob} from './pipeline-crosscheck.mjs';
 import {makeTranscript, SOURCES} from './transcript.mjs';
 import {uncertaintyReport} from './uncertainty.mjs';
-import {verifySummary} from './verify/facts.mjs';
 import {parseYouTubeUrl} from './youtube.mjs';
 
 export const API_PREFIX = '/api/v1/';
@@ -38,17 +38,6 @@ async function startJob(jobId, env, ctx, deps, task = 'summary') {
   }
   await run;
   return 'inline';
-}
-
-async function jobDetail(jobs, id) {
-  const job = await jobs.get(id);
-  if (!job) throw new AppError('NOT_FOUND');
-  const [transcript, summary] = await Promise.all([jobs.loadTranscript(id), jobs.loadSummary(id)]);
-  // Computed on read (no model calls), so summaries saved before stage 8 are checked too.
-  const verification = summary && transcript ? verifySummary(summary, transcript) : null;
-  const corrections = await jobs.loadCorrections(id);
-  const review = transcript ? reviewList(transcript, verification, summary?.crossCheck, corrections) : [];
-  return {job, transcript, summary, verification, corrections, review};
 }
 
 async function createJob(request, env, ctx, deps, jobs) {
@@ -178,11 +167,11 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
     }
     if (path === 'usage' && method === 'GET') {
       const usage = await createD1Usage(env.DB, config.dailyLimits, {...deps, budget: config.budget}).snapshot();
-      return json({usage, keys: keyStatus(await loadProviderKeys(env))});
+      return json({usage, keys: await registeredKeys(env)});
     }
 
     const match = path.match(JOB_PATH);
-    if (match && !match[2] && method === 'GET') return json(await jobDetail(jobs, match[1]));
+    if (match && !match[2] && method === 'GET') return jsonText(await jobDetailText(jobs, match[1]));
     if (match && match[2] === '/analysis' && method === 'POST') {
       assertSameOrigin(request);
       const summary = await jobs.loadSummary(match[1]);
@@ -230,9 +219,9 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
       return json({crossCheck: (await jobs.loadSummary(match[1])).crossCheck, started: true, runner}, 202);
     }
     if (match && match[2] === '/export' && method === 'GET') {
-      const detail = await jobDetail(jobs, match[1]);
-      if (!detail.summary) throw new AppError('NOT_FOUND', 'summary not ready');
-      if (url.searchParams.get('format') === 'json') {
+      const asJson = url.searchParams.get('format') === 'json';
+      const detail = await exportDetail(jobs, match[1], {segments: asJson});
+      if (asJson) {
         return new Response(JSON.stringify(exportJson(detail), null, 2), {headers: {
           'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store',
           'content-disposition': `attachment; filename="summary-${detail.job.videoId ?? detail.job.id}.json"`}});

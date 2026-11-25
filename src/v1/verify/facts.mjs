@@ -44,10 +44,20 @@ function shownQualifier(fact, itemText) {
   return q === 'UNQUALIFIED' ? null : q;
 }
 
-export function verifyFact(fact, itemText, byId) {
+// Facts often share the same evidence window; cache = Map(source -> {squashed, numbers}) avoids redoing it.
+function evidence(source, cache) {
+  let hit = cache?.get(source);
+  if (!hit) {
+    hit = {squashed: squash(source), numbers: extractNumbers(source)};
+    cache?.set(source, hit);
+  }
+  return hit;
+}
+
+export function verifyFact(fact, itemText, byId, cache = null) {
   const source = evidenceText(fact, byId);
-  const quoteFound = Boolean(fact.quote) && squash(source).includes(squash(fact.quote));
-  const numbers = extractNumbers(source);
+  const {squashed, numbers} = evidence(source, cache);
+  const quoteFound = Boolean(fact.quote) && squashed.includes(squash(fact.quote));
   const matches = numbers.filter(n => sameAtPrecision(n.value, fact.value));
   const base = {surface: fact.surface, value: fact.value, unit: fact.unit, segmentIds: fact.segmentIds, quoteFound};
   if (!matches.length) {
@@ -93,9 +103,10 @@ export function verifySummary(summary, transcript) {
     ...(summary.analysis?.items ?? []).map((a, i) => [`analysis[${i}]`, a]),
   ];
   const items = [];
+  const cache = new Map();
   for (const [path, item] of containers) {
     const text = item.text ?? item.summary ?? '';
-    for (const fact of item.facts ?? []) items.push({path, ...verifyFact(fact, text, byId)});
+    for (const fact of item.facts ?? []) items.push({path, ...verifyFact(fact, text, byId, cache)});
     for (const extra of uncovered(text, item.facts ?? [])) items.push({path, ...extra});
   }
   const count = status => items.filter(i => i.status === status).length;

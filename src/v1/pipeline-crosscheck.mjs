@@ -6,7 +6,8 @@ import {transcribeClip} from './providers/gemini.mjs';
 import {safeReason} from './providers/http.mjs';
 import {withRetry} from './retry.mjs';
 import {compareFacts, CROSS_VERSION, planWindows} from './verify/crosscheck.mjs';
-import {verifySummary} from './verify/facts.mjs';
+import {checksCurrent, currentVerification} from './checks.mjs';
+import {refreshChecks} from './detail.mjs';
 
 export async function runCrossCheckJob({jobId, env, step = inlineStep, deps = {}}) {
   const {fetchFn, sleep, jobs, usage, modelsFor, durable} = jobContext({env, step, deps});
@@ -16,7 +17,9 @@ export async function runCrossCheckJob({jobId, env, step = inlineStep, deps = {}
     if (!job?.url || !transcript || !summary) {
       throw new AppError('NOT_FOUND', 'video URL, transcript and summary required');
     }
-    return {job, transcript, summary, verification: verifySummary(summary, transcript)};
+    const stored = await jobs.loadChecks(jobId);
+    const checks = checksCurrent(stored) ? stored : await refreshChecks(jobs, jobId);
+    return {job, transcript, summary, verification: currentVerification(checks.verification, summary)};
   };
   try {
     const windows = await durable('cross-plan', async () => {

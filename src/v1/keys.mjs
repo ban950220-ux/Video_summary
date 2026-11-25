@@ -31,3 +31,20 @@ export async function loadProviderKeys(env) {
 export function keyStatus(keys) {
   return Object.fromEntries(Object.keys(PROVIDERS).map(p => [p, Boolean(keys[p])]));
 }
+
+// Which keys are registered, without decrypting any (the settings screen only shows yes/no).
+// One query; a vault row that exists but cannot be decrypted still shows as registered.
+export async function registeredKeys(env) {
+  const stored = new Set();
+  if (configuredMasterKey(env) && env?.DB) {
+    try {
+      const {results = []} = await env.DB.prepare(`SELECT provider FROM provider_credentials
+        WHERE owner_id = 'owner'`).all();
+      for (const row of results) stored.add(row.provider);
+    } catch {
+      // No vault table: fall back to Worker Secrets only.
+    }
+  }
+  return Object.fromEntries(Object.entries(PROVIDERS).map(([provider, secretName]) => [provider,
+    stored.has(provider) || (typeof env?.[secretName] === 'string' && env[secretName].length >= 8)]));
+}

@@ -41,6 +41,14 @@ export const V1_SCHEMA = Object.freeze([
     updated_at TEXT NOT NULL,
     PRIMARY KEY (job_id, segment_id)
   )`,
+  // Checks derived from a saved summary (numeric verification and the segments the review list needs),
+  // computed once in a Workflow step so reading a result stays within the Workers Free CPU limit.
+  `CREATE TABLE IF NOT EXISTS v1_checks (
+    job_id TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    checks_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS v1_usage (
     day TEXT NOT NULL,
     key TEXT NOT NULL,

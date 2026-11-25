@@ -3,6 +3,7 @@
 import {AppError} from './errors.mjs';
 import {safeReason} from './providers/http.mjs';
 import {analysisPlan, analyzeChunk, analyzeSingle, combineAnalysis, finalizeAnalysis} from './summary/analysis.mjs';
+import {refreshChecks} from './detail.mjs';
 import {inlineStep, jobContext} from './pipeline.mjs';
 
 export async function runAnalysisJob({jobId, env, step = inlineStep, deps = {}}) {
@@ -42,6 +43,7 @@ export async function runAnalysisJob({jobId, env, step = inlineStep, deps = {}})
       const [summary, transcript] = await Promise.all([jobs.loadSummary(jobId), jobs.loadTranscript(jobId)]);
       await jobs.saveSummary(jobId, {...summary, analysis: finalizeAnalysis({result, plan, calls, transcript})});
     });
+    await durable('analysis-checks', () => refreshChecks(jobs, jobId));
     return {status: 'DONE'};
   } catch (error) {
     const code = error instanceof AppError ? error.code : 'INTERNAL';

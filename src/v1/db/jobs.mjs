@@ -97,7 +97,7 @@ export function jobRepository(db, {now = () => new Date().toISOString(), newId =
     },
     async remove(id) {
       await ready();
-      for (const table of ['v1_summaries', 'v1_transcripts', 'v1_corrections']) {
+      for (const table of ['v1_summaries', 'v1_transcripts', 'v1_corrections', 'v1_checks']) {
         await db.prepare(`DELETE FROM ${table} WHERE job_id = ?`).bind(id).run();
       }
       const result = await db.prepare('DELETE FROM v1_jobs WHERE id = ?').bind(id).run();
@@ -145,6 +145,28 @@ export function jobRepository(db, {now = () => new Date().toISOString(), newId =
       await db.prepare(`INSERT INTO v1_summaries(job_id, version, summary_json, created_at) VALUES(?, ?, ?, ?)
         ON CONFLICT(job_id) DO UPDATE SET version = excluded.version, summary_json = excluded.summary_json,
         created_at = excluded.created_at`).bind(jobId, summary.version, JSON.stringify(summary), now()).run();
+    },
+    // Raw stored JSON, so a result can be returned without parsing and re-serializing the transcript.
+    async loadTranscriptRaw(jobId) {
+      await ready();
+      return db.prepare(`SELECT source, language, duration_sec, coverage_json, segments_json, legacy_job_id
+        FROM v1_transcripts WHERE job_id = ?`).bind(jobId).first();
+    },
+    async loadSummaryRaw(jobId) {
+      await ready();
+      const row = await db.prepare('SELECT summary_json FROM v1_summaries WHERE job_id = ?').bind(jobId).first();
+      return row?.summary_json ?? null;
+    },
+    async saveChecks(jobId, checks) {
+      await ready();
+      await db.prepare(`INSERT INTO v1_checks(job_id, version, checks_json, created_at) VALUES(?, ?, ?, ?)
+        ON CONFLICT(job_id) DO UPDATE SET version = excluded.version, checks_json = excluded.checks_json,
+        created_at = excluded.created_at`).bind(jobId, checks.version, JSON.stringify(checks), now()).run();
+    },
+    async loadChecks(jobId) {
+      await ready();
+      const row = await db.prepare('SELECT checks_json FROM v1_checks WHERE job_id = ?').bind(jobId).first();
+      return row ? parse(row.checks_json) : null;
     },
     async loadSummary(jobId) {
       await ready();

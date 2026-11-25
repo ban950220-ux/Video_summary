@@ -7,6 +7,7 @@ import {readConfig} from './config.mjs';
 import {jobRepository, STATUS} from './db/jobs.mjs';
 import {createD1Usage} from './db/usage.mjs';
 import {AppError} from './errors.mjs';
+import {refreshChecks} from './detail.mjs';
 import {loadProviderKeys} from './keys.mjs';
 import {DEFAULT_GEMINI_MODEL} from './providers/gemini.mjs';
 import {safeReason} from './providers/http.mjs';
@@ -145,6 +146,10 @@ export async function runSummaryJob({jobId, env, step = inlineStep, deps = {}}) 
     await durable('save', async () => {
       const transcript = await jobs.loadTranscript(jobId);
       await jobs.saveSummary(jobId, finalizeSummary({final, transcript, plan, calls}));
+    });
+    // Its own step: verification of a long video is the heaviest CPU work after the model calls.
+    await durable('checks', async () => {
+      await refreshChecks(jobs, jobId);
       await jobs.update(jobId, {status: STATUS.DONE, errorCode: null});
     });
     return {status: STATUS.DONE, source: acquired.source};

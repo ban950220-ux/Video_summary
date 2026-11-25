@@ -11,6 +11,11 @@ export function json(body, status = 200) {
   return new Response(JSON.stringify(body), {status, headers: JSON_HEADERS});
 }
 
+// A body that is already JSON text (stored rows passed through without re-serializing).
+export function jsonText(text, status = 200) {
+  return new Response(text, {status, headers: JSON_HEADERS});
+}
+
 export function errorResponse(error) {
   const {status, body} = toPublicError(error);
   return json(body, status);

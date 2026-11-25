@@ -122,7 +122,8 @@ test('v0.7 tables are untouched; v1 tables are added', async () => {
   const after = db.prepare("SELECT name, sql FROM sqlite_master WHERE instr(name, 'v1_') = 0 ORDER BY name").all();
   assert.deepEqual(after, before);
   const v1 = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'v1_%' ORDER BY name").all();
-  assert.deepEqual(v1.map(r => r.name), ['v1_corrections', 'v1_jobs', 'v1_summaries', 'v1_transcripts', 'v1_usage']);
+  assert.deepEqual(v1.map(r => r.name), ['v1_checks', 'v1_corrections', 'v1_jobs', 'v1_summaries', 'v1_transcripts',
+    'v1_usage']);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM jobs').get().n, 0);
 });
 
@@ -187,7 +188,7 @@ test('a long job resumes after a failed step without redoing finished steps', as
   const second = await runSummaryJob({jobId: job.id, env, step: durableStep(cache, ran),
     deps: {fetchFn: longCaptions, sleep: async () => {}}});
   assert.equal(second.status, 'DONE');
-  assert.deepEqual(ran, ['map-3', 'map-4', 'map-5', 'map-6', 'map-7', 'map-8', 'reduce', 'save']);
+  assert.deepEqual(ran, ['map-3', 'map-4', 'map-5', 'map-6', 'map-7', 'map-8', 'reduce', 'save', 'checks']);
   assert.equal(count.supadata, 1);
   assert.equal(count.gemini - geminiAfterFirst, 7);
   const summary = await jobs.loadSummary(job.id);
