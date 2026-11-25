@@ -117,6 +117,7 @@ test('CPU measurement prints aggregates only and never the account ID or raw res
   };
   const result = await measure({token: 'tok-secret', account, hours: 2, fetchFn, now: Date.UTC(2026, 10, 25, 2)});
   assert.equal(JSON.parse(sent.init.body).variables.since, '2026-11-25T00:00:00.000Z');
+  assert.match(JSON.parse(sent.init.body).query, /dimensions \{ datetimeFifteenMinutes status \}/);
   assert.equal(result.exceededResources, 4);
   assert.equal(result.maxCpuMs, 2050);
   const text = report(result, 2);

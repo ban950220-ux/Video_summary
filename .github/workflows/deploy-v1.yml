@@ -21,6 +21,12 @@ on:
         required: false
         type: string
         default: "24"
+      bucket:
+        description: "measure일 때만: 묶음 단위"
+        required: false
+        type: choice
+        default: fifteen
+        options: [fifteen, minute]
 
 permissions:
   contents: read
@@ -47,6 +53,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           HOURS: ${{ inputs.hours }}
+          BUCKET: ${{ inputs.bucket }}
         run: |
           set -o pipefail
           node scripts/v1-measure-cpu.mjs | tee -a "$GITHUB_STEP_SUMMARY"

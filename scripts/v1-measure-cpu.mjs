@@ -6,12 +6,16 @@ const ENDPOINT = 'https://api.cloudflare.com/client/v4/graphql';
 export const WORKER = 'holy-rice-b914';
 export const FREE_CPU_MS = 10;
 
-export function buildQuery() {
+// bucket: 'datetimeFifteenMinutes' (default) or 'datetimeMinute' to separate flows run minutes apart.
+export const BUCKETS = ['datetimeFifteenMinutes', 'datetimeMinute'];
+
+export function buildQuery(bucket = BUCKETS[0]) {
+  if (!BUCKETS.includes(bucket)) throw new Error('unknown bucket');
   return `query ($account: String!, $script: String!, $since: Time!) {
   viewer { accounts(filter: {accountTag: $account}) {
     workersInvocationsAdaptive(limit: 1000,
-      filter: {scriptName: $script, datetime_geq: $since}, orderBy: [datetimeFifteenMinutes_ASC]) {
-      dimensions { datetimeFifteenMinutes status }
+      filter: {scriptName: $script, datetime_geq: $since}, orderBy: [${bucket}_ASC]) {
+      dimensions { ${bucket} status }
       sum { requests errors subrequests }
       quantiles { cpuTimeP50 cpuTimeP75 cpuTimeP99 }
       max { cpuTime }
@@ -23,7 +27,7 @@ const ms = micro => Number((Number(micro ?? 0) / 1000).toFixed(1));
 // rows: workersInvocationsAdaptive groups. Returns printable buckets and per-status totals.
 export function summarize(rows) {
   const buckets = rows.map(r => ({
-    time: String(r.dimensions.datetimeFifteenMinutes).slice(5, 16).replace('T', ' '),
+    time: String(r.dimensions.datetimeFifteenMinutes ?? r.dimensions.datetimeMinute).slice(5, 16).replace('T', ' '),
     status: r.dimensions.status,
     requests: r.sum.requests,
     subrequests: r.sum.subrequests,
@@ -45,7 +49,7 @@ export function report({buckets, byStatus, exceededResources, maxCpuMs}, hours) 
   const lines = [`Worker ${WORKER}, last ${hours}h (UTC). CPU in ms, Free limit ${FREE_CPU_MS}ms.`, '',
     `max CPU: ${maxCpuMs}ms · exceededResources: ${exceededResources}`, '', 'By status:'];
   for (const [status, s] of Object.entries(byStatus)) {
-    lines.push(`- ${status}: ${s.requests} requests, max ${s.max}ms, 15-min buckets at/over limit: ${s.bucketsOverLimit}`);
+    lines.push(`- ${status}: ${s.requests} requests, max ${s.max}ms, buckets at/over limit: ${s.bucketsOverLimit}`);
   }
   lines.push('', 'time(UTC)   | status | req | subreq | p50 | p75 | p99 | max');
   for (const b of buckets) {
@@ -61,11 +65,11 @@ export function safeError(message, account) {
   return String(message ?? 'unknown error').split(account).join('<account>').slice(0, 200);
 }
 
-export async function measure({token, account, hours = 24, fetchFn = fetch, now = Date.now()}) {
+export async function measure({token, account, hours = 24, bucket = BUCKETS[0], fetchFn = fetch, now = Date.now()}) {
   const since = new Date(now - hours * 3_600_000).toISOString();
   const response = await fetchFn(ENDPOINT, {method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-    body: JSON.stringify({query: buildQuery(), variables: {account, script: WORKER, since}})});
+    body: JSON.stringify({query: buildQuery(bucket), variables: {account, script: WORKER, since}})});
   const body = await response.json().catch(() => null);
   if (!response.ok || body?.errors?.length) {
     const reason = body?.errors?.map(e => e.message).join('; ') ?? `HTTP ${response.status}`;
@@ -79,7 +83,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const hours = Math.min(168, Math.max(1, Number(process.env.HOURS) || 24));
   if (!token || !account) { console.error('Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID'); process.exit(1); }
   try {
-    console.log(report(await measure({token, account, hours}), hours));
+    const bucket = process.env.BUCKET === 'minute' ? BUCKETS[1] : BUCKETS[0];
+    console.log(report(await measure({token, account, hours, bucket}), hours));
   } catch (error) {
     console.error(error.message);
     process.exit(1);
