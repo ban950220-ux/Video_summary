@@ -29,10 +29,14 @@ function coverageText(transcript) {
   return '전사 범위 확인 불가';
 }
 
+// The result API sends only cited and uncertain segments plus counts (transcript.partial).
+const uncertainCount = transcript => transcript?.counts?.uncertain
+  ?? (transcript?.segments ?? []).filter(s => s.flags?.some(f => f !== 'CORRECTED')).length;
+
 function uncertainLine(transcript) {
-  const flagged = (transcript?.segments ?? []).filter(s => s.flags?.length);
-  if (!flagged.length) return null;
-  return h('p', {class: 'warn'}, `전사가 불확실한 구간 ${flagged.length}개 (환각·낮은 확신·반복 등). 근거 구간에 ⚠로 표시됩니다.`);
+  const flagged = uncertainCount(transcript);
+  if (!flagged) return null;
+  return h('p', {class: 'warn'}, `전사가 불확실한 구간 ${flagged}개 (환각·낮은 확신·반복 등). 근거 구간에 ⚠로 표시됩니다.`);
 }
 
 function steps(status) {
@@ -218,7 +222,7 @@ function glance(transcript, verification, crossCheck, review) {
   if (review.length) {
     chips.push(h('a', {class: 'badge ai', href: '#', 'data-open': 'review'}, `검토할 곳 ${review.length}`));
   }
-  const flagged = (transcript?.segments ?? []).filter(s => s.flags?.some(f => f !== 'CORRECTED')).length;
+  const flagged = uncertainCount(transcript);
   if (flagged) chips.push(h('span', {class: 'badge ai'}, `전사 불확실 ${flagged}`));
   chips.filter(chip => chip.dataset.open).forEach(opener);
   return chips.length ? h('p', {class: 'row', id: 'glance'}, chips) : null;

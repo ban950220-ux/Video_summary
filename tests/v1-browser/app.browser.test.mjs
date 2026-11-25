@@ -68,8 +68,10 @@ function mockApi(req, res, url, body) {
         path: 'keyPoints[0]'}]} : null;
     const review = done ? [{segmentId: 5, startMs: 240_000, text: '원문 문장 5', corrected: null,
       reasons: ['숫자 불일치: 1003개사']}] : [];
-    return send(res, 200, {job, verification, review, transcript: done ? {source: 'supadata-native', segments,
-      coverage: {complete: true, firstSec: 0, lastSec: 305}} : null, summary: done ? summary : null});
+    // Like production: only cited segments, with counts for the whole transcript.
+    return send(res, 200, {job, verification, review, transcript: done ? {source: 'supadata-native', partial: true,
+      segments, counts: {segments: 900, uncertain: 7}, coverage: {complete: true, firstSec: 0, lastSec: 305}} : null,
+    summary: done ? summary : null});
   }
   if (url.pathname === '/api/v1/jobs' && req.method === 'GET') {
     const q = url.searchParams.get('q') ?? '';
@@ -146,7 +148,9 @@ for (const [name, viewport] of [['desktop', {width: 1280, height: 900}], ['phone
     assert.match(await p.textContent('h1'), /<img src=x/);
     assert.equal(await p.evaluate(() => window.__xss), undefined);
     assert.match(await p.textContent('main'), /YouTube 기존 자막/);
-    assert.deepEqual(await p.$$eval('#glance .badge', els => els.map(e => e.textContent)), ['숫자 ⚠ 1/2', '검토할 곳 1']);
+    assert.match(await p.textContent('main'), /전사가 불확실한 구간 7개/);
+    assert.deepEqual(await p.$$eval('#glance .badge', els => els.map(e => e.textContent)),
+      ['숫자 ⚠ 1/2', '검토할 곳 1', '전사 불확실 7']);
     assert.equal(await p.$eval('#verification', el => el.open), false);
     // The key point whose number failed the check is marked; the mark opens the check card without leaving.
     assert.equal(await p.$$eval('#points .numflag', els => els.length), 1);

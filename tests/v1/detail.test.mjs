@@ -47,7 +47,13 @@ test('result read: same shape as before, verification from stored checks, review
   const checks = await jobs.loadChecks(job.id);
   assert.equal(checks.version, CHECKS_VERSION);
   assert.deepEqual(first.verification, verifySummary(summary, transcript));
-  assert.deepEqual(first.transcript.segments, transcript.segments);
+  // Only cited and uncertain segments by default; every segment on request.
+  assert.equal(first.transcript.partial, true);
+  assert.deepEqual(first.transcript.counts, {segments: 4, uncertain: 1});
+  assert.deepEqual(first.transcript.segments.map(s => s.id), [1, 2, 3, 4]);
+  const full = await (await get(`/api/v1/jobs/${job.id}?transcript=full`)).json();
+  assert.equal(full.transcript.partial, false);
+  assert.deepEqual(full.transcript.segments, transcript.segments);
   assert.deepEqual(first.transcript.coverage, transcript.coverage);
   assert.equal(first.transcript.source, SOURCES.UPLOAD);
   assert.deepEqual(first.summary, summary);

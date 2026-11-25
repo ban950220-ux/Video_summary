@@ -26,15 +26,23 @@ async function load(jobs, id) {
   return {job, transcriptRow, summaryText, summary, checks, verification, corrections, review};
 }
 
-const transcriptText = row => (row ? `{"source":${JSON.stringify(row.source)},`
-  + `"language":${JSON.stringify(row.language ?? null)},"durationSec":${JSON.stringify(row.duration_sec ?? null)},`
-  + `"coverage":${row.coverage_json || '{}'},"segments":${row.segments_json || '[]'},`
-  + `"legacyJobId":${JSON.stringify(row.legacy_job_id ?? null)}}` : 'null');
+// The result screen shows only the segments cited as evidence and the uncertain ones; those are kept in
+// the checks. full=true sends every segment (stored text passed through, still no parse).
+function transcriptText(row, checks, full) {
+  if (!row) return 'null';
+  const head = `{"source":${JSON.stringify(row.source)},"language":${JSON.stringify(row.language ?? null)},`
+    + `"durationSec":${JSON.stringify(row.duration_sec ?? null)},"coverage":${row.coverage_json || '{}'},`
+    + `"legacyJobId":${JSON.stringify(row.legacy_job_id ?? null)},`;
+  if (full) return `${head}"partial":false,"segments":${row.segments_json || '[]'}}`;
+  return `${head}"partial":true,"counts":${JSON.stringify(checks?.counts ?? null)},`
+    + `"segments":${JSON.stringify(checks?.segments ?? [])}}`;
+}
 
-// JSON text with the same shape as {job, transcript, summary, verification, corrections, review}.
-export async function jobDetailText(jobs, id) {
+// JSON text of {job, transcript, summary, verification, corrections, review}. transcript.partial tells
+// whether segments holds every segment or only the cited/uncertain ones (with transcript.counts).
+export async function jobDetailText(jobs, id, {full = false} = {}) {
   const d = await load(jobs, id);
-  return `{"job":${JSON.stringify(d.job)},"transcript":${transcriptText(d.transcriptRow)},`
+  return `{"job":${JSON.stringify(d.job)},"transcript":${transcriptText(d.transcriptRow, d.checks, full)},`
     + `"summary":${d.summaryText ?? 'null'},"verification":${JSON.stringify(d.verification)},`
     + `"corrections":${JSON.stringify(d.corrections)},"review":${JSON.stringify(d.review)}}`;
 }

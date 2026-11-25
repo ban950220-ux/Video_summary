@@ -171,7 +171,9 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
     }
 
     const match = path.match(JOB_PATH);
-    if (match && !match[2] && method === 'GET') return jsonText(await jobDetailText(jobs, match[1]));
+    if (match && !match[2] && method === 'GET') {
+      return jsonText(await jobDetailText(jobs, match[1], {full: url.searchParams.get('transcript') === 'full'}));
+    }
     if (match && match[2] === '/analysis' && method === 'POST') {
       assertSameOrigin(request);
       const summary = await jobs.loadSummary(match[1]);
