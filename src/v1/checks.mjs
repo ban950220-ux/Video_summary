@@ -4,7 +4,7 @@
 import {reviewList} from './corrections.mjs';
 import {VERIFY_VERSION, verifySummary} from './verify/facts.mjs';
 
-export const CHECKS_VERSION = `v1-checks-1/${VERIFY_VERSION}`;
+export const CHECKS_VERSION = `v1-checks-2/${VERIFY_VERSION}`;
 
 export function computeChecks(summary, transcript) {
   const verification = verifySummary(summary, transcript);
@@ -12,9 +12,15 @@ export function computeChecks(summary, transcript) {
   for (const segment of transcript.segments) if (segment.flags?.some(f => f !== 'CORRECTED')) ids.add(segment.id);
   // Cross-check windows are planned from these same verification items, so their segments are covered.
   for (const item of verification.items) for (const id of item.segmentIds ?? []) ids.add(id);
+  // Evidence sentences of the JSON export (conclusion, key points, analysis items).
+  for (const item of [summary.conclusion, ...summary.keyPoints, ...(summary.analysis?.items ?? [])]) {
+    for (const id of item?.segmentIds ?? []) ids.add(id);
+  }
   const segments = transcript.segments.filter(s => ids.has(s.id))
     .map(({id, startMs, text, flags}) => ({id, startMs, text, ...(flags ? {flags} : {})}));
-  return {version: CHECKS_VERSION, verification, segments};
+  const uncertain = transcript.segments.filter(s => s.flags?.some(f => f !== 'CORRECTED')).length;
+  return {version: CHECKS_VERSION, verification, segments,
+    counts: {segments: transcript.segments.length, uncertain}};
 }
 
 export const checksCurrent = checks => checks?.version === CHECKS_VERSION;

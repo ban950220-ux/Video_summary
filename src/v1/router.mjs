@@ -220,7 +220,7 @@ export async function routeV1(request, env = {}, ctx = null, deps = {}) {
     }
     if (match && match[2] === '/export' && method === 'GET') {
       const asJson = url.searchParams.get('format') === 'json';
-      const detail = await exportDetail(jobs, match[1], {segments: asJson});
+      const detail = await exportDetail(jobs, match[1]);
       if (asJson) {
         return new Response(JSON.stringify(exportJson(detail), null, 2), {headers: {
           'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store',

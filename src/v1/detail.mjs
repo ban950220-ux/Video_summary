@@ -23,7 +23,7 @@ async function load(jobs, id) {
   const verification = checks ? currentVerification(checks.verification, summary) : null;
   const review = checks ? await reviewFromChecks({checks, verification, summary, corrections,
     loadTranscript: () => jobs.loadTranscript(id)}) : [];
-  return {job, transcriptRow, summaryText, summary, verification, corrections, review};
+  return {job, transcriptRow, summaryText, summary, checks, verification, corrections, review};
 }
 
 const transcriptText = row => (row ? `{"source":${JSON.stringify(row.source)},`
@@ -39,13 +39,14 @@ export async function jobDetailText(jobs, id) {
     + `"corrections":${JSON.stringify(d.corrections)},"review":${JSON.stringify(d.review)}}`;
 }
 
-// Parsed detail for the exports. Only the JSON export needs the transcript segments.
-export async function exportDetail(jobs, id, {segments = false} = {}) {
+// Parsed detail for the exports. Neither parses the whole transcript: the JSON export cites only the
+// segments kept in the checks, with the transcript counts stored alongside.
+export async function exportDetail(jobs, id) {
   const d = await load(jobs, id);
   if (!d.summary) throw new AppError('NOT_FOUND', 'summary not ready');
   const row = d.transcriptRow;
   const transcript = row ? {source: row.source, language: row.language, durationSec: row.duration_sec,
-    coverage: JSON.parse(row.coverage_json || '{}'), segments: segments ? JSON.parse(row.segments_json || '[]') : [],
+    coverage: JSON.parse(row.coverage_json || '{}'), segments: d.checks?.segments ?? [], counts: d.checks?.counts,
     legacyJobId: row.legacy_job_id} : null;
   return {job: d.job, transcript, summary: d.summary, verification: d.verification, corrections: d.corrections,
     review: d.review};

@@ -53,8 +53,9 @@ test('result read: same shape as before, verification from stored checks, review
   assert.deepEqual(first.summary, summary);
   assert.deepEqual(first.review.map(r => [r.segmentId, r.reasons]), [
     [2, ['전사 불확실(LOW_CONFIDENCE)']], [3, ['숫자 불일치: 1003억 원']]]);
-  // Only segments the review needs are kept in the checks, not the whole transcript.
-  assert.deepEqual(checks.segments.map(s => s.id), [1, 2, 3]);
+  // Only segments the review and the JSON export cite are kept in the checks, not the whole transcript.
+  assert.deepEqual(checks.segments.map(s => s.id), [1, 2, 3, 4]);
+  assert.deepEqual(checks.counts, {segments: 4, uncertain: 1});
 });
 
 test('a correction outside the stored segments still shows in the review', async () => {
@@ -78,6 +79,11 @@ test('stale analysis items are dropped; exports use the stored checks', async ()
   const md = await (await get(`/api/v1/jobs/${job.id}/export`)).text();
   assert.match(md, /영업이익 1003억 원 \(근거 #3\) ⚠ 숫자 확인 필요/);
   const out = await (await get(`/api/v1/jobs/${job.id}/export?format=json`)).json();
+  // Same as an export built from the whole transcript (apart from the export time).
+  const {exportJson} = await import('../../src/v1/export-json.mjs');
+  const full = exportJson({job: await jobs.get(job.id), transcript: await jobs.loadTranscript(job.id),
+    summary: await jobs.loadSummary(job.id), verification: detail.verification, corrections: {}});
+  assert.deepEqual({...out, exportedAt: null}, JSON.parse(JSON.stringify({...full, exportedAt: null})));
   assert.equal(out.transcript.segments, 4);
   assert.equal(out.transcript.uncertainSegments, 1);
 });

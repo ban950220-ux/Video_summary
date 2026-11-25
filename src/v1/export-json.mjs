@@ -49,8 +49,10 @@ export function exportJson({job, transcript, summary, verification, corrections 
     transcript: {
       source: transcript?.source ?? null,
       coverage: transcript?.coverage ?? null,
-      segments: transcript?.segments.length ?? 0,
-      uncertainSegments: (transcript?.segments ?? []).filter(s => s.flags?.some(f => f !== 'CORRECTED')).length,
+      // Counts come from the stored checks when the export reads only the segments it cites.
+      segments: transcript?.counts?.segments ?? transcript?.segments.length ?? 0,
+      uncertainSegments: transcript?.counts?.uncertain
+        ?? (transcript?.segments ?? []).filter(s => s.flags?.some(f => f !== 'CORRECTED')).length,
       pendingCorrections: Object.keys(corrections).length,
     },
     conclusion: statement('CONCLUSION', 'conclusion', {...summary.conclusion, attribution: 'INTERPRETATION'}),
