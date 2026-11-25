@@ -13,19 +13,13 @@ export async function refreshChecks(jobs, jobId) {
   return checks;
 }
 
-async function checksFor(jobs, id, summary) {
-  if (!summary) return null;
-  const checks = await jobs.loadChecks(id);
-  return checksCurrent(checks) ? checks : refreshChecks(jobs, id);
-}
-
 async function load(jobs, id) {
-  const job = await jobs.get(id);
-  if (!job) throw new AppError('NOT_FOUND');
-  const [transcriptRow, summaryText, corrections] = await Promise.all([jobs.loadTranscriptRaw(id),
-    jobs.loadSummaryRaw(id), jobs.loadCorrections(id)]);
+  const stored = await jobs.loadDetail(id);
+  if (!stored) throw new AppError('NOT_FOUND');
+  const {job, transcriptRow, summaryText, corrections} = stored;
   const summary = summaryText ? JSON.parse(summaryText) : null;
-  const checks = transcriptRow ? await checksFor(jobs, id, summary) : null;
+  let checks = null;
+  if (summary && transcriptRow) checks = checksCurrent(stored.checks) ? stored.checks : await refreshChecks(jobs, id);
   const verification = checks ? currentVerification(checks.verification, summary) : null;
   const review = checks ? await reviewFromChecks({checks, verification, summary, corrections,
     loadTranscript: () => jobs.loadTranscript(id)}) : [];

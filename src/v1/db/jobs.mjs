@@ -146,16 +146,26 @@ export function jobRepository(db, {now = () => new Date().toISOString(), newId =
         ON CONFLICT(job_id) DO UPDATE SET version = excluded.version, summary_json = excluded.summary_json,
         created_at = excluded.created_at`).bind(jobId, summary.version, JSON.stringify(summary), now()).run();
     },
-    // Raw stored JSON, so a result can be returned without parsing and re-serializing the transcript.
-    async loadTranscriptRaw(jobId) {
+    // Everything a result read needs in ONE query: each D1 call costs about 1ms of Worker CPU, which
+    // matters under the Workers Free 10ms limit. Transcript and summary stay as stored JSON text.
+    async loadDetail(jobId) {
       await ready();
-      return db.prepare(`SELECT source, language, duration_sec, coverage_json, segments_json, legacy_job_id
-        FROM v1_transcripts WHERE job_id = ?`).bind(jobId).first();
-    },
-    async loadSummaryRaw(jobId) {
-      await ready();
-      const row = await db.prepare('SELECT summary_json FROM v1_summaries WHERE job_id = ?').bind(jobId).first();
-      return row?.summary_json ?? null;
+      const row = await db.prepare(`SELECT j.*, t.source AS t_source, t.language AS t_language,
+        t.duration_sec AS t_duration_sec, t.coverage_json AS t_coverage_json, t.segments_json AS t_segments_json,
+        t.legacy_job_id AS t_legacy_job_id, s.summary_json AS s_summary_json, c.checks_json AS c_checks_json,
+        (SELECT json_group_object(segment_id, text) FROM v1_corrections WHERE job_id = j.id) AS corrections_json
+        FROM v1_jobs j LEFT JOIN v1_transcripts t ON t.job_id = j.id LEFT JOIN v1_summaries s ON s.job_id = j.id
+        LEFT JOIN v1_checks c ON c.job_id = j.id WHERE j.id = ?`).bind(jobId).first();
+      if (!row) return null;
+      return {
+        job: jobFromRow(row),
+        transcriptRow: row.t_source === null || row.t_source === undefined ? null : {source: row.t_source,
+          language: row.t_language, duration_sec: row.t_duration_sec, coverage_json: row.t_coverage_json,
+          segments_json: row.t_segments_json, legacy_job_id: row.t_legacy_job_id},
+        summaryText: row.s_summary_json ?? null,
+        checks: row.c_checks_json ? parse(row.c_checks_json) : null,
+        corrections: parse(row.corrections_json, {}),
+      };
     },
     async saveChecks(jobId, checks) {
       await ready();

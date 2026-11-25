@@ -96,3 +96,17 @@ test('schema setup: one lookup when tables exist, shared by parallel loads, crea
   await ensureV1Schema(again);
   assert.equal(other.length, 1);
 });
+
+test('a result read with stored checks is one D1 query (each query costs Worker CPU)', async () => {
+  const {jobs, job, db} = await seed();
+  await refreshChecks(jobs, job.id);
+  await get(`/api/v1/jobs/${job.id}`); // schema lookup happens once per instance
+  const queries = [];
+  env.env.DB = {prepare: sql => { queries.push(sql); return db.prepare(sql); }};
+  const res = await get(`/api/v1/jobs/${job.id}`);
+  assert.equal(res.status, 200);
+  assert.equal(queries.length, 2); // a new binding object counts as a new instance: schema lookup + read
+  queries.length = 0;
+  await get(`/api/v1/jobs/${job.id}`);
+  assert.equal(queries.length, 1);
+});
