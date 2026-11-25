@@ -57,10 +57,24 @@ export const V1_SCHEMA = Object.freeze([
   )`,
 ]);
 
-const ready = new WeakSet();
+export const V1_OBJECTS = Object.freeze(V1_SCHEMA.map(sql => /IF NOT EXISTS (\w+)/.exec(sql)[1]));
 
-export async function ensureV1Schema(db) {
-  if (ready.has(db)) return;
-  for (const sql of V1_SCHEMA) await db.prepare(sql).run();
-  ready.add(db);
+// Once per Worker instance and database. One lookup when everything exists (the normal case); the
+// CREATE statements run only when something is missing. The promise is shared, so parallel loads in one
+// request do not each start the check (they did: 4 x 9 statements on a cold result read).
+const ready = new WeakMap();
+
+export function ensureV1Schema(db) {
+  if (!ready.has(db)) {
+    const run = (async () => {
+      const marks = V1_OBJECTS.map(() => '?').join(', ');
+      const {results = []} = await db.prepare(`SELECT name FROM sqlite_master WHERE name IN (${marks})`)
+        .bind(...V1_OBJECTS).all();
+      if (results.length === V1_OBJECTS.length) return;
+      for (const sql of V1_SCHEMA) await db.prepare(sql).run();
+    })();
+    run.catch(() => ready.delete(db));
+    ready.set(db, run);
+  }
+  return ready.get(db);
 }

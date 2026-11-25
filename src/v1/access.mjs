@@ -28,6 +28,18 @@ async function jwks(domain, kid, fetcher, nowMs) {
   return keys;
 }
 
+// Imported keys are reused while the key set is cached (importing an RSA key on every request costs CPU).
+const importedKeys = new Map();
+async function publicKey(jwk) {
+  const id = `${jwk.kid}:${jwk.n}`;
+  if (!importedKeys.has(id)) {
+    if (importedKeys.size > 20) importedKeys.clear();
+    importedKeys.set(id, await crypto.subtle.importKey('jwk', {kty: 'RSA', n: jwk.n, e: jwk.e, ext: true},
+      {name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256'}, false, ['verify']));
+  }
+  return importedKeys.get(id);
+}
+
 const CLIENT_ID = /^[0-9a-f]{32}\.access$/;
 
 export function serviceTokenConfigured(env) {
@@ -64,8 +76,7 @@ export async function verifyV1Access(request, env, {fetcher = fetch, nowMs = Dat
     if (!owner && !service && !runner && !reader) throw Error('NOT_ALLOWED');
     const jwk = (await jwks(env.ACCESS_TEAM_DOMAIN, header.kid, fetcher, nowMs)).find(k => k.kid === header.kid);
     if (!jwk) throw Error('UNKNOWN_KEY');
-    const key = await crypto.subtle.importKey('jwk', {kty: 'RSA', n: jwk.n, e: jwk.e, ext: true},
-      {name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256'}, false, ['verify']);
+    const key = await publicKey(jwk);
     const ok = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, base64UrlBytes(parts[2]),
       encoder.encode(`${parts[0]}.${parts[1]}`));
     if (!ok) throw Error('SIGNATURE');

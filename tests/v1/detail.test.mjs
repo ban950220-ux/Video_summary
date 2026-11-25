@@ -81,3 +81,18 @@ test('stale analysis items are dropped; exports use the stored checks', async ()
   assert.equal(out.transcript.segments, 4);
   assert.equal(out.transcript.uncertainSegments, 1);
 });
+
+test('schema setup: one lookup when tables exist, shared by parallel loads, creates when missing', async () => {
+  const {ensureV1Schema, V1_OBJECTS} = await import('../../src/v1/db/schema.mjs');
+  const raw = memoryDb();
+  const base = d1(raw);
+  const seen = [];
+  const db = {prepare: sql => { seen.push(sql.trim().split(/\s+/).slice(0, 2).join(' ')); return base.prepare(sql); }};
+  await Promise.all([ensureV1Schema(db), ensureV1Schema(db), ensureV1Schema(db)]);
+  assert.equal(seen.filter(s => s === 'SELECT name').length, 1);
+  assert.equal(seen.filter(s => s.startsWith('CREATE')).length, V1_OBJECTS.length);
+  const other = [];
+  const again = {prepare: sql => { other.push(sql); return base.prepare(sql); }};
+  await ensureV1Schema(again);
+  assert.equal(other.length, 1);
+});
