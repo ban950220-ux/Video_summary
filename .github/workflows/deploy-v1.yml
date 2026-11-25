@@ -7,15 +7,20 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "check = 토큰·D1 확인과 배포 리허설만 (배포 안 함) / deploy = 실제 배포"
+        description: "check = 배포 리허설만 / deploy = 실제 배포 / measure = CPU 사용량 조회만 (읽기 전용)"
         required: true
         type: choice
         default: check
-        options: [check, deploy]
+        options: [check, deploy, measure]
       confirm:
         description: "deploy일 때만: Worker 이름 holy-rice-b914 를 입력하세요"
         required: false
         type: string
+      hours:
+        description: "measure일 때만: 최근 몇 시간을 볼지 (1~168)"
+        required: false
+        type: string
+        default: "24"
 
 permissions:
   contents: read
@@ -25,7 +30,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Read-only: aggregate CPU numbers of the production Worker from Cloudflare analytics. The token needs
+  # "Account Analytics: Read". The script never prints the account ID or the raw response. It lives in
+  # this workflow because a workflow file that is not on the default branch cannot be started by hand.
+  measure:
+    if: inputs.mode == 'measure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+      - name: Query analytics
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          HOURS: ${{ inputs.hours }}
+        run: |
+          set -o pipefail
+          node scripts/v1-measure-cpu.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+
   deploy:
+    if: inputs.mode != 'measure'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

@@ -1,6 +1,6 @@
 // Reads CPU time of the production Worker from Cloudflare's account analytics (GraphQL) and prints
 // only aggregate numbers: per-status totals and the 15-minute buckets. Never prints the account ID,
-// the token or the raw API response. Used by .github/workflows/measure-cpu.yml.
+// the token or the raw API response. Used by the "measure" mode of .github/workflows/deploy-v1.yml.
 // Needs a token with "Account Analytics: Read". Values appear 1-2 minutes after the requests.
 const ENDPOINT = 'https://api.cloudflare.com/client/v4/graphql';
 export const WORKER = 'holy-rice-b914';

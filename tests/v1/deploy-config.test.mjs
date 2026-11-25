@@ -126,7 +126,9 @@ test('CPU measurement prints aggregates only and never the account ID or raw res
   const denied = async () => new Response(JSON.stringify({errors: [{message: `not authorized for ${account}`}]}));
   await assert.rejects(measure({token: 't', account, fetchFn: denied}), error => !error.message.includes(account)
     && /not authorized/.test(error.message));
-  const workflow = read('.github/workflows/measure-cpu.yml');
-  assert.match(workflow, /^on:\n {2}workflow_dispatch:/m);
-  assert.doesNotMatch(workflow, /wrangler|whoami|echo .*CLOUDFLARE_ACCOUNT_ID/);
+  const workflow = read('.github/workflows/deploy-v1.yml');
+  const job = workflow.split('\n  measure:\n')[1].split('\n  deploy:\n')[0];
+  assert.match(job, /if: inputs\.mode == 'measure'/);
+  assert.doesNotMatch(job, /wrangler|whoami|echo/);
+  assert.match(workflow, /\n  deploy:\n    if: inputs\.mode != 'measure'/);
 });
