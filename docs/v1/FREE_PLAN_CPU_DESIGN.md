@@ -1,4 +1,6 @@
-# Workers Free 한도 대응 설계 (사용자 확인 전)
+# Workers Free 한도 대응 설계
+
+> 상태(2026-11-26): 사용자 승인 후 1~5단계 진행 완료. 결과와 결정은 `docs/v1/PROGRESS.md`의 "Workers Free 한도 대응" 절에 있다. 남은 일: 요약 Workflow 수정 효과를 다음 실제 요약 때 측정.
 
 작성 2026-11-24. 근거: 사용자가 전달한 인계 문서(PORTFLOW 세션 작성, 2026-11-25자)와 Cloudflare 공식 한도 문서(Workers 2026-11-19, Workflows 2026-11-10 수정본).
 

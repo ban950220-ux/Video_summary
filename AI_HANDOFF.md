@@ -1,6 +1,6 @@
 # AI 인수인계
 
-마지막 갱신: 2026-11-21
+마지막 갱신: 2026-11-26
 
 ## 지금 상태
 
@@ -10,6 +10,19 @@
   - 설계: `docs/v1/DESIGN.md`
   - 숫자 검증 설계: `docs/v1/NUMERIC_VERIFICATION_DESIGN.md`
 - 현재 단계는 `docs/v1/PROGRESS.md`의 마지막 항목을 본다.
+
+## Cloudflare Workers Free 한도 (2026-11-26)
+
+- 계정은 Workers Free다. 요청 1건과 Workflow 단계 1개마다 CPU 10ms 한도가 있다.
+- 대응 경과와 측정값은 `docs/v1/PROGRESS.md`의 "Workers Free 한도 대응" 절, 설계는 `docs/v1/FREE_PLAN_CPU_DESIGN.md`.
+- 측정 방법: 수동 워크플로 "Deploy v1 (manual)"의 `measure` 모드(읽기 전용, `hours`와 `bucket` 입력).
+- 지킬 것:
+  - 결과 조회는 D1 조회 1번(`jobs.loadDetail`)으로 읽는다.
+  - 숫자 검증은 저장된 `v1_checks`를 쓴다(요약 저장 뒤 `checks` 단계에서 계산).
+  - 요청 처리 중에 전사 전체를 파싱하지 않는다.
+  - 경로를 새로 만들 때 D1 호출 수(1번 ≈ CPU 1ms)를 줄인다.
+- 사용자 결정: 새 인스턴스 첫 요청의 가끔 생기는 초과(10~12ms)는 수용한다. 끊긴 요청(`exceededResources`)이 생기면 다음 대안을 검토한다.
+- 남은 일: 사용자가 다음에 요약을 돌리면 그 시각의 `measure` 값으로 Workflow CPU를 수정 전(합계 116.7ms, 단계 평균 9.7ms)과 비교한다.
 
 ## Gemini 비용 (2026-11-21 결정)
 
